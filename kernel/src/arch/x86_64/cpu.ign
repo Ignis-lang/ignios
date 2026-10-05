@@ -13,4 +13,10 @@ export namespace Cpu {
       }
     }
   }
+
+  /// Tells the processor it is spinning in a busy-wait loop, which saves
+  /// power and avoids a memory-order pipeline flush when the loop exits.
+  function pause(): void {
+    asm () { pause }
+  }
 }

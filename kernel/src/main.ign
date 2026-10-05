@@ -2,13 +2,24 @@
 
 import Cpu from "./arch/x86_64/cpu";
 import Color, Console from "./console";
+import Keyboard from "./keyboard";
 import Limine from "./limine";
+import Ps2 from "./ps2";
 import Serial from "./serial";
 import _ from "./lib/mem";
 
 record PanicState {
   static mut active: boolean = false;
 }
+
+const BACKSPACE: u8 = 0x08;
+const NEWLINE: u8 = 0x0A;
+const FIRST_PRINTABLE: u8 = 0x20;
+const LAST_PRINTABLE: u8 = 0x7E;
+
+/// Bytes one input line can hold. It must equal the array size in
+/// `runTerminal`, which has to be an integer literal.
+const LINE_CAPACITY: u64 = 128;
 
 /// Reports the panic on COM1, and on the console once it is initialized, then
 /// stops the machine. A panic raised while reporting another one only reaches
@@ -100,10 +111,57 @@ function printBanner(framebuffer: *mut Limine::Framebuffer): void {
   Console::writeLine("");
 }
 
+/// Brings up the PS/2 keyboard and reports the result on the console.
+function initializeKeyboard(): boolean {
+  if (!Ps2::initialize()) {
+    Console::writeLine("keyboard: no PS/2 controller answered");
+    return false;
+  }
+
+  Console::writeLine("keyboard: PS/2, scancode set 1, US layout");
+  return true;
+}
+
 function printPrompt(): void {
   Console::setColors(Color::BRIGHT_GREEN, Color::BLACK);
   Console::write("> ");
   Console::setColors(Color::BRIGHT_WHITE, Color::BLACK);
+}
+
+/// Polls the keyboard forever and edits one line at a time: printable
+/// characters are echoed and stored, Backspace erases the last stored
+/// character but never the prompt, and Enter starts a new prompt. Input past
+/// LINE_CAPACITY and Tab are ignored. Interrupts are off, so the loop spins
+/// with `pause` instead of halting.
+function runTerminal(): void {
+  let mut line: u8[128];
+  let mut length: u64 = 0;
+
+  printPrompt();
+
+  while (true) {
+    if (!Ps2::hasKeyboardByte()) {
+      Cpu::pause();
+      continue;
+    }
+
+    let character: u8 = Keyboard::decode(Ps2::readKeyboardByte());
+
+    if (character == NEWLINE) {
+      Console::writeChar(NEWLINE);
+      length = 0;
+      printPrompt();
+    } else if (character == BACKSPACE) {
+      if (length > 0) {
+        length -= 1;
+        Console::writeChar(BACKSPACE);
+      }
+    } else if (character >= FIRST_PRINTABLE && character <= LAST_PRINTABLE && length < LINE_CAPACITY) {
+      line[length] = character;
+      length += 1;
+      Console::writeChar(character);
+    }
+  }
 }
 
 /// The ELF entry point. Limine jumps here in long mode on its own stack, with
@@ -121,7 +179,10 @@ function kmain(): void {
 
   Console::initialize(framebuffer);
   printBanner(framebuffer);
-  printPrompt();
 
-  Cpu::haltForever();
+  if (!initializeKeyboard()) {
+    Cpu::haltForever();
+  }
+
+  runTerminal();
 }

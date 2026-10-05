@@ -30,7 +30,7 @@ QEMU_FLAGS := -machine q35,accel=kvm:tcg -m 256M -no-reboot \
 	-drive if=pflash,unit=1,format=raw,file=$(OVMF_VARS_COPY) \
 	-drive format=raw,file=$(IMAGE)
 
-.PHONY: all kernel esp image run run-headless screenshot font clean
+.PHONY: all kernel esp image run run-headless screenshot keytest font clean
 
 all: image
 
@@ -86,6 +86,15 @@ run-headless: $(IMAGE) $(OVMF_VARS_COPY)
 # saves the framebuffer to build/screen.ppm and build/screen.png.
 screenshot: $(IMAGE) $(OVMF_VARS_COPY)
 	scripts/screenshot.sh $(SERIAL_LOG) $(SCREEN_PPM) $(HEADLESS_SECONDS) -- \
+		$(QEMU) $(QEMU_FLAGS) -display none -serial file:$(SERIAL_LOG)
+	pnmtopng $(SCREEN_PPM) > $(SCREEN_PNG)
+	@echo "wrote $(SCREEN_PNG)"
+
+# Boots headless, types a key sequence through the QEMU monitor once the
+# prompt appears, checks the echo in the serial log and saves the screen to
+# build/screen.png.
+keytest: $(IMAGE) $(OVMF_VARS_COPY)
+	scripts/keytest.sh $(SERIAL_LOG) $(SCREEN_PPM) $(HEADLESS_SECONDS) -- \
 		$(QEMU) $(QEMU_FLAGS) -display none -serial file:$(SERIAL_LOG)
 	pnmtopng $(SCREEN_PPM) > $(SCREEN_PNG)
 	@echo "wrote $(SCREEN_PNG)"

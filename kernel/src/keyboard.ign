@@ -1,0 +1,222 @@
+//! Scancode set 1 decoder with a US keyboard layout.
+//!
+//! `decode` takes the raw bytes the keyboard sends, in order, from whatever
+//! source reads them, and tracks the modifier keys between calls. It yields
+//! ASCII: printable characters, `\n` for Enter, `\t` for Tab and 0x08 for
+//! Backspace. Every other key, every release and every extended (0xE0) key
+//! but right Ctrl yields NONE.
+
+/// The decoder state, one `static mut` scalar per field: a `static mut`
+/// record cannot take a record literal initializer yet. Repro:
+/// odd/repros/static_mut_record_init.
+record KeyboardState {
+  static mut extended: boolean = false;
+  static mut pauseBytesLeft: u8 = 0;
+
+  static mut leftShift: boolean = false;
+  static mut rightShift: boolean = false;
+  static mut leftControl: boolean = false;
+  static mut rightControl: boolean = false;
+  static mut capsLock: boolean = false;
+  static mut capsLockHeld: boolean = false;
+}
+
+export namespace Keyboard {
+  /// What `decode` returns for a byte that produces no character.
+  const NONE: u8 = 0;
+
+  const BACKSPACE: u8 = 0x08;
+
+  const EXTENDED_PREFIX: u8 = 0xE0;
+  const PAUSE_PREFIX: u8 = 0xE1;
+  const RELEASE: u8 = 0x80;
+
+  /// The bytes that follow 0xE1 in the Pause sequence (E1 1D 45 E1 9D C5).
+  /// They are skipped so the 0x1D in them is not read as Ctrl.
+  const PAUSE_TRAILING_BYTES: u8 = 5;
+
+  const KEY_CONTROL: u8 = 0x1D;
+  const KEY_LEFT_SHIFT: u8 = 0x2A;
+  const KEY_RIGHT_SHIFT: u8 = 0x36;
+  const KEY_CAPS_LOCK: u8 = 0x3A;
+
+  /// Feeds one scancode byte and returns the character it completes, or
+  /// NONE.
+  function decode(scancode: u8): u8 {
+    if (KeyboardState::pauseBytesLeft > 0) {
+      KeyboardState::pauseBytesLeft -= 1;
+      return NONE;
+    }
+
+    if (scancode == PAUSE_PREFIX) {
+      KeyboardState::pauseBytesLeft = PAUSE_TRAILING_BYTES;
+      return NONE;
+    }
+
+    if (scancode == EXTENDED_PREFIX) {
+      KeyboardState::extended = true;
+      return NONE;
+    }
+
+    let released: boolean = (scancode & RELEASE) != 0;
+    let key: u8 = scancode & ~RELEASE;
+
+    if (KeyboardState::extended) {
+      KeyboardState::extended = false;
+
+      if (key == KEY_CONTROL) {
+        KeyboardState::rightControl = !released;
+      }
+
+      return NONE;
+    }
+
+    if (key == KEY_LEFT_SHIFT) {
+      KeyboardState::leftShift = !released;
+      return NONE;
+    }
+
+    if (key == KEY_RIGHT_SHIFT) {
+      KeyboardState::rightShift = !released;
+      return NONE;
+    }
+
+    if (key == KEY_CONTROL) {
+      KeyboardState::leftControl = !released;
+      return NONE;
+    }
+
+    if (key == KEY_CAPS_LOCK) {
+      if (!released && !KeyboardState::capsLockHeld) {
+        KeyboardState::capsLock = !KeyboardState::capsLock;
+      }
+
+      KeyboardState::capsLockHeld = !released;
+      return NONE;
+    }
+
+    if (released) {
+      return NONE;
+    }
+
+    return translate(key);
+  }
+
+  function isShiftHeld(): boolean {
+    return KeyboardState::leftShift || KeyboardState::rightShift;
+  }
+
+  /// Tracked for later key bindings; it does not change what `decode`
+  /// returns yet.
+  function isControlHeld(): boolean {
+    return KeyboardState::leftControl || KeyboardState::rightControl;
+  }
+
+  function isCapsLockOn(): boolean {
+    return KeyboardState::capsLock;
+  }
+
+  /// Applies Shift and Caps Lock to the pressed `key`. Caps Lock only
+  /// changes letters, and Shift reverses it for them.
+  function translate(key: u8): u8 {
+    let letter: u8 = unshifted(key);
+    let isLetter: boolean = letter >= ('a' as u8) && letter <= ('z' as u8);
+
+    if (isLetter && KeyboardState::capsLock != isShiftHeld()) {
+      return letter - 0x20;
+    }
+
+    if (!isLetter && isShiftHeld()) {
+      return shifted(key);
+    }
+
+    return letter;
+  }
+
+  /// The US layout character of a set 1 make code without modifiers.
+  function unshifted(key: u8): u8 {
+    return match (key) {
+      0x02 -> '1' as u8,
+      0x03 -> '2' as u8,
+      0x04 -> '3' as u8,
+      0x05 -> '4' as u8,
+      0x06 -> '5' as u8,
+      0x07 -> '6' as u8,
+      0x08 -> '7' as u8,
+      0x09 -> '8' as u8,
+      0x0A -> '9' as u8,
+      0x0B -> '0' as u8,
+      0x0C -> '-' as u8,
+      0x0D -> '=' as u8,
+      0x0E -> BACKSPACE,
+      0x0F -> '\t' as u8,
+      0x10 -> 'q' as u8,
+      0x11 -> 'w' as u8,
+      0x12 -> 'e' as u8,
+      0x13 -> 'r' as u8,
+      0x14 -> 't' as u8,
+      0x15 -> 'y' as u8,
+      0x16 -> 'u' as u8,
+      0x17 -> 'i' as u8,
+      0x18 -> 'o' as u8,
+      0x19 -> 'p' as u8,
+      0x1A -> '[' as u8,
+      0x1B -> ']' as u8,
+      0x1C -> '\n' as u8,
+      0x1E -> 'a' as u8,
+      0x1F -> 's' as u8,
+      0x20 -> 'd' as u8,
+      0x21 -> 'f' as u8,
+      0x22 -> 'g' as u8,
+      0x23 -> 'h' as u8,
+      0x24 -> 'j' as u8,
+      0x25 -> 'k' as u8,
+      0x26 -> 'l' as u8,
+      0x27 -> ';' as u8,
+      0x28 -> '\'' as u8,
+      0x29 -> '`' as u8,
+      0x2B -> '\\' as u8,
+      0x2C -> 'z' as u8,
+      0x2D -> 'x' as u8,
+      0x2E -> 'c' as u8,
+      0x2F -> 'v' as u8,
+      0x30 -> 'b' as u8,
+      0x31 -> 'n' as u8,
+      0x32 -> 'm' as u8,
+      0x33 -> ',' as u8,
+      0x34 -> '.' as u8,
+      0x35 -> '/' as u8,
+      0x39 -> ' ' as u8,
+      _ -> NONE,
+    };
+  }
+
+  /// The US layout character of a set 1 make code with Shift held, for the
+  /// keys that are not letters.
+  function shifted(key: u8): u8 {
+    return match (key) {
+      0x02 -> '!' as u8,
+      0x03 -> '@' as u8,
+      0x04 -> '#' as u8,
+      0x05 -> '$' as u8,
+      0x06 -> '%' as u8,
+      0x07 -> '^' as u8,
+      0x08 -> '&' as u8,
+      0x09 -> '*' as u8,
+      0x0A -> '(' as u8,
+      0x0B -> ')' as u8,
+      0x0C -> '_' as u8,
+      0x0D -> '+' as u8,
+      0x1A -> '{' as u8,
+      0x1B -> '}' as u8,
+      0x27 -> ':' as u8,
+      0x28 -> '"' as u8,
+      0x29 -> '~' as u8,
+      0x2B -> '|' as u8,
+      0x33 -> '<' as u8,
+      0x34 -> '>' as u8,
+      0x35 -> '?' as u8,
+      _ -> unshifted(key),
+    };
+  }
+}

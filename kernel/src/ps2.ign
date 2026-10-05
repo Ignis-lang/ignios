@@ -1,0 +1,150 @@
+//! Polled driver for the 8042 PS/2 controller, keyboard port only.
+//!
+//! The controller keeps its firmware translation setting, so the keyboard
+//! arrives as scancode set 1 bytes, as it does under QEMU and OVMF. Bytes
+//! from the auxiliary (mouse) port are read and dropped. This module only
+//! moves bytes; `keyboard.ign` turns them into characters, so an interrupt
+//! handler can later feed the same decoder.
+
+import Cpu from "./arch/x86_64/cpu";
+import Port from "./arch/x86_64/io";
+
+export namespace Ps2 {
+  const DATA: u16 = 0x60;
+  const STATUS: u16 = 0x64;
+  const COMMAND: u16 = 0x64;
+
+  const OUTPUT_FULL: u8 = 0x01;
+  const INPUT_FULL: u8 = 0x02;
+  const AUXILIARY_DATA: u8 = 0x20;
+
+  /// What a status read returns when no controller decodes the port.
+  const NO_CONTROLLER: u8 = 0xFF;
+
+  const READ_CONFIGURATION: u8 = 0x20;
+  const WRITE_CONFIGURATION: u8 = 0x60;
+  const ENABLE_FIRST_PORT: u8 = 0xAE;
+
+  const CONFIGURATION_FIRST_INTERRUPT: u8 = 0x01;
+  const CONFIGURATION_SECOND_INTERRUPT: u8 = 0x02;
+  const CONFIGURATION_FIRST_CLOCK_DISABLED: u8 = 0x10;
+
+  /// Upper bound on bytes drained by `flush`, so a controller that always
+  /// reports a full output buffer cannot stall the boot.
+  const FLUSH_LIMIT: u64 = 256;
+
+  /// Spin iterations before a controller handshake is considered dead.
+  const WAIT_LIMIT: u64 = 1000000;
+
+  /// Drains stale bytes, turns off both controller interrupts (this driver
+  /// polls) and makes sure the keyboard port is clocked and enabled. Returns
+  /// false when there is no controller or it stops answering.
+  function initialize(): boolean {
+    if (Port::readByte(STATUS) == NO_CONTROLLER) {
+      return false;
+    }
+
+    flush();
+
+    if (!sendCommand(READ_CONFIGURATION) || !waitForOutput()) {
+      return false;
+    }
+
+    let configuration: u8 = Port::readByte(DATA);
+    let cleared: u8 = CONFIGURATION_FIRST_INTERRUPT | CONFIGURATION_SECOND_INTERRUPT | CONFIGURATION_FIRST_CLOCK_DISABLED;
+
+    if (!sendCommand(WRITE_CONFIGURATION) || !writeData(configuration & ~cleared)) {
+      return false;
+    }
+
+    if (!sendCommand(ENABLE_FIRST_PORT)) {
+      return false;
+    }
+
+    flush();
+
+    return true;
+  }
+
+  /// True when a keyboard byte is waiting in the output buffer. A waiting
+  /// auxiliary byte is consumed and dropped, and reported as no byte.
+  function hasKeyboardByte(): boolean {
+    let status: u8 = Port::readByte(STATUS);
+
+    if ((status & OUTPUT_FULL) == 0) {
+      return false;
+    }
+
+    if ((status & AUXILIARY_DATA) != 0) {
+      Port::readByte(DATA);
+      return false;
+    }
+
+    return true;
+  }
+
+  /// Reads the output buffer. Call it only after `hasKeyboardByte` returned
+  /// true.
+  function readKeyboardByte(): u8 {
+    return Port::readByte(DATA);
+  }
+
+  function flush(): void {
+    let mut drained: u64 = 0;
+
+    while (drained < FLUSH_LIMIT && (Port::readByte(STATUS) & OUTPUT_FULL) != 0) {
+      Port::readByte(DATA);
+      drained += 1;
+    }
+  }
+
+  function sendCommand(command: u8): boolean {
+    if (!waitForInputSpace()) {
+      return false;
+    }
+
+    Port::writeByte(COMMAND, command);
+
+    return true;
+  }
+
+  function writeData(value: u8): boolean {
+    if (!waitForInputSpace()) {
+      return false;
+    }
+
+    Port::writeByte(DATA, value);
+
+    return true;
+  }
+
+  function waitForInputSpace(): boolean {
+    let mut spins: u64 = 0;
+
+    while ((Port::readByte(STATUS) & INPUT_FULL) != 0) {
+      if (spins == WAIT_LIMIT) {
+        return false;
+      }
+
+      Cpu::pause();
+      spins += 1;
+    }
+
+    return true;
+  }
+
+  function waitForOutput(): boolean {
+    let mut spins: u64 = 0;
+
+    while ((Port::readByte(STATUS) & OUTPUT_FULL) == 0) {
+      if (spins == WAIT_LIMIT) {
+        return false;
+      }
+
+      Cpu::pause();
+      spins += 1;
+    }
+
+    return true;
+  }
+}
