@@ -5,8 +5,9 @@ Usage: scripts/gen-font.py <spleen-8x16.bdf> <output.ign>
 
 Inside `nix develop`, the BDF file is at "$SPLEEN_DIR/spleen-8x16.bdf".
 The output holds one 16-byte glyph per character from FIRST to LAST, one byte
-per row, most significant bit on the left. The table is a single array
-literal on one line, the layout `ignis fmt` produces for it.
+per row, most significant bit on the left. The table is an array literal with
+one glyph of 16 values per line and a trailing comma, a layout `ignis fmt`
+keeps as is.
 """
 
 import sys
@@ -31,9 +32,9 @@ HEADER = """\
 
 export namespace FontData {{
   record Glyphs {{
-    /// `static mut` because only a mutable static is emitted as one global
-    /// whose address stays valid. Nothing writes to it.
-    public static mut rows: u8[{size}] = [{rows}];
+    public static rows: u8[{size}] = [
+{rows}
+    ];
   }}
 }}
 """
@@ -84,15 +85,15 @@ def main():
         if glyph is None or len(glyph) != HEIGHT:
             sys.exit(f"glyph 0x{code:02X} is missing or not {HEIGHT} rows high")
 
-        rows.extend(f"0x{row:02X}" for row in glyph)
+        rows.append(", ".join(f"0x{row:02X}" for row in glyph) + ",")
 
     text = HEADER.format(
         first=FIRST,
         last=LAST,
         version=version,
         height=HEIGHT,
-        size=len(rows),
-        rows=", ".join(rows),
+        size=len(rows) * HEIGHT,
+        rows="\n".join(f"      {line}" for line in rows),
     )
 
     with open(sys.argv[2], "w", encoding="ascii") as output:

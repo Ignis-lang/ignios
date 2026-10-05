@@ -115,12 +115,9 @@ export namespace Limine {
   }
 
   /// The response pointer the bootloader left in a request's `response`
-  /// slot, or null when it left none. The slot is read as an integer:
-  /// `@readVolatile<*mut T>` currently emits a volatile pointee instead of a
-  /// volatile load of the pointer, so clang folds the read to the slot's null
-  /// initializer (ignisc.rs bug, reported from Ignis OS M4).
+  /// slot, or null when it left none.
   function readResponse<T>(slot: *mut *mut T): *mut T {
-    return @pointerFromInteger<*mut T>(@readVolatile<u64>(slot as *mut u64));
+    return @readVolatile<*mut T>(slot);
   }
 
   /// The first framebuffer, or null when the bootloader provided none.
