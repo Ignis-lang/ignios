@@ -1,0 +1,36 @@
+//! The local APIC, only as far as the legacy PIC needs it.
+//!
+//! UEFI firmware enables the local APIC and masks its LINT0 input, which is
+//! the line the 8259 drives, so the PIC cannot reach the processor. LINT0 is
+//! a memory-mapped register and the bootloader's higher half direct map does
+//! not cover the APIC page, so the kernel cannot unmask it before it has its
+//! own page tables. Turning the local APIC off through the APIC base MSR
+//! makes the 8259 drive the processor directly instead. Whoever brings up the
+//! APIC later turns it back on through the same MSR.
+
+export namespace Lapic {
+  const APIC_BASE_MSR: u32 = 0x1B;
+  const APIC_BASE_ENABLE: u64 = 0x800;
+
+  /// Disables the local APIC so the 8259 reaches the processor.
+  function disable(): void {
+    writeMsr(APIC_BASE_MSR, readMsr(APIC_BASE_MSR) & ~APIC_BASE_ENABLE);
+  }
+
+  function readMsr(msr: u32): u64 {
+    asm (msr in ecx) -> (low: u32 in eax, high: u32 in edx) {
+      rdmsr
+    }
+
+    return ((high as u64) << 32) | (low as u64);
+  }
+
+  function writeMsr(msr: u32, value: u64): void {
+    let low: u32 = value as u32;
+    let high: u32 = (value >> 32) as u32;
+
+    asm (msr in ecx, low in eax, high in edx) clobber(memory) {
+      wrmsr
+    }
+  }
+}

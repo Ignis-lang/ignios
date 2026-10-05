@@ -18,9 +18,17 @@ make keytest        # boot headless, type keys through the QEMU monitor,
 
 The kernel draws a text console on the framebuffer and mirrors everything it
 prints there to COM1, so the serial log carries the same text as the screen.
-After the banner it polls the PS/2 keyboard (scancode set 1, US layout, Shift
+After the banner it reads the PS/2 keyboard (scancode set 1, US layout, Shift
 and Caps Lock) and echoes each line typed at the `>` prompt. Backspace stops at
 the prompt, Enter starts a new prompt, and a line holds up to 128 characters.
+
+The kernel loads its own GDT and TSS and an IDT. A CPU exception prints its
+name, vector, error code, RIP, CS, RFLAGS, RSP and, for a page fault, CR2 on the
+console and COM1, then halts. The 8259 PIC is remapped to vectors 0x20-0x2F with
+only the keyboard line (IRQ1) unmasked. The IRQ1 handler queues scancodes in a
+lock-free ring buffer and the terminal loop sleeps with `sti; hlt` until one
+arrives. The entry stubs, the CS reload and the IST stack are in `.S` files
+under `kernel/src/arch/x86_64/`, assembled by the Makefile with clang.
 
 The kernel needs an Ignis compiler with freestanding support. The Makefile
 expects it at `../ignisc.rs/build/bootstrap/stage1/ignis`; point elsewhere with

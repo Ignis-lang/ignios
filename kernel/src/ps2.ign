@@ -1,13 +1,15 @@
-//! Polled driver for the 8042 PS/2 controller, keyboard port only.
+//! Driver for the 8042 PS/2 controller, keyboard port only.
 //!
 //! The controller keeps its firmware translation setting, so the keyboard
-//! arrives as scancode set 1 bytes, as it does under QEMU and OVMF. Bytes
-//! from the auxiliary (mouse) port are read and dropped. This module only
-//! moves bytes; `keyboard.ign` turns them into characters, so an interrupt
-//! handler can later feed the same decoder.
+//! arrives as scancode set 1 bytes, as it does under QEMU and OVMF. The
+//! keyboard raises IRQ1 for each byte, and `handleInterrupt` moves the bytes
+//! into the scancode queue. Bytes from the auxiliary (mouse) port are read and
+//! dropped. This module only moves bytes; `keyboard.ign` turns them into
+//! characters.
 
 import Cpu from "./arch/x86_64/cpu";
 import Port from "./arch/x86_64/io";
+import ScancodeQueue from "./scancode_queue";
 
 export namespace Ps2 {
   const DATA: u16 = 0x60;
@@ -36,9 +38,9 @@ export namespace Ps2 {
   /// Spin iterations before a controller handshake is considered dead.
   const WAIT_LIMIT: u64 = 1000000;
 
-  /// Drains stale bytes, turns off both controller interrupts (this driver
-  /// polls) and makes sure the keyboard port is clocked and enabled. Returns
-  /// false when there is no controller or it stops answering.
+  /// Drains stale bytes, turns on the keyboard interrupt, turns off the
+  /// auxiliary one and makes sure the keyboard port is clocked and enabled.
+  /// Returns false when there is no controller or it stops answering.
   function initialize(): boolean {
     if (Port::readByte(STATUS) == NO_CONTROLLER) {
       return false;
@@ -51,9 +53,10 @@ export namespace Ps2 {
     }
 
     let configuration: u8 = Port::readByte(DATA);
-    let cleared: u8 = CONFIGURATION_FIRST_INTERRUPT | CONFIGURATION_SECOND_INTERRUPT | CONFIGURATION_FIRST_CLOCK_DISABLED;
+    let cleared: u8 = CONFIGURATION_SECOND_INTERRUPT | CONFIGURATION_FIRST_CLOCK_DISABLED;
+    let updated: u8 = (configuration & ~cleared) | CONFIGURATION_FIRST_INTERRUPT;
 
-    if (!sendCommand(WRITE_CONFIGURATION) || !writeData(configuration & ~cleared)) {
+    if (!sendCommand(WRITE_CONFIGURATION) || !writeData(updated)) {
       return false;
     }
 
@@ -66,27 +69,22 @@ export namespace Ps2 {
     return true;
   }
 
-  /// True when a keyboard byte is waiting in the output buffer. A waiting
-  /// auxiliary byte is consumed and dropped, and reported as no byte.
-  function hasKeyboardByte(): boolean {
-    let status: u8 = Port::readByte(STATUS);
+  /// The IRQ1 handler: moves every byte the controller holds into the
+  /// scancode queue, dropping auxiliary ones.
+  function handleInterrupt(): void {
+    while (true) {
+      let status: u8 = Port::readByte(STATUS);
 
-    if ((status & OUTPUT_FULL) == 0) {
-      return false;
+      if ((status & OUTPUT_FULL) == 0) {
+        return;
+      }
+
+      let value: u8 = Port::readByte(DATA);
+
+      if ((status & AUXILIARY_DATA) == 0) {
+        ScancodeQueue::push(value);
+      }
     }
-
-    if ((status & AUXILIARY_DATA) != 0) {
-      Port::readByte(DATA);
-      return false;
-    }
-
-    return true;
-  }
-
-  /// Reads the output buffer. Call it only after `hasKeyboardByte` returned
-  /// true.
-  function readKeyboardByte(): u8 {
-    return Port::readByte(DATA);
   }
 
   function flush(): void {

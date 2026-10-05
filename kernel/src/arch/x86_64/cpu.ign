@@ -11,6 +11,27 @@ export namespace Cpu {
     }
   }
 
+  /// Lets maskable interrupts through from the next instruction on.
+  function enableInterrupts(): void {
+    asm () clobber(memory) { sti }
+  }
+
+  /// Masks maskable interrupts.
+  function disableInterrupts(): void {
+    asm () clobber(memory) { cli }
+  }
+
+  /// Enables interrupts and halts until one arrives. `sti` takes effect
+  /// after the following instruction, so an interrupt that was pending
+  /// cannot slip in between and leave the processor halted with work
+  /// queued: it wakes the `hlt`.
+  function waitForInterrupt(): void {
+    asm () clobber(memory) {
+      sti
+      hlt
+    }
+  }
+
   /// Tells the processor it is spinning in a busy-wait loop, which saves
   /// power and avoids a memory-order pipeline flush when the loop exits.
   function pause(): void {

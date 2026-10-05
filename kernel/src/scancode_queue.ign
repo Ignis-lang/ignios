@@ -1,0 +1,61 @@
+//! A lock-free ring buffer of raw keyboard bytes between the IRQ1 handler,
+//! the only producer, and the terminal loop, the only consumer.
+//!
+//! Each side writes only its own index and reads the other's, so no lock is
+//! needed. Every access to the indices and the slots is volatile, which keeps
+//! the compiler from caching them across the interrupt and from moving the
+//! slot write after the index that publishes it. x86 does not reorder stores
+//! with other stores, so no fence is needed. A full queue drops the new byte.
+
+record ScancodeQueueState {
+  static mut head: u64 = 0;
+  static mut tail: u64 = 0;
+  static mut slots: u8[64] = [
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+  ];
+}
+
+export namespace ScancodeQueue {
+  /// Slot count. It must equal the array size in `ScancodeQueueState`, and
+  /// be a power of two.
+  const CAPACITY: u64 = 64;
+
+  /// Appends a byte. Called only from the interrupt handler.
+  function push(value: u8): void {
+    let tail: u64 = @readVolatile<u64>(&mut ScancodeQueueState::tail as *mut u64);
+    let next: u64 = (tail + 1) & (CAPACITY - 1);
+
+    if (next == @readVolatile<u64>(&mut ScancodeQueueState::head as *mut u64)) {
+      return;
+    }
+
+    @writeVolatile<u8>(slot(tail), value);
+    @writeVolatile<u64>(&mut ScancodeQueueState::tail as *mut u64, next);
+  }
+
+  /// True when there is nothing to pop. Called only from the consumer.
+  function isEmpty(): boolean {
+    let head: u64 = @readVolatile<u64>(&mut ScancodeQueueState::head as *mut u64);
+    let tail: u64 = @readVolatile<u64>(&mut ScancodeQueueState::tail as *mut u64);
+
+    return head == tail;
+  }
+
+  /// Removes and returns the oldest byte. Call it only after `isEmpty`
+  /// returned false, from the consumer.
+  function pop(): u8 {
+    let head: u64 = @readVolatile<u64>(&mut ScancodeQueueState::head as *mut u64);
+    let value: u8 = @readVolatile<u8>(slot(head));
+
+    @writeVolatile<u64>(&mut ScancodeQueueState::head as *mut u64, (head + 1) & (CAPACITY - 1));
+
+    return value;
+  }
+
+  function slot(index: u64): *mut u8 {
+    return (&mut ScancodeQueueState::slots as *mut u8) + index;
+  }
+}

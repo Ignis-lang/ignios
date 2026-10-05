@@ -1,0 +1,108 @@
+//! The legacy 8259 programmable interrupt controller pair.
+//!
+//! The lines are remapped to vectors 0x20-0x2F so they do not collide with
+//! the CPU exceptions, and every line is masked except the keyboard (IRQ1).
+
+import Port from "./io";
+
+export namespace Pic {
+  const MASTER_COMMAND: u16 = 0x20;
+  const MASTER_DATA: u16 = 0x21;
+  const SLAVE_COMMAND: u16 = 0xA0;
+  const SLAVE_DATA: u16 = 0xA1;
+
+  /// Unused port that takes about one I/O cycle to write, which the old
+  /// controllers need between initialization words.
+  const DELAY_PORT: u16 = 0x80;
+
+  const INITIALIZE: u8 = 0x11;
+  const MODE_8086: u8 = 0x01;
+  const MASTER_HAS_SLAVE_ON_LINE_2: u8 = 0x04;
+  const SLAVE_CASCADE_IDENTITY: u8 = 0x02;
+
+  const END_OF_INTERRUPT: u8 = 0x20;
+  const READ_IN_SERVICE: u8 = 0x0B;
+
+  /// First vector of the master controller, then of the slave.
+  const MASTER_OFFSET: u8 = 0x20;
+  const SLAVE_OFFSET: u8 = 0x28;
+
+  /// Every line masked but IRQ1, the keyboard.
+  const MASTER_MASK: u8 = 0xFD;
+  const SLAVE_MASK: u8 = 0xFF;
+
+  const SLAVE_FIRST_LINE: u8 = 8;
+  const SPURIOUS_MASTER_LINE: u8 = 7;
+  const SPURIOUS_SLAVE_LINE: u8 = 15;
+  const LINE_7_BIT: u8 = 0x80;
+
+  /// Remaps both controllers and masks every line but the keyboard.
+  function initialize(): void {
+    Port::writeByte(MASTER_COMMAND, INITIALIZE);
+    delay();
+    Port::writeByte(SLAVE_COMMAND, INITIALIZE);
+    delay();
+
+    Port::writeByte(MASTER_DATA, MASTER_OFFSET);
+    delay();
+    Port::writeByte(SLAVE_DATA, SLAVE_OFFSET);
+    delay();
+
+    Port::writeByte(MASTER_DATA, MASTER_HAS_SLAVE_ON_LINE_2);
+    delay();
+    Port::writeByte(SLAVE_DATA, SLAVE_CASCADE_IDENTITY);
+    delay();
+
+    Port::writeByte(MASTER_DATA, MODE_8086);
+    delay();
+    Port::writeByte(SLAVE_DATA, MODE_8086);
+    delay();
+
+    Port::writeByte(MASTER_DATA, MASTER_MASK);
+    Port::writeByte(SLAVE_DATA, SLAVE_MASK);
+  }
+
+  /// Tells the controllers the interrupt on `line` was handled. A line of
+  /// the slave needs the acknowledgement on both.
+  function endOfInterrupt(line: u8): void {
+    if (line >= SLAVE_FIRST_LINE) {
+      Port::writeByte(SLAVE_COMMAND, END_OF_INTERRUPT);
+    }
+
+    Port::writeByte(MASTER_COMMAND, END_OF_INTERRUPT);
+  }
+
+  /// True when `line` is the last line of a controller and its in-service
+  /// bit is clear, which is how a spurious interrupt shows: the line dropped
+  /// before the processor acknowledged it. Such an interrupt must not be
+  /// acknowledged on its own controller.
+  function isSpurious(line: u8): boolean {
+    if (line == SPURIOUS_MASTER_LINE) {
+      return !isLine7InService(MASTER_COMMAND);
+    }
+
+    if (line == SPURIOUS_SLAVE_LINE) {
+      return !isLine7InService(SLAVE_COMMAND);
+    }
+
+    return false;
+  }
+
+  /// Finishes a spurious interrupt. One from the slave still went through
+  /// the master's cascade line, which needs its acknowledgement.
+  function endSpurious(line: u8): void {
+    if (line == SPURIOUS_SLAVE_LINE) {
+      Port::writeByte(MASTER_COMMAND, END_OF_INTERRUPT);
+    }
+  }
+
+  function isLine7InService(command: u16): boolean {
+    Port::writeByte(command, READ_IN_SERVICE);
+
+    return (Port::readByte(command) & LINE_7_BIT) != 0;
+  }
+
+  function delay(): void {
+    Port::writeByte(DELAY_PORT, 0);
+  }
+}

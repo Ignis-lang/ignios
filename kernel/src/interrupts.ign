@@ -2,10 +2,13 @@
 //! registers and calls `dispatch` with a pointer to the saved frame.
 //!
 //! Every CPU exception is fatal for now: it is reported on COM1 and on the
-//! console, then the processor halts.
+//! console, then the processor halts. Hardware interrupts come from the PIC
+//! at vectors 0x20-0x2F, and only the keyboard line is unmasked.
 
 import Cpu from "./arch/x86_64/cpu";
+import Pic from "./arch/x86_64/pic";
 import Color, Console from "./console";
+import Ps2 from "./ps2";
 import Serial from "./serial";
 
 /// The state `interrupt_asm.S` leaves on the stack, lowest address first.
@@ -40,14 +43,39 @@ record InterruptFrame {
 
 export namespace Interrupts {
   const FIRST_IRQ_VECTOR: u64 = 32;
+  const IRQ_VECTOR_COUNT: u64 = 16;
+  const KEYBOARD_LINE: u8 = 1;
   const PAGE_FAULT: u64 = 14;
 
   /// Called by the common stub for every vector, on the interrupted stack.
   @externName("ignis_interrupt_dispatch")
   function dispatch(frame: *mut InterruptFrame): void {
+    let vector: u64 = (*frame).vector;
+
+    if (vector >= FIRST_IRQ_VECTOR && vector < FIRST_IRQ_VECTOR + IRQ_VECTOR_COUNT) {
+      handleHardwareInterrupt((vector - FIRST_IRQ_VECTOR) as u8);
+      return;
+    }
+
     reportException(frame);
 
     Cpu::haltForever();
+  }
+
+  /// Runs the handler of a PIC line, then acknowledges it. A spurious
+  /// interrupt has no handler and skips the acknowledgement of its own
+  /// controller.
+  function handleHardwareInterrupt(line: u8): void {
+    if (Pic::isSpurious(line)) {
+      Pic::endSpurious(line);
+      return;
+    }
+
+    if (line == KEYBOARD_LINE) {
+      Ps2::handleInterrupt();
+    }
+
+    Pic::endOfInterrupt(line);
   }
 
   /// Writes the exception to COM1 and to the console when it is up.
@@ -93,27 +121,29 @@ export namespace Interrupts {
     return asm () -> (value: u64 in rax) { mov {value}, cr2 };
   }
 
+  /// The console mirrors everything it prints to COM1, so COM1 is written
+  /// directly only while the console is not up.
   function emitText(value: str): void {
-    Serial::write(value);
-
     if (Console::isInitialized()) {
       Console::write(value);
+    } else {
+      Serial::write(value);
     }
   }
 
   function emitHex(value: u64): void {
-    Serial::writeHex(value);
-
     if (Console::isInitialized()) {
       Console::writeHex(value);
+    } else {
+      Serial::writeHex(value);
     }
   }
 
   function emitDecimal(value: u64): void {
-    Serial::writeDecimal(value);
-
     if (Console::isInitialized()) {
       Console::writeDecimal(value);
+    } else {
+      Serial::writeDecimal(value);
     }
   }
 
@@ -148,10 +178,6 @@ export namespace Interrupts {
   }
 
   function name(vector: u64): str {
-    if (vector >= FIRST_IRQ_VECTOR) {
-      return "Unexpected hardware interrupt";
-    }
-
     return match (vector) {
       0 -> "Divide Error",
       1 -> "Debug",

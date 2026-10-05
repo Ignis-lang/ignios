@@ -3,11 +3,14 @@
 import Cpu from "./arch/x86_64/cpu";
 import Gdt from "./arch/x86_64/gdt";
 import Idt from "./arch/x86_64/idt";
+import Lapic from "./arch/x86_64/lapic";
+import Pic from "./arch/x86_64/pic";
 import Color, Console from "./console";
 import _ from "./interrupts";
 import Keyboard from "./keyboard";
 import Limine from "./limine";
 import Ps2 from "./ps2";
+import ScancodeQueue from "./scancode_queue";
 import Serial from "./serial";
 import _ from "./lib/mem";
 
@@ -121,7 +124,7 @@ function initializeKeyboard(): boolean {
     return false;
   }
 
-  Console::writeLine("keyboard: PS/2, scancode set 1, US layout");
+  Console::writeLine("keyboard: PS/2, scancode set 1, US layout, IRQ1");
   return true;
 }
 
@@ -139,11 +142,12 @@ function printPrompt(): void {
   Console::setColors(Color::BRIGHT_WHITE, Color::BLACK);
 }
 
-/// Polls the keyboard forever and edits one line at a time: printable
+/// Drains the scancode queue forever and edits one line at a time: printable
 /// characters are echoed and stored, Backspace erases the last stored
 /// character but never the prompt, and Enter starts a new prompt. Input past
-/// LINE_CAPACITY and Tab are ignored. Interrupts are off, so the loop spins
-/// with `pause` instead of halting.
+/// LINE_CAPACITY and Tab are ignored. The queue is checked with interrupts
+/// off, so an IRQ1 cannot land between the check and the `sti; hlt` that
+/// sleeps until the next one.
 function runTerminal(): void {
   let mut line: u8[128];
   let mut length: u64 = 0;
@@ -151,12 +155,16 @@ function runTerminal(): void {
   printPrompt();
 
   while (true) {
-    if (!Ps2::hasKeyboardByte()) {
-      Cpu::pause();
+    Cpu::disableInterrupts();
+
+    if (ScancodeQueue::isEmpty()) {
+      Cpu::waitForInterrupt();
       continue;
     }
 
-    let character: u8 = Keyboard::decode(Ps2::readKeyboardByte());
+    Cpu::enableInterrupts();
+
+    let character: u8 = Keyboard::decode(ScancodeQueue::pop());
 
     if (character == NEWLINE) {
       Console::writeChar(NEWLINE);
@@ -200,6 +208,9 @@ function kmain(): void {
   if (!initializeKeyboard()) {
     Cpu::haltForever();
   }
+
+  Pic::initialize();
+  Lapic::disable();
 
   runTerminal();
 }
