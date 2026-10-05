@@ -28,7 +28,7 @@ expects it at `../ignisc.rs/build/bootstrap/stage1/ignis`; point elsewhere with
 
 Targets: `kernel` (`build/kernel.elf`), `image` (`build/ignis-os.img`, a FAT
 ESP with Limine and the kernel), `run`, `run-headless`, `screenshot`, `keytest`, `font`
-(regenerates `kernel/src/font_8x16.S`), `clean`.
+(regenerates `kernel/src/font_8x16.ign`), `clean`.
 
 The console font is Spleen 8x16 under the BSD 2-Clause license, see
 `THIRD_PARTY.md`.

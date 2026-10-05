@@ -2,7 +2,6 @@
 # exports LIMINE_DIR, OVMF_CODE and OVMF_VARS.
 
 IGNIS ?= ../ignisc.rs/build/bootstrap/stage1/ignis
-CC := clang
 LD := ld.lld
 QEMU := qemu-system-x86_64
 
@@ -18,10 +17,7 @@ HEADLESS_SECONDS ?= 15
 
 IGNIS_SOURCES := $(shell find kernel/src -name '*.ign')
 IGNIS_OBJECT := $(BUILD)/ignis/user/obj/kernel.o
-ASM_SOURCES := $(shell find kernel/src -name '*.S')
-ASM_OBJECTS := $(patsubst kernel/src/%.S,$(BUILD)/asm/%.o,$(ASM_SOURCES))
 
-ASFLAGS := --target=x86_64-unknown-none -ffreestanding -fno-pic -mcmodel=kernel
 LDFLAGS := -m elf_x86_64 -nostdlib -static --no-dynamic-linker \
 	-z max-page-size=0x1000 -z noexecstack --build-id=none -T kernel/linker.ld
 
@@ -39,12 +35,8 @@ kernel: $(KERNEL)
 $(IGNIS_OBJECT): $(IGNIS_SOURCES) ignis.toml
 	$(IGNIS) build
 
-$(BUILD)/asm/%.o: kernel/src/%.S
-	@mkdir -p $(dir $@)
-	$(CC) $(ASFLAGS) -c $< -o $@
-
-$(KERNEL): $(IGNIS_OBJECT) $(ASM_OBJECTS) kernel/linker.ld
-	$(LD) $(LDFLAGS) -o $@ $(IGNIS_OBJECT) $(ASM_OBJECTS)
+$(KERNEL): $(IGNIS_OBJECT) kernel/linker.ld
+	$(LD) $(LDFLAGS) -o $@ $(IGNIS_OBJECT)
 
 esp: $(KERNEL) boot/limine.conf
 	@test -n "$(LIMINE_DIR)" || { echo "LIMINE_DIR is not set; run inside nix develop" >&2; exit 1; }
@@ -102,7 +94,7 @@ keytest: $(IMAGE) $(OVMF_VARS_COPY)
 # Regenerates the committed console font from the Spleen BDF in the devShell.
 font:
 	@test -n "$(SPLEEN_DIR)" || { echo "SPLEEN_DIR is not set; run inside nix develop" >&2; exit 1; }
-	python3 scripts/gen-font.py $(SPLEEN_DIR)/spleen-8x16.bdf kernel/src/font_8x16.S
+	python3 scripts/gen-font.py $(SPLEEN_DIR)/spleen-8x16.bdf kernel/src/font_8x16.ign
 
 clean:
 	rm -rf $(BUILD)

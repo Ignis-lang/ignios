@@ -1,6 +1,7 @@
-//! The 8x16 console font: the printable ASCII glyphs of Spleen, stored in
-//! `font_8x16.S` because a `static mut` array is not emitted yet. Repro:
-//! odd/repros/static_mut_array.
+//! The 8x16 console font: the printable ASCII glyphs of Spleen, generated
+//! into `font_8x16.ign`.
+
+import FontData from "./font_8x16";
 
 export namespace Font {
   const WIDTH: u64 = 8;
@@ -9,10 +10,6 @@ export namespace Font {
   const FIRST: u8 = 0x20;
   const LAST: u8 = 0x7E;
   const FALLBACK: u8 = 0x3F;
-
-  function table(): *u8 {
-    return asm pure () -> (address: *u8 in reg) { lea {address}, [rip + ignis_font_8x16] };
-  }
 
   /// The HEIGHT rows of the glyph for `character`, top row first, leftmost
   /// pixel in the most significant bit. Characters outside FIRST..LAST get
@@ -24,6 +21,6 @@ export namespace Font {
       index = FALLBACK;
     }
 
-    return table() + ((index - FIRST) as u64) * HEIGHT;
+    return (&FontData::Glyphs::rows as *u8) + ((index - FIRST) as u64) * HEIGHT;
   }
 }
