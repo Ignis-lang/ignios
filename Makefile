@@ -18,6 +18,11 @@ HEADLESS_SECONDS ?= 15
 IGNIS_SOURCES := $(shell find kernel/src -name '*.ign')
 IGNIS_OBJECT := $(BUILD)/ignis/user/obj/kernel.o
 
+CLANG ?= clang
+ASM_SOURCES := $(shell find kernel/src -name '*.S')
+ASM_OBJECTS := $(patsubst kernel/src/%.S,$(BUILD)/asm/%.o,$(ASM_SOURCES))
+ASFLAGS := --target=x86_64-unknown-none -mcmodel=kernel -fno-pic -fno-pie -c
+
 LDFLAGS := -m elf_x86_64 -nostdlib -static --no-dynamic-linker \
 	-z max-page-size=0x1000 -z noexecstack --build-id=none -T kernel/linker.ld
 
@@ -35,8 +40,12 @@ kernel: $(KERNEL)
 $(IGNIS_OBJECT): $(IGNIS_SOURCES) ignis.toml
 	$(IGNIS) build
 
-$(KERNEL): $(IGNIS_OBJECT) kernel/linker.ld
-	$(LD) $(LDFLAGS) -o $@ $(IGNIS_OBJECT)
+$(BUILD)/asm/%.o: kernel/src/%.S
+	@mkdir -p $(dir $@)
+	$(CLANG) $(ASFLAGS) -o $@ $<
+
+$(KERNEL): $(IGNIS_OBJECT) $(ASM_OBJECTS) kernel/linker.ld
+	$(LD) $(LDFLAGS) -o $@ $(IGNIS_OBJECT) $(ASM_OBJECTS)
 
 esp: $(KERNEL) boot/limine.conf
 	@test -n "$(LIMINE_DIR)" || { echo "LIMINE_DIR is not set; run inside nix develop" >&2; exit 1; }

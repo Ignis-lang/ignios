@@ -1,0 +1,137 @@
+//! The kernel's global descriptor table and task state segment.
+//!
+//! The selector order is the one SYSCALL and SYSRET need later: kernel code,
+//! kernel data, then user data and user code. The user entries are
+//! placeholders until there is a user mode. The TSS only carries IST1, the
+//! stack the double fault handler runs on.
+
+/// The task state segment of the 64-bit mode.
+@cLayout
+@packed
+record TaskStateSegment {
+  public reserved0: u32;
+  public rsp0: u64;
+  public rsp1: u64;
+  public rsp2: u64;
+  public reserved1: u64;
+  public ist1: u64;
+  public ist2: u64;
+  public ist3: u64;
+  public ist4: u64;
+  public ist5: u64;
+  public ist6: u64;
+  public ist7: u64;
+  public reserved2: u64;
+  public reserved3: u16;
+  public ioMapBase: u16;
+}
+
+/// The operand of `lgdt`.
+@cLayout
+@packed
+record GdtPointer {
+  public limit: u16;
+  public base: u64;
+}
+
+/// Seven slots: null, four segments and the 16-byte TSS descriptor.
+record GdtState {
+  static mut entries: u64[7] = [
+    0x0000000000000000,
+    0x00AF9A000000FFFF,
+    0x00CF92000000FFFF,
+    0x00CFF2000000FFFF,
+    0x00AFFA000000FFFF,
+    0,
+    0,
+  ];
+
+  static mut tss: TaskStateSegment = TaskStateSegment {
+    reserved0: 0,
+    rsp0: 0,
+    rsp1: 0,
+    rsp2: 0,
+    reserved1: 0,
+    ist1: 0,
+    ist2: 0,
+    ist3: 0,
+    ist4: 0,
+    ist5: 0,
+    ist6: 0,
+    ist7: 0,
+    reserved2: 0,
+    reserved3: 0,
+    ioMapBase: 0,
+  };
+}
+
+extern GdtAsm {
+  function ignis_gdt_reload_segments(code: u16, data: u16): void;
+  function ignis_double_fault_stack_top(): u64;
+}
+
+export namespace Gdt {
+  const KERNEL_CODE: u16 = 0x08;
+  const KERNEL_DATA: u16 = 0x10;
+  const USER_DATA: u16 = 0x18;
+  const USER_CODE: u16 = 0x20;
+  const TASK_STATE: u16 = 0x28;
+
+  /// IST slot the double fault gate uses.
+  const DOUBLE_FAULT_IST: u8 = 1;
+
+  const TSS_SIZE: u64 = 104;
+  /// Present, type 9 (available 64-bit TSS), already in bits 40-47. It is
+  /// not shifted at the use site because a u64 constant on the left of `<<`
+  /// is emitted as a 32-bit shift (odd/repros/const_u64_shift).
+  const TSS_AVAILABLE_ACCESS: u64 = 0x0000890000000000;
+  const TSS_SLOT: u64 = 5;
+
+  /// Loads the table, reloads the segment registers and loads the task
+  /// register. Interrupts must be off.
+  function initialize(): void {
+    GdtState::tss.ist1 = GdtAsm::ignis_double_fault_stack_top();
+    GdtState::tss.ioMapBase = TSS_SIZE as u16;
+
+    installTaskStateDescriptor();
+
+    let descriptor: GdtPointer = GdtPointer {
+      limit: (7 * 8 - 1) as u16,
+      base: (&mut GdtState::entries as *mut u64) as u64,
+    };
+
+    asm (descriptor in mem) clobber(memory) { lgdt {descriptor} }
+
+    GdtAsm::ignis_gdt_reload_segments(KERNEL_CODE, KERNEL_DATA);
+
+    let selector: u16 = TASK_STATE;
+
+    asm (selector in ax) clobber(memory) { ltr {selector} }
+  }
+
+  /// The IST slot number the IDT must give the double fault gate.
+  function doubleFaultIst(): u8 {
+    return DOUBLE_FAULT_IST;
+  }
+
+  /// The code segment selector the processor is running with.
+  function currentCode(): u16 {
+    return asm () -> (value: u16 in ax) { mov {value}, cs };
+  }
+
+  /// The task register selector.
+  function currentTask(): u16 {
+    return asm () -> (value: u16 in ax) { str {value} };
+  }
+
+  /// Writes the 16-byte system descriptor of the TSS into slots 5 and 6.
+  function installTaskStateDescriptor(): void {
+    let base: u64 = (&mut GdtState::tss as *mut TaskStateSegment) as u64;
+    let limit: u64 = TSS_SIZE - 1;
+
+    let low: u64 = (limit & 0xFFFF) | ((base & 0xFFFFFF) << 16) | TSS_AVAILABLE_ACCESS | (((limit >> 16) & 0xF) << 48) | (((base >> 24) & 0xFF) << 56);
+
+    GdtState::entries[TSS_SLOT] = low;
+    GdtState::entries[TSS_SLOT + 1] = base >> 32;
+  }
+}

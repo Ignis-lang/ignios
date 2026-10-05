@@ -1,6 +1,7 @@
 //! Ignis OS kernel entry point.
 
 import Cpu from "./arch/x86_64/cpu";
+import Gdt from "./arch/x86_64/gdt";
 import Color, Console from "./console";
 import Keyboard from "./keyboard";
 import Limine from "./limine";
@@ -122,6 +123,14 @@ function initializeKeyboard(): boolean {
   return true;
 }
 
+function reportGdt(): void {
+  Serial::write("gdt: cs=");
+  Serial::writeHex(Gdt::currentCode() as u64);
+  Serial::write(" tr=");
+  Serial::writeHex(Gdt::currentTask() as u64);
+  Serial::write("\n");
+}
+
 function printPrompt(): void {
   Console::setColors(Color::BRIGHT_GREEN, Color::BLACK);
   Console::write("> ");
@@ -170,6 +179,9 @@ function runTerminal(): void {
 function kmain(): void {
   Serial::initialize();
   Serial::writeLine("Ignis OS booting");
+
+  Gdt::initialize();
+  reportGdt();
 
   if (!Limine::isBaseRevisionSupported()) {
     @panic("Limine base revision 6 is not supported");
