@@ -29,8 +29,6 @@ SECTIONS
 
     .data : {
         *(.data .data.*)
-
-        KEEP(*(.limine_requests))
     } :data
 
     /* Last in the data segment, so its zeros take no space in the file. */

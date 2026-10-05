@@ -1,30 +1,22 @@
-//! Limine boot protocol: the layouts of the requests in
-//! `limine_requests.S` and of their responses, and readers for them.
+//! Limine boot protocol (base revision 6): the requests the kernel makes,
+//! their response layouts, and readers for them.
 //!
-//! The bootloader writes the responses before the kernel starts, behind the
-//! compiler's back, so every read of a request slot is volatile.
+//! The requests are initialized `static mut` globals in `.data`, 8-byte
+//! aligned. Limine finds them by scanning the loaded image for their IDs, so
+//! no start or end markers are needed, and answers them in place before
+//! `kmain` runs. That write happens behind the compiler's back, so every read
+//! of a request field is volatile.
 
 export namespace Limine {
-  const BASE_REVISION_SUPPORTED: u64 = 0;
+  const COMMON_MAGIC_0: u64 = 0xc7b1dd30df4c8b88;
+  const COMMON_MAGIC_1: u64 = 0x0a82e883a194f07b;
 
-  /// A request header. `response` is the response address as an integer
-  /// because a reference to a pointer-typed place currently yields the
-  /// pointer itself, so it cannot be read through @readVolatile. Repro:
-  /// ignis-os-repros/ref_to_pointer_place in the session scratchpad.
-  @cLayout
-  record Request {
-    public id0: u64;
-    public id1: u64;
-    public id2: u64;
-    public id3: u64;
-    public revision: u64;
-    public response: u64;
-  }
+  const BASE_REVISION: u64 = 6;
+  const BASE_REVISION_SUPPORTED: u64 = 0;
 
   @cLayout
   record BaseRevision {
-    public magic0: u64;
-    public magic1: u64;
+    public magic: u64[2];
     public revision: u64;
   }
 
@@ -52,6 +44,13 @@ export namespace Limine {
   }
 
   @cLayout
+  record FramebufferRequest {
+    public id: u64[4];
+    public revision: u64;
+    public response: *mut FramebufferResponse;
+  }
+
+  @cLayout
   record MemmapEntry {
     public base: u64;
     public length: u64;
@@ -66,51 +65,71 @@ export namespace Limine {
   }
 
   @cLayout
+  record MemmapRequest {
+    public id: u64[4];
+    public revision: u64;
+    public response: *mut MemmapResponse;
+  }
+
+  @cLayout
   record HhdmResponse {
     public revision: u64;
     public offset: u64;
   }
 
-  function baseRevisionTag(): *mut BaseRevision {
-    return asm pure () -> (address: *mut BaseRevision in reg) { lea {address}, [rip + limine_base_revision] };
+  @cLayout
+  record HhdmRequest {
+    public id: u64[4];
+    public revision: u64;
+    public response: *mut HhdmResponse;
   }
 
-  function framebufferRequest(): *mut Request {
-    return asm pure () -> (address: *mut Request in reg) { lea {address}, [rip + limine_framebuffer_request] };
-  }
+  record Requests {
+    static mut baseRevision: BaseRevision = BaseRevision {
+      magic: [0xf9562b2d5c95a6c8, 0x6a7b384944536bdc],
+      revision: BASE_REVISION,
+    };
 
-  function memmapRequest(): *mut Request {
-    return asm pure () -> (address: *mut Request in reg) { lea {address}, [rip + limine_memmap_request] };
-  }
+    static mut framebuffer: FramebufferRequest = FramebufferRequest {
+      id: [COMMON_MAGIC_0, COMMON_MAGIC_1, 0x9d5827dcd881dd75, 0xa3148604f6fab11b],
+      revision: 0,
+      response: null,
+    };
 
-  function hhdmRequest(): *mut Request {
-    return asm pure () -> (address: *mut Request in reg) { lea {address}, [rip + limine_hhdm_request] };
+    static mut memmap: MemmapRequest = MemmapRequest {
+      id: [COMMON_MAGIC_0, COMMON_MAGIC_1, 0x67cf3d9d378a806f, 0xe304acdfc50c3c62],
+      revision: 0,
+      response: null,
+    };
+
+    static mut hhdm: HhdmRequest = HhdmRequest {
+      id: [COMMON_MAGIC_0, COMMON_MAGIC_1, 0x48dcf1cb8ad2b852, 0x63984e959a98244b],
+      revision: 0,
+      response: null,
+    };
   }
 
   /// The bootloader clears the requested revision when it supports it.
   function isBaseRevisionSupported(): boolean {
-    let tag: *mut BaseRevision = baseRevisionTag();
-
-    return @readVolatile<u64>(&mut (*tag).revision as *mut u64) == BASE_REVISION_SUPPORTED;
+    return @readVolatile<u64>(&mut Requests::baseRevision.revision as *mut u64) == BASE_REVISION_SUPPORTED;
   }
 
-  /// The response address the bootloader left in `request`, or 0 when it
-  /// left none.
-  function responseAddress(request: *mut Request): u64 {
-    return @readVolatile<u64>(&mut (*request).response as *mut u64);
+  /// The response pointer the bootloader left in a request's `response`
+  /// slot, or null when it left none. The slot is read as an integer:
+  /// `@readVolatile<*mut T>` currently emits a volatile pointee instead of a
+  /// volatile load of the pointer, so clang folds the read to the slot's null
+  /// initializer (ignisc.rs bug, reported from Ignis OS M4).
+  function readResponse<T>(slot: *mut *mut T): *mut T {
+    return @pointerFromInteger<*mut T>(@readVolatile<u64>(slot as *mut u64));
   }
 
   /// The first framebuffer, or null when the bootloader provided none.
   function firstFramebuffer(): *mut Framebuffer {
-    let address: u64 = responseAddress(framebufferRequest());
+    let response: *mut FramebufferResponse = readResponse<FramebufferResponse>(
+      &mut Requests::framebuffer.response as *mut *mut FramebufferResponse,
+    );
 
-    if (address == 0) {
-      return null;
-    }
-
-    let response: *mut FramebufferResponse = @pointerFromInteger<*mut FramebufferResponse>(address);
-
-    if ((*response).framebufferCount == 0) {
+    if (response == null || (*response).framebufferCount == 0) {
       return null;
     }
 
@@ -119,11 +138,11 @@ export namespace Limine {
 
   /// The memory map, or null when the bootloader provided none.
   function memmap(): *mut MemmapResponse {
-    return @pointerFromInteger<*mut MemmapResponse>(responseAddress(memmapRequest()));
+    return readResponse<MemmapResponse>(&mut Requests::memmap.response as *mut *mut MemmapResponse);
   }
 
   /// The higher half direct map, or null when the bootloader provided none.
   function hhdm(): *mut HhdmResponse {
-    return @pointerFromInteger<*mut HhdmResponse>(responseAddress(hhdmRequest()));
+    return readResponse<HhdmResponse>(&mut Requests::hhdm.response as *mut *mut HhdmResponse);
   }
 }
