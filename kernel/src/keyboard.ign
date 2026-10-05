@@ -6,9 +6,7 @@
 //! Backspace. Every other key, every release and every extended (0xE0) key
 //! but right Ctrl yields NONE.
 
-/// The decoder state, one `static mut` scalar per field: a `static mut`
-/// record cannot take a record literal initializer yet. Repro:
-/// odd/repros/static_mut_record_init.
+/// The decoder state, one `static mut` per field.
 record KeyboardState {
   static mut extended: boolean = false;
   static mut pauseBytesLeft: u8 = 0;

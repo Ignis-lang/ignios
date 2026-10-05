@@ -57,14 +57,10 @@ export namespace Serial {
   }
 
   function writeDecimal(value: u64): void {
-    Format::decimal(value, (character: u8): void -> {
-      writeByte(character);
-    });
+    Format::decimal(value, writeByte);
   }
 
   function writeHex(value: u64): void {
-    Format::hexadecimal(value, (character: u8): void -> {
-      writeByte(character);
-    });
+    Format::hexadecimal(value, writeByte);
   }
 }

@@ -1,11 +1,8 @@
 //! x86_64 processor control.
 
 export namespace Cpu {
-  /// Disables interrupts and parks the processor for good. It never returns,
-  /// but is typed `void` because a statement call to a `never` function
-  /// currently emits a `void` C temporary that clang rejects. Repro:
-  /// ignis-os-repros/call_never_function in the session scratchpad.
-  function haltForever(): void {
+  /// Disables interrupts and parks the processor for good.
+  function haltForever(): never {
     while (true) {
       asm () clobber(memory) {
         cli

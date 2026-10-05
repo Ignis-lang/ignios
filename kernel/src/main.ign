@@ -25,7 +25,7 @@ const LINE_CAPACITY: u64 = 128;
 /// stops the machine. A panic raised while reporting another one only reaches
 /// COM1, so a fault in the console cannot recurse.
 @panicHandler
-function onPanic(message: str, file: str, line: u32): void {
+function onPanic(message: str, file: str, line: u32): never {
   if (PanicState::active || !Console::isInitialized()) {
     Serial::write("\npanic: ");
     Serial::write(message);

@@ -58,9 +58,7 @@ export namespace Color {
   }
 }
 
-/// The console state, one `static mut` scalar per field: a `static mut`
-/// record cannot take a record literal initializer yet. Repro:
-/// odd/repros/static_mut_record_init.
+/// The console state, one `static mut` per field.
 record ConsoleState {
   static mut initialized: boolean = false;
   static mut cursorDrawn: boolean = false;
@@ -196,15 +194,11 @@ export namespace Console {
   }
 
   function writeDecimal(value: u64): void {
-    Format::decimal(value, (character: u8): void -> {
-      writeChar(character);
-    });
+    Format::decimal(value, writeChar);
   }
 
   function writeHex(value: u64): void {
-    Format::hexadecimal(value, (character: u8): void -> {
-      writeChar(character);
-    });
+    Format::hexadecimal(value, writeChar);
   }
 
   function mirror(character: u8): void {

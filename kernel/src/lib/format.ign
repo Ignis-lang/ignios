@@ -1,10 +1,6 @@
 //! Integer formatting shared by the serial port and the console. Each
 //! function hands the characters it produces to `emit`, one byte at a time,
 //! so callers need no buffer.
-//!
-//! Callers pass a capture-free closure literal: a named `void` function passed
-//! as the `emit` value currently fails LIR verification with "unexpected
-//! return value". Repro: odd/repros/void_function_value.
 
 export namespace Format {
   /// Emits `value` in decimal, most significant digit first.
