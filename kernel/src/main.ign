@@ -1,0 +1,75 @@
+//! Ignis OS kernel entry point.
+
+import Cpu from "./arch/x86_64/cpu";
+import Limine from "./limine";
+import Serial from "./serial";
+import _ from "./lib/mem";
+
+/// Reports the panic on COM1 and stops the machine.
+@panicHandler
+function onPanic(message: str, file: str, line: u32): void {
+  Serial::write("\npanic: ");
+  Serial::write(message);
+  Serial::write(" at ");
+  Serial::write(file);
+  Serial::write(":");
+  Serial::writeDecimal(line);
+  Serial::write("\n");
+
+  Cpu::haltForever();
+}
+
+function reportFramebuffer(): void {
+  let framebuffer: *mut Limine::Framebuffer = Limine::firstFramebuffer();
+
+  if (framebuffer == null) {
+    @panic("Limine provided no framebuffer");
+  }
+
+  Serial::write("framebuffer: ");
+  Serial::writeDecimal((*framebuffer).width);
+  Serial::write("x");
+  Serial::writeDecimal((*framebuffer).height);
+  Serial::write(", pitch ");
+  Serial::writeDecimal((*framebuffer).pitch);
+  Serial::write(", bpp ");
+  Serial::writeDecimal((*framebuffer).bpp);
+  Serial::write("\n");
+}
+
+function reportMemory(): void {
+  let memmap: *mut Limine::MemmapResponse = Limine::memmap();
+
+  if (memmap == null) {
+    @panic("Limine provided no memory map");
+  }
+
+  let hhdm: *mut Limine::HhdmResponse = Limine::hhdm();
+
+  if (hhdm == null) {
+    @panic("Limine provided no higher half direct map");
+  }
+
+  Serial::write("memory map: ");
+  Serial::writeDecimal((*memmap).entryCount);
+  Serial::write(" entries, hhdm offset ");
+  Serial::writeHex((*hhdm).offset);
+  Serial::write("\n");
+}
+
+/// The ELF entry point. Limine jumps here in long mode on its own stack, with
+/// interrupts disabled and every request already answered.
+@externName("kmain")
+function kmain(): void {
+  Serial::initialize();
+  Serial::writeLine("Ignis OS booting");
+
+  if (!Limine::isBaseRevisionSupported()) {
+    @panic("Limine base revision 6 is not supported");
+  }
+
+  reportFramebuffer();
+  reportMemory();
+
+  Cpu::haltForever();
+}

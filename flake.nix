@@ -1,0 +1,37 @@
+{
+  description = "Ignis OS: an x86_64 UEFI kernel written in Ignis";
+
+  inputs = {
+    nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+  };
+
+  outputs =
+    { nixpkgs, ... }:
+    let
+      system = "x86_64-linux";
+      pkgs = import nixpkgs { inherit system; };
+      llvm = pkgs.llvmPackages;
+    in
+    {
+      # Unwrapped clang and lld: the Nix wrappers add hosted hardening flags
+      # (-fPIC, stack protector, glibc paths) that a freestanding kernel must not get.
+      devShells.${system}.default = pkgs.mkShellNoCC {
+        packages = [
+          llvm.clang-unwrapped
+          llvm.lld
+          llvm.bintools-unwrapped
+          pkgs.limine
+          pkgs.qemu
+          pkgs.mtools
+          pkgs.gnumake
+          pkgs.coreutils
+        ];
+
+        LIMINE_DIR = "${pkgs.limine}/share/limine";
+        OVMF_CODE = "${pkgs.OVMF.fd}/FV/OVMF_CODE.fd";
+        OVMF_VARS = "${pkgs.OVMF.fd}/FV/OVMF_VARS.fd";
+      };
+
+      formatter.${system} = pkgs.nixfmt;
+    };
+}

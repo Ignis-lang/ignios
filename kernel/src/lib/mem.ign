@@ -1,0 +1,74 @@
+//! The memory primitives a freestanding C unit may call on its own: clang
+//! lowers record copies, array zeroing and similar code to `memcpy`,
+//! `memset`, `memmove` and `memcmp`.
+//!
+//! The copies and fills run as `rep movsb` and `rep stosb`, so the C compiler
+//! cannot recognize their loops as a copy and turn them back into calls to
+//! themselves.
+
+export namespace Mem {
+  @externName("memcpy")
+  function copy(destination: *mut u8, source: *u8, count: u64): *mut u8 {
+    let mut target: *mut u8 = destination;
+    let mut origin: *u8 = source;
+    let mut remaining: u64 = count;
+
+    asm (target inout rdi, origin inout rsi, remaining inout rcx) clobber(memory) { rep movsb }
+
+    return destination;
+  }
+
+  @externName("memset")
+  function fill(destination: *mut u8, value: i32, count: u64): *mut u8 {
+    let mut target: *mut u8 = destination;
+    let mut remaining: u64 = count;
+    let byte: u8 = value as u8;
+
+    asm (target inout rdi, remaining inout rcx, byte in al) clobber(memory) { rep stosb }
+
+    return destination;
+  }
+
+  /// Copies forward unless the destination starts inside the source, where a
+  /// forward copy would overwrite bytes before reading them. That case copies
+  /// backward with the direction flag set, and clears it again afterwards.
+  @externName("memmove")
+  function move(destination: *mut u8, source: *u8, count: u64): *mut u8 {
+    let destinationAddress: u64 = @integerFromPointer(destination);
+    let sourceAddress: u64 = @integerFromPointer(source);
+
+    if (destinationAddress <= sourceAddress || destinationAddress >= sourceAddress + count) {
+      return copy(destination, source, count);
+    }
+
+    let mut target: *mut u8 = destination + (count - 1);
+    let mut origin: *u8 = source + (count - 1);
+    let mut remaining: u64 = count;
+
+    asm (target inout rdi, origin inout rsi, remaining inout rcx) clobber(memory, flags) {
+      std
+      rep movsb
+      cld
+    }
+
+    return destination;
+  }
+
+  @externName("memcmp")
+  function compare(left: *u8, right: *u8, count: u64): i32 {
+    let mut index: u64 = 0;
+
+    while (index < count) {
+      let leftByte: u8 = *(left + index);
+      let rightByte: u8 = *(right + index);
+
+      if (leftByte != rightByte) {
+        return (leftByte as i32) - (rightByte as i32);
+      }
+
+      index += 1;
+    }
+
+    return 0;
+  }
+}

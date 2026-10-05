@@ -1,0 +1,90 @@
+//! Polled driver for the COM1 16550 UART.
+
+import Port from "./arch/x86_64/io";
+
+export namespace Serial {
+  const COM1: u16 = 0x3F8;
+
+  const DATA: u16 = 0;
+  const INTERRUPT_ENABLE: u16 = 1;
+  const FIFO_CONTROL: u16 = 2;
+  const LINE_CONTROL: u16 = 3;
+  const MODEM_CONTROL: u16 = 4;
+  const LINE_STATUS: u16 = 5;
+
+  const DIVISOR_LATCH_ACCESS: u8 = 0x80;
+  const EIGHT_BITS_NO_PARITY_ONE_STOP: u8 = 0x03;
+  const FIFO_ENABLE_CLEAR_14_BYTES: u8 = 0xC7;
+  const DATA_TERMINAL_READY_REQUEST_TO_SEND_OUT2: u8 = 0x0B;
+  const TRANSMIT_HOLDING_EMPTY: u8 = 0x20;
+
+  /// Programs 115200 baud, 8N1 and the FIFOs, with UART interrupts off.
+  function initialize(): void {
+    Port::writeByte(COM1 + INTERRUPT_ENABLE, 0x00);
+    Port::writeByte(COM1 + LINE_CONTROL, DIVISOR_LATCH_ACCESS);
+    Port::writeByte(COM1 + DATA, 0x01);
+    Port::writeByte(COM1 + INTERRUPT_ENABLE, 0x00);
+    Port::writeByte(COM1 + LINE_CONTROL, EIGHT_BITS_NO_PARITY_ONE_STOP);
+    Port::writeByte(COM1 + FIFO_CONTROL, FIFO_ENABLE_CLEAR_14_BYTES);
+    Port::writeByte(COM1 + MODEM_CONTROL, DATA_TERMINAL_READY_REQUEST_TO_SEND_OUT2);
+  }
+
+  function writeByte(value: u8): void {
+    while ((Port::readByte(COM1 + LINE_STATUS) & TRANSMIT_HOLDING_EMPTY) == 0) {
+    }
+
+    Port::writeByte(COM1 + DATA, value);
+  }
+
+  /// Writes a NUL-terminated string, sending `\r\n` for each `\n`.
+  function write(text: str): void {
+    let mut cursor: *u8 = text as *u8;
+
+    while (*cursor != 0) {
+      if (*cursor == 0x0A) {
+        writeByte(0x0D);
+      }
+
+      writeByte(*cursor);
+      cursor = cursor + 1;
+    }
+  }
+
+  function writeLine(text: str): void {
+    write(text);
+    write("\n");
+  }
+
+  function writeDecimal(value: u64): void {
+    let mut divisor: u64 = 1;
+
+    while (value / divisor >= 10) {
+      divisor *= 10;
+    }
+
+    while (divisor > 0) {
+      let digit: u8 = ((value / divisor) % 10) as u8;
+
+      writeByte(digit + 0x30);
+      divisor /= 10;
+    }
+  }
+
+  function writeHex(value: u64): void {
+    write("0x");
+
+    let mut shift: u64 = 64;
+
+    while (shift > 0) {
+      shift -= 4;
+
+      let nibble: u8 = ((value >> shift) & 0xF) as u8;
+
+      if (nibble < 10) {
+        writeByte(nibble + 0x30);
+      } else {
+        writeByte(nibble + 0x57);
+      }
+    }
+  }
+}

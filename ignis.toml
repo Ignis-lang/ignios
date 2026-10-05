@@ -1,0 +1,32 @@
+[package]
+name = "kernel"
+version = "0.1.0"
+description = "Ignis OS kernel"
+
+[ignis]
+std = false
+
+[build]
+bin = false
+source_dir = "kernel/src"
+entry = "main.ign"
+out_dir = "build/ignis"
+opt_level = 2
+debug = false
+target = "c"
+cc = "clang"
+cflags = [
+  "--target=x86_64-unknown-none",
+  "-mno-red-zone",
+  "-mcmodel=kernel",
+  "-mno-sse",
+  "-mno-sse2",
+  "-mno-mmx",
+  "-mno-80387",
+  "-fno-pic",
+  "-fno-pie",
+  "-fno-stack-protector",
+  "-fno-stack-check",
+  "-fno-omit-frame-pointer",
+]
+emit = ["c"]
