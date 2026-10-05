@@ -2,7 +2,9 @@
 
 import Cpu from "./arch/x86_64/cpu";
 import Gdt from "./arch/x86_64/gdt";
+import Idt from "./arch/x86_64/idt";
 import Color, Console from "./console";
+import _ from "./interrupts";
 import Keyboard from "./keyboard";
 import Limine from "./limine";
 import Ps2 from "./ps2";
@@ -182,6 +184,9 @@ function kmain(): void {
 
   Gdt::initialize();
   reportGdt();
+
+  Idt::initialize();
+  Serial::writeLine("idt: 48 gates loaded");
 
   if (!Limine::isBaseRevisionSupported()) {
     @panic("Limine base revision 6 is not supported");

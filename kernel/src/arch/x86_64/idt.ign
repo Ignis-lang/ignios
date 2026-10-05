@@ -1,0 +1,72 @@
+//! The interrupt descriptor table: 256 interrupt gates, all pointing at the
+//! assembly thunks in `interrupt_asm.S`, which share one dispatcher.
+//!
+//! The table itself is zeroed storage in the assembly file, because Ignis has
+//! no way to declare a large zero-initialized `static mut` without writing
+//! every element.
+
+import Gdt from "./gdt";
+
+extern IdtAsm {
+  function ignis_interrupt_thunk(vector: u64): u64;
+  function ignis_idt_base(): u64;
+}
+
+/// The operand of `lidt`.
+@cLayout
+@packed
+record IdtPointer {
+  public limit: u16;
+  public base: u64;
+}
+
+export namespace Idt {
+  const GATE_COUNT: u64 = 256;
+  const GATE_SIZE: u64 = 16;
+
+  /// Vectors 0-31 are exceptions and 32-47 the remapped PIC lines. Those are
+  /// the only vectors that have a thunk.
+  const THUNK_COUNT: u64 = 48;
+
+  const DOUBLE_FAULT: u64 = 8;
+
+  /// Present, ring 0, 64-bit interrupt gate (interrupts stay off in the
+  /// handler).
+  const INTERRUPT_GATE: u64 = 0x8E;
+
+  /// Fills the gates that have a thunk and loads the table. The kernel GDT
+  /// must be loaded first, because the gates name its code selector and the
+  /// double fault gate its IST slot. Every other gate stays not present.
+  function initialize(): void {
+    let selector: u64 = Gdt::kernelCode() as u64;
+    let ist: u64 = Gdt::doubleFaultIst() as u64;
+
+    let mut vector: u64 = 0;
+
+    while (vector < THUNK_COUNT) {
+      let stack: u64 = vector == DOUBLE_FAULT ? ist : 0;
+
+      setGate(vector, IdtAsm::ignis_interrupt_thunk(vector), selector, stack, INTERRUPT_GATE);
+      vector += 1;
+    }
+
+    let descriptor: IdtPointer = IdtPointer {
+      limit: (GATE_COUNT * GATE_SIZE - 1) as u16,
+      base: IdtAsm::ignis_idt_base(),
+    };
+
+    asm (descriptor in mem) clobber(memory) { lidt {descriptor} }
+  }
+
+  /// Writes one gate. The parameters are runtime values so the shifts below
+  /// are 64-bit shifts.
+  function setGate(vector: u64, handler: u64, selector: u64, ist: u64, attributes: u64): void {
+    let table: *mut u64 = IdtAsm::ignis_idt_base() as *mut u64;
+
+    let low: u64 = (handler & 0xFFFF) | (selector << 16) | (ist << 32) | (attributes << 40) | (((handler >> 16) & 0xFFFF) << 48);
+    let high: u64 = handler >> 32;
+
+    @write<u64>(table + vector * 2, low);
+    @write<u64>(table + vector * 2 + 1, high);
+  }
+}

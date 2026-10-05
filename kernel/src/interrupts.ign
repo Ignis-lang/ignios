@@ -1,0 +1,183 @@
+//! The Ignis side of interrupt handling. `interrupt_asm.S` saves the
+//! registers and calls `dispatch` with a pointer to the saved frame.
+//!
+//! Every CPU exception is fatal for now: it is reported on COM1 and on the
+//! console, then the processor halts.
+
+import Cpu from "./arch/x86_64/cpu";
+import Color, Console from "./console";
+import Serial from "./serial";
+
+/// The state `interrupt_asm.S` leaves on the stack, lowest address first.
+/// The registers are pushed by the common stub, `vector` by the thunk, and
+/// `errorCode` by the thunk when the processor did not push one. The last
+/// five fields are the processor's own frame.
+@cLayout
+record InterruptFrame {
+  public rax: u64;
+  public rbx: u64;
+  public rcx: u64;
+  public rdx: u64;
+  public rsi: u64;
+  public rdi: u64;
+  public rbp: u64;
+  public r8: u64;
+  public r9: u64;
+  public r10: u64;
+  public r11: u64;
+  public r12: u64;
+  public r13: u64;
+  public r14: u64;
+  public r15: u64;
+  public vector: u64;
+  public errorCode: u64;
+  public rip: u64;
+  public cs: u64;
+  public rflags: u64;
+  public rsp: u64;
+  public ss: u64;
+}
+
+export namespace Interrupts {
+  const FIRST_IRQ_VECTOR: u64 = 32;
+  const PAGE_FAULT: u64 = 14;
+
+  /// Called by the common stub for every vector, on the interrupted stack.
+  @externName("ignis_interrupt_dispatch")
+  function dispatch(frame: *mut InterruptFrame): void {
+    reportException(frame);
+
+    Cpu::haltForever();
+  }
+
+  /// Writes the exception to COM1 and to the console when it is up.
+  function reportException(frame: *mut InterruptFrame): void {
+    let vector: u64 = (*frame).vector;
+
+    if (Console::isInitialized()) {
+      Console::setColors(Color::BRIGHT_WHITE, Color::RED);
+    }
+
+    emitText("\nCPU exception ");
+    emitText(mnemonic(vector));
+    emitText(" ");
+    emitText(name(vector));
+    emitText("\n");
+
+    emitText("  vector ");
+    emitDecimal(vector);
+    emitText(", error code ");
+    emitHex((*frame).errorCode);
+    emitText("\n");
+
+    emitText("  rip ");
+    emitHex((*frame).rip);
+    emitText(", cs ");
+    emitHex((*frame).cs);
+    emitText("\n");
+
+    emitText("  rflags ");
+    emitHex((*frame).rflags);
+    emitText(", rsp ");
+    emitHex((*frame).rsp);
+    emitText("\n");
+
+    if (vector == PAGE_FAULT) {
+      emitText("  cr2 ");
+      emitHex(readCr2());
+      emitText("\n");
+    }
+  }
+
+  function readCr2(): u64 {
+    return asm () -> (value: u64 in rax) { mov {value}, cr2 };
+  }
+
+  function emitText(value: str): void {
+    Serial::write(value);
+
+    if (Console::isInitialized()) {
+      Console::write(value);
+    }
+  }
+
+  function emitHex(value: u64): void {
+    Serial::writeHex(value);
+
+    if (Console::isInitialized()) {
+      Console::writeHex(value);
+    }
+  }
+
+  function emitDecimal(value: u64): void {
+    Serial::writeDecimal(value);
+
+    if (Console::isInitialized()) {
+      Console::writeDecimal(value);
+    }
+  }
+
+  function mnemonic(vector: u64): str {
+    return match (vector) {
+      0 -> "#DE",
+      1 -> "#DB",
+      2 -> "NMI",
+      3 -> "#BP",
+      4 -> "#OF",
+      5 -> "#BR",
+      6 -> "#UD",
+      7 -> "#NM",
+      8 -> "#DF",
+      9 -> "#MF",
+      10 -> "#TS",
+      11 -> "#NP",
+      12 -> "#SS",
+      13 -> "#GP",
+      14 -> "#PF",
+      16 -> "#MF",
+      17 -> "#AC",
+      18 -> "#MC",
+      19 -> "#XM",
+      20 -> "#VE",
+      21 -> "#CP",
+      28 -> "#HV",
+      29 -> "#VC",
+      30 -> "#SX",
+      _ -> "reserved",
+    };
+  }
+
+  function name(vector: u64): str {
+    if (vector >= FIRST_IRQ_VECTOR) {
+      return "Unexpected hardware interrupt";
+    }
+
+    return match (vector) {
+      0 -> "Divide Error",
+      1 -> "Debug",
+      2 -> "Non-Maskable Interrupt",
+      3 -> "Breakpoint",
+      4 -> "Overflow",
+      5 -> "Bound Range Exceeded",
+      6 -> "Invalid Opcode",
+      7 -> "Device Not Available",
+      8 -> "Double Fault",
+      9 -> "Coprocessor Segment Overrun",
+      10 -> "Invalid TSS",
+      11 -> "Segment Not Present",
+      12 -> "Stack-Segment Fault",
+      13 -> "General Protection Fault",
+      14 -> "Page Fault",
+      16 -> "x87 Floating-Point Exception",
+      17 -> "Alignment Check",
+      18 -> "Machine Check",
+      19 -> "SIMD Floating-Point Exception",
+      20 -> "Virtualization Exception",
+      21 -> "Control Protection Exception",
+      28 -> "Hypervisor Injection Exception",
+      29 -> "VMM Communication Exception",
+      30 -> "Security Exception",
+      _ -> "Reserved",
+    };
+  }
+}

@@ -109,6 +109,11 @@ export namespace Gdt {
     asm (selector in ax) clobber(memory) { ltr {selector} }
   }
 
+  /// The code segment selector of the kernel.
+  function kernelCode(): u16 {
+    return KERNEL_CODE;
+  }
+
   /// The IST slot number the IDT must give the double fault gate.
   function doubleFaultIst(): u8 {
     return DOUBLE_FAULT_IST;
