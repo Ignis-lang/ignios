@@ -12,6 +12,8 @@ IMAGE := $(BUILD)/ignis-os.img
 ESP := $(BUILD)/esp
 SERIAL_LOG := $(BUILD)/serial.log
 OVMF_VARS_COPY := $(BUILD)/ovmf-vars.fd
+SCREEN_PPM := $(BUILD)/screen.ppm
+SCREEN_PNG := $(BUILD)/screen.png
 HEADLESS_SECONDS ?= 15
 
 IGNIS_SOURCES := $(shell find kernel/src -name '*.ign')
@@ -28,7 +30,7 @@ QEMU_FLAGS := -machine q35,accel=kvm:tcg -m 256M -no-reboot \
 	-drive if=pflash,unit=1,format=raw,file=$(OVMF_VARS_COPY) \
 	-drive format=raw,file=$(IMAGE)
 
-.PHONY: all kernel esp image run run-headless clean
+.PHONY: all kernel esp image run run-headless screenshot font clean
 
 all: image
 
@@ -77,6 +79,21 @@ run-headless: $(IMAGE) $(OVMF_VARS_COPY)
 		-serial file:$(SERIAL_LOG) || test $$? -eq 124
 	cat $(SERIAL_LOG)
 	grep -q 'Ignis OS booting' $(SERIAL_LOG)
+	grep -q '^ Ignis OS ' $(SERIAL_LOG)
+	grep -q '^> ' $(SERIAL_LOG)
+
+# Boots without a display until the console prompt appears on COM1, then
+# saves the framebuffer to build/screen.ppm and build/screen.png.
+screenshot: $(IMAGE) $(OVMF_VARS_COPY)
+	scripts/screenshot.sh $(SERIAL_LOG) $(SCREEN_PPM) $(HEADLESS_SECONDS) -- \
+		$(QEMU) $(QEMU_FLAGS) -display none -serial file:$(SERIAL_LOG)
+	pnmtopng $(SCREEN_PPM) > $(SCREEN_PNG)
+	@echo "wrote $(SCREEN_PNG)"
+
+# Regenerates the committed console font from the Spleen BDF in the devShell.
+font:
+	@test -n "$(SPLEEN_DIR)" || { echo "SPLEEN_DIR is not set; run inside nix develop" >&2; exit 1; }
+	python3 scripts/gen-font.py $(SPLEEN_DIR)/spleen-8x16.bdf kernel/src/font_8x16.S
 
 clean:
 	rm -rf $(BUILD)

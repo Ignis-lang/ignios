@@ -1,6 +1,7 @@
 //! Polled driver for the COM1 16550 UART.
 
 import Port from "./arch/x86_64/io";
+import Format from "./lib/format";
 
 export namespace Serial {
   const COM1: u16 = 0x3F8;
@@ -56,35 +57,14 @@ export namespace Serial {
   }
 
   function writeDecimal(value: u64): void {
-    let mut divisor: u64 = 1;
-
-    while (value / divisor >= 10) {
-      divisor *= 10;
-    }
-
-    while (divisor > 0) {
-      let digit: u8 = ((value / divisor) % 10) as u8;
-
-      writeByte(digit + 0x30);
-      divisor /= 10;
-    }
+    Format::decimal(value, (character: u8): void -> {
+      writeByte(character);
+    });
   }
 
   function writeHex(value: u64): void {
-    write("0x");
-
-    let mut shift: u64 = 64;
-
-    while (shift > 0) {
-      shift -= 4;
-
-      let nibble: u8 = ((value >> shift) & 0xF) as u8;
-
-      if (nibble < 10) {
-        writeByte(nibble + 0x30);
-      } else {
-        writeByte(nibble + 0x57);
-      }
-    }
+    Format::hexadecimal(value, (character: u8): void -> {
+      writeByte(character);
+    });
   }
 }

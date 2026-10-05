@@ -1,40 +1,70 @@
 //! Ignis OS kernel entry point.
 
 import Cpu from "./arch/x86_64/cpu";
+import Color, Console from "./console";
 import Limine from "./limine";
 import Serial from "./serial";
 import _ from "./lib/mem";
 
-/// Reports the panic on COM1 and stops the machine.
+record PanicState {
+  static mut active: boolean = false;
+}
+
+/// Reports the panic on COM1, and on the console once it is initialized, then
+/// stops the machine. A panic raised while reporting another one only reaches
+/// COM1, so a fault in the console cannot recurse.
 @panicHandler
 function onPanic(message: str, file: str, line: u32): void {
-  Serial::write("\npanic: ");
-  Serial::write(message);
-  Serial::write(" at ");
-  Serial::write(file);
-  Serial::write(":");
-  Serial::writeDecimal(line);
-  Serial::write("\n");
+  if (PanicState::active || !Console::isInitialized()) {
+    Serial::write("\npanic: ");
+    Serial::write(message);
+    Serial::write(" at ");
+    Serial::write(file);
+    Serial::write(":");
+    Serial::writeDecimal(line);
+    Serial::write("\n");
+
+    Cpu::haltForever();
+  }
+
+  PanicState::active = true;
+
+  Console::setColors(Color::BRIGHT_WHITE, Color::RED);
+  Console::write("\npanic: ");
+  Console::write(message);
+  Console::write(" at ");
+  Console::write(file);
+  Console::write(":");
+  Console::writeDecimal(line);
+  Console::write("\n");
 
   Cpu::haltForever();
 }
 
-function reportFramebuffer(): void {
+function requireFramebuffer(): *mut Limine::Framebuffer {
   let framebuffer: *mut Limine::Framebuffer = Limine::firstFramebuffer();
 
   if (framebuffer == null) {
     @panic("Limine provided no framebuffer");
   }
 
-  Serial::write("framebuffer: ");
-  Serial::writeDecimal((*framebuffer).width);
-  Serial::write("x");
-  Serial::writeDecimal((*framebuffer).height);
-  Serial::write(", pitch ");
-  Serial::writeDecimal((*framebuffer).pitch);
-  Serial::write(", bpp ");
-  Serial::writeDecimal((*framebuffer).bpp);
-  Serial::write("\n");
+  return framebuffer;
+}
+
+function reportFramebuffer(framebuffer: *mut Limine::Framebuffer): void {
+  Console::write("framebuffer: ");
+  Console::writeDecimal((*framebuffer).width);
+  Console::write("x");
+  Console::writeDecimal((*framebuffer).height);
+  Console::write(", pitch ");
+  Console::writeDecimal((*framebuffer).pitch);
+  Console::write(", bpp ");
+  Console::writeDecimal((*framebuffer).bpp);
+  Console::write(", ");
+  Console::writeDecimal(Console::columns());
+  Console::write("x");
+  Console::writeDecimal(Console::rows());
+  Console::writeLine(" cells");
 }
 
 function reportMemory(): void {
@@ -50,11 +80,30 @@ function reportMemory(): void {
     @panic("Limine provided no higher half direct map");
   }
 
-  Serial::write("memory map: ");
-  Serial::writeDecimal((*memmap).entryCount);
-  Serial::write(" entries, hhdm offset ");
-  Serial::writeHex((*hhdm).offset);
-  Serial::write("\n");
+  Console::write("memory map: ");
+  Console::writeDecimal((*memmap).entryCount);
+  Console::write(" entries, hhdm offset ");
+  Console::writeHex((*hhdm).offset);
+  Console::writeLine("");
+}
+
+function printBanner(framebuffer: *mut Limine::Framebuffer): void {
+  Console::setColors(Color::BRIGHT_YELLOW, Color::BLUE);
+  Console::write(" Ignis OS ");
+  Console::setColors(Color::BRIGHT_CYAN, Color::BLACK);
+  Console::writeLine(" an x86_64 kernel written in Ignis");
+  Console::writeLine("");
+
+  Console::setColors(Color::WHITE, Color::BLACK);
+  reportFramebuffer(framebuffer);
+  reportMemory();
+  Console::writeLine("");
+}
+
+function printPrompt(): void {
+  Console::setColors(Color::BRIGHT_GREEN, Color::BLACK);
+  Console::write("> ");
+  Console::setColors(Color::BRIGHT_WHITE, Color::BLACK);
 }
 
 /// The ELF entry point. Limine jumps here in long mode on its own stack, with
@@ -68,8 +117,11 @@ function kmain(): void {
     @panic("Limine base revision 6 is not supported");
   }
 
-  reportFramebuffer();
-  reportMemory();
+  let framebuffer: *mut Limine::Framebuffer = requireFramebuffer();
+
+  Console::initialize(framebuffer);
+  printBanner(framebuffer);
+  printPrompt();
 
   Cpu::haltForever();
 }

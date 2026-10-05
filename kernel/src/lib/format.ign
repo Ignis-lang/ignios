@@ -1,0 +1,45 @@
+//! Integer formatting shared by the serial port and the console. Each
+//! function hands the characters it produces to `emit`, one byte at a time,
+//! so callers need no buffer.
+//!
+//! Callers pass a capture-free closure literal: a named `void` function passed
+//! as the `emit` value currently fails LIR verification with "unexpected
+//! return value". Repro: odd/repros/void_function_value.
+
+export namespace Format {
+  /// Emits `value` in decimal, most significant digit first.
+  function decimal(value: u64, emit: (u8) -> void): void {
+    let mut divisor: u64 = 1;
+
+    while (value / divisor >= 10) {
+      divisor *= 10;
+    }
+
+    while (divisor > 0) {
+      let digit: u8 = ((value / divisor) % 10) as u8;
+
+      emit(digit + 0x30);
+      divisor /= 10;
+    }
+  }
+
+  /// Emits `value` as `0x` followed by all 16 lowercase hex digits.
+  function hexadecimal(value: u64, emit: (u8) -> void): void {
+    emit(0x30);
+    emit(0x78);
+
+    let mut shift: u64 = 64;
+
+    while (shift > 0) {
+      shift -= 4;
+
+      let nibble: u8 = ((value >> shift) & 0xF) as u8;
+
+      if (nibble < 10) {
+        emit(nibble + 0x30);
+      } else {
+        emit(nibble + 0x57);
+      }
+    }
+  }
+}

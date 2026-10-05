@@ -1,0 +1,386 @@
+//! Text console on the Limine framebuffer.
+//!
+//! The screen is a grid of 8x16 cells. Each cell is drawn with a foreground
+//! and a background color from a 16-color palette, the cursor is an underline
+//! XORed into its cell, and the text scrolls up one row when the bottom is
+//! reached. Everything written to the console is mirrored to COM1, so a
+//! headless run can read the same text from the serial log.
+//!
+//! Scrolling moves the framebuffer itself, reading video memory back. That is
+//! cheap under QEMU but slow on real hardware, where a shadow buffer in normal
+//! memory would be the fix once the kernel can allocate one.
+
+import Font from "./font";
+import Limine from "./limine";
+import Serial from "./serial";
+import Format from "./lib/format";
+import Mem from "./lib/mem";
+
+/// Palette indices, in ANSI order, with the classic VGA text-mode colors.
+export namespace Color {
+  const BLACK: u8 = 0;
+  const RED: u8 = 1;
+  const GREEN: u8 = 2;
+  const YELLOW: u8 = 3;
+  const BLUE: u8 = 4;
+  const MAGENTA: u8 = 5;
+  const CYAN: u8 = 6;
+  const WHITE: u8 = 7;
+  const BRIGHT_BLACK: u8 = 8;
+  const BRIGHT_RED: u8 = 9;
+  const BRIGHT_GREEN: u8 = 10;
+  const BRIGHT_YELLOW: u8 = 11;
+  const BRIGHT_BLUE: u8 = 12;
+  const BRIGHT_MAGENTA: u8 = 13;
+  const BRIGHT_CYAN: u8 = 14;
+  const BRIGHT_WHITE: u8 = 15;
+
+  /// The 0xRRGGBB value of a palette index. Indices above 15 are white.
+  function rgb(index: u8): u32 {
+    return match (index) {
+      0 -> 0x000000,
+      1 -> 0xAA0000,
+      2 -> 0x00AA00,
+      3 -> 0xAA5500,
+      4 -> 0x0000AA,
+      5 -> 0xAA00AA,
+      6 -> 0x00AAAA,
+      7 -> 0xAAAAAA,
+      8 -> 0x555555,
+      9 -> 0xFF5555,
+      10 -> 0x55FF55,
+      11 -> 0xFFFF55,
+      12 -> 0x5555FF,
+      13 -> 0xFF55FF,
+      14 -> 0x55FFFF,
+      _ -> 0xFFFFFF,
+    };
+  }
+}
+
+/// The console state, one `static mut` scalar per field: a `static mut`
+/// record cannot take a record literal initializer yet. Repro:
+/// odd/repros/static_mut_record_init.
+record ConsoleState {
+  static mut initialized: boolean = false;
+  static mut cursorDrawn: boolean = false;
+
+  static mut base: u64 = 0;
+  static mut pitch: u64 = 0;
+  static mut width: u64 = 0;
+  static mut height: u64 = 0;
+
+  static mut redSize: u8 = 0;
+  static mut redShift: u8 = 0;
+  static mut greenSize: u8 = 0;
+  static mut greenShift: u8 = 0;
+  static mut blueSize: u8 = 0;
+  static mut blueShift: u8 = 0;
+
+  static mut columns: u64 = 0;
+  static mut rows: u64 = 0;
+  static mut column: u64 = 0;
+  static mut row: u64 = 0;
+
+  static mut foreground: u32 = 0;
+  static mut background: u32 = 0;
+}
+
+export namespace Console {
+  const BITS_PER_PIXEL: u16 = 32;
+  const MEMORY_MODEL_RGB: u8 = 1;
+  const TAB_WIDTH: u64 = 8;
+  const CURSOR_HEIGHT: u64 = 2;
+
+  const BACKSPACE: u8 = 0x08;
+  const TAB: u8 = 0x09;
+  const NEWLINE: u8 = 0x0A;
+  const CARRIAGE_RETURN: u8 = 0x0D;
+  const SPACE: u8 = 0x20;
+
+  /// Takes over `framebuffer`, which must be 32 bits per pixel with RGB
+  /// masks, and clears it to white on black.
+  function initialize(framebuffer: *mut Limine::Framebuffer): void {
+    if ((*framebuffer).bpp != BITS_PER_PIXEL || (*framebuffer).memoryModel != MEMORY_MODEL_RGB) {
+      @panic("console needs a 32 bpp RGB framebuffer");
+    }
+
+    ConsoleState::base = @integerFromPointer((*framebuffer).address);
+    ConsoleState::pitch = (*framebuffer).pitch;
+    ConsoleState::width = (*framebuffer).width;
+    ConsoleState::height = (*framebuffer).height;
+
+    ConsoleState::redSize = (*framebuffer).redMaskSize;
+    ConsoleState::redShift = (*framebuffer).redMaskShift;
+    ConsoleState::greenSize = (*framebuffer).greenMaskSize;
+    ConsoleState::greenShift = (*framebuffer).greenMaskShift;
+    ConsoleState::blueSize = (*framebuffer).blueMaskSize;
+    ConsoleState::blueShift = (*framebuffer).blueMaskShift;
+
+    ConsoleState::columns = ConsoleState::width / Font::WIDTH;
+    ConsoleState::rows = ConsoleState::height / Font::HEIGHT;
+
+    if (ConsoleState::columns == 0 || ConsoleState::rows == 0) {
+      @panic("framebuffer is smaller than one console cell");
+    }
+
+    setColors(Color::WHITE, Color::BLACK);
+    ConsoleState::initialized = true;
+    clear();
+  }
+
+  function isInitialized(): boolean {
+    return ConsoleState::initialized;
+  }
+
+  function columns(): u64 {
+    return ConsoleState::columns;
+  }
+
+  function rows(): u64 {
+    return ConsoleState::rows;
+  }
+
+  /// Sets the palette colors of the characters written from now on.
+  function setColors(foreground: u8, background: u8): void {
+    let cursorWasDrawn: boolean = ConsoleState::cursorDrawn;
+
+    hideCursor();
+    ConsoleState::foreground = packColor(foreground);
+    ConsoleState::background = packColor(background);
+
+    if (cursorWasDrawn) {
+      showCursor();
+    }
+  }
+
+  /// Fills the screen with the background color and moves the cursor home.
+  /// The serial mirror is not cleared.
+  function clear(): void {
+    ConsoleState::cursorDrawn = false;
+    fillPixels(0, 0, ConsoleState::width, ConsoleState::height, ConsoleState::background);
+    ConsoleState::column = 0;
+    ConsoleState::row = 0;
+    showCursor();
+  }
+
+  /// Writes one byte: printable ASCII is drawn, `\n` starts a new line, `\r`
+  /// returns to the first column, `\t` advances to the next multiple of
+  /// TAB_WIDTH and backspace erases the previous cell. Other bytes draw `?`.
+  /// Before `initialize`, the byte only goes to the serial mirror.
+  function writeChar(character: u8): void {
+    mirror(character);
+
+    if (!ConsoleState::initialized) {
+      return;
+    }
+
+    hideCursor();
+    render(character);
+    showCursor();
+  }
+
+  /// Writes a NUL-terminated string.
+  function write(text: str): void {
+    let mut cursor: *u8 = text as *u8;
+
+    while (*cursor != 0) {
+      writeChar(*cursor);
+      cursor = cursor + 1;
+    }
+  }
+
+  function writeLine(text: str): void {
+    write(text);
+    writeChar(NEWLINE);
+  }
+
+  function writeDecimal(value: u64): void {
+    Format::decimal(value, (character: u8): void -> {
+      writeChar(character);
+    });
+  }
+
+  function writeHex(value: u64): void {
+    Format::hexadecimal(value, (character: u8): void -> {
+      writeChar(character);
+    });
+  }
+
+  function mirror(character: u8): void {
+    if (character == NEWLINE) {
+      Serial::writeByte(CARRIAGE_RETURN);
+      Serial::writeByte(NEWLINE);
+    } else if (character == BACKSPACE) {
+      Serial::writeByte(BACKSPACE);
+      Serial::writeByte(SPACE);
+      Serial::writeByte(BACKSPACE);
+    } else {
+      Serial::writeByte(character);
+    }
+  }
+
+  function render(character: u8): void {
+    if (character == NEWLINE) {
+      newLine();
+    } else if (character == CARRIAGE_RETURN) {
+      ConsoleState::column = 0;
+    } else if (character == TAB) {
+      renderPrintable(SPACE);
+
+      while (ConsoleState::column % TAB_WIDTH != 0) {
+        renderPrintable(SPACE);
+      }
+    } else if (character == BACKSPACE) {
+      eraseBack();
+    } else {
+      renderPrintable(character);
+    }
+  }
+
+  /// Draws `character` at the cursor and advances it, wrapping to the next
+  /// line after the last column.
+  function renderPrintable(character: u8): void {
+    drawGlyph(character, ConsoleState::column, ConsoleState::row);
+    ConsoleState::column += 1;
+
+    if (ConsoleState::column == ConsoleState::columns) {
+      newLine();
+    }
+  }
+
+  /// Moves the cursor back one cell, to the end of the previous line when it
+  /// is in the first column, and blanks that cell. Does nothing at the top
+  /// left corner.
+  function eraseBack(): void {
+    if (ConsoleState::column > 0) {
+      ConsoleState::column -= 1;
+    } else if (ConsoleState::row > 0) {
+      ConsoleState::row -= 1;
+      ConsoleState::column = ConsoleState::columns - 1;
+    } else {
+      return;
+    }
+
+    drawGlyph(SPACE, ConsoleState::column, ConsoleState::row);
+  }
+
+  function newLine(): void {
+    ConsoleState::column = 0;
+
+    if (ConsoleState::row + 1 < ConsoleState::rows) {
+      ConsoleState::row += 1;
+    } else {
+      scrollUp();
+    }
+  }
+
+  /// Moves every text row but the first up by one row and blanks the last.
+  function scrollUp(): void {
+    let rowBytes: u64 = ConsoleState::pitch * Font::HEIGHT;
+    let screen: *mut u8 = @pointerFromInteger<*mut u8>(ConsoleState::base);
+
+    Mem::move(screen, (screen + rowBytes) as *u8, rowBytes * (ConsoleState::rows - 1));
+
+    let lastRowTop: u64 = (ConsoleState::rows - 1) * Font::HEIGHT;
+
+    fillPixels(0, lastRowTop, ConsoleState::width, Font::HEIGHT, ConsoleState::background);
+  }
+
+  function drawGlyph(character: u8, column: u64, row: u64): void {
+    let glyph: *u8 = Font::glyph(character);
+    let foreground: u32 = ConsoleState::foreground;
+    let background: u32 = ConsoleState::background;
+    let mut line: u64 = 0;
+
+    while (line < Font::HEIGHT) {
+      let bits: u8 = *(glyph + line);
+      let pixels: *mut u32 = pixelAddress(column * Font::WIDTH, row * Font::HEIGHT + line);
+      let mut mask: u8 = 0x80;
+      let mut x: u64 = 0;
+
+      while (x < Font::WIDTH) {
+        *(pixels + x) = (bits & mask) != 0 ? foreground : background;
+        mask >>= 1;
+        x += 1;
+      }
+
+      line += 1;
+    }
+  }
+
+  /// Fills the `width` x `height` pixel rectangle at (`left`, `top`).
+  function fillPixels(left: u64, top: u64, width: u64, height: u64, color: u32): void {
+    let mut y: u64 = 0;
+
+    while (y < height) {
+      let pixels: *mut u32 = pixelAddress(left, top + y);
+      let mut x: u64 = 0;
+
+      while (x < width) {
+        *(pixels + x) = color;
+        x += 1;
+      }
+
+      y += 1;
+    }
+  }
+
+  function pixelAddress(x: u64, y: u64): *mut u32 {
+    return @pointerFromInteger<*mut u32>(ConsoleState::base + y * ConsoleState::pitch + x * 4);
+  }
+
+  function showCursor(): void {
+    if (ConsoleState::initialized && !ConsoleState::cursorDrawn) {
+      toggleCursor();
+      ConsoleState::cursorDrawn = true;
+    }
+  }
+
+  function hideCursor(): void {
+    if (ConsoleState::cursorDrawn) {
+      toggleCursor();
+      ConsoleState::cursorDrawn = false;
+    }
+  }
+
+  /// XORs the bottom CURSOR_HEIGHT pixel rows of the cursor cell with the
+  /// difference between the two colors, so a second call restores the cell.
+  function toggleCursor(): void {
+    let difference: u32 = ConsoleState::foreground ^ ConsoleState::background;
+    let left: u64 = ConsoleState::column * Font::WIDTH;
+    let top: u64 = ConsoleState::row * Font::HEIGHT + Font::HEIGHT - CURSOR_HEIGHT;
+    let mut y: u64 = 0;
+
+    while (y < CURSOR_HEIGHT) {
+      let pixels: *mut u32 = pixelAddress(left, top + y);
+      let mut x: u64 = 0;
+
+      while (x < Font::WIDTH) {
+        *(pixels + x) = *(pixels + x) ^ difference;
+        x += 1;
+      }
+
+      y += 1;
+    }
+  }
+
+  /// The framebuffer pixel for a palette index, with each 8-bit channel
+  /// scaled to its mask size and moved to its mask shift.
+  function packColor(index: u8): u32 {
+    let rgb: u32 = Color::rgb(index);
+    let red: u32 = scaleChannel((rgb >> 16) & 0xFF, ConsoleState::redSize) << (ConsoleState::redShift as u32);
+    let green: u32 = scaleChannel((rgb >> 8) & 0xFF, ConsoleState::greenSize) << (ConsoleState::greenShift as u32);
+    let blue: u32 = scaleChannel(rgb & 0xFF, ConsoleState::blueSize) << (ConsoleState::blueShift as u32);
+
+    return red | green | blue;
+  }
+
+  function scaleChannel(value: u32, size: u8): u32 {
+    if (size >= 8) {
+      return value << ((size - 8) as u32);
+    }
+
+    return value >> ((8 - size) as u32);
+  }
+}
