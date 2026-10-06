@@ -1,4 +1,4 @@
-//! Ignis OS kernel entry point.
+//! IgniOS kernel entry point.
 
 import Cpu from "./arch/x86_64/cpu";
 import Gdt from "./arch/x86_64/gdt";
@@ -106,7 +106,7 @@ function reportMemory(): void {
 
 function printBanner(framebuffer: *mut Limine::Framebuffer): void {
   Console::setColors(Color::BRIGHT_YELLOW, Color::BLUE);
-  Console::write(" Ignis OS ");
+  Console::write(" IgniOS ");
   Console::setColors(Color::BRIGHT_CYAN, Color::BLACK);
   Console::writeLine(" an x86_64 kernel written in Ignis");
   Console::writeLine("");
@@ -188,7 +188,7 @@ function runTerminal(): void {
 @externName("kmain")
 function kmain(): void {
   Serial::initialize();
-  Serial::writeLine("Ignis OS booting");
+  Serial::writeLine("IgniOS booting");
 
   Gdt::initialize();
   reportGdt();

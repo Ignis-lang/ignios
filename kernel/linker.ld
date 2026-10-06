@@ -1,4 +1,4 @@
-/* Ignis OS kernel layout: higher half, one PT_LOAD per permission set. */
+/* IgniOS kernel layout: higher half, one PT_LOAD per permission set. */
 
 OUTPUT_FORMAT(elf64-x86-64)
 ENTRY(kmain)

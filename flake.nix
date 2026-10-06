@@ -1,5 +1,5 @@
 {
-  description = "Ignis OS: an x86_64 UEFI kernel written in Ignis";
+  description = "IgniOS: an x86_64 UEFI kernel written in Ignis";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";

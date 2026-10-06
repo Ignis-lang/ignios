@@ -1,4 +1,4 @@
-# Ignis OS build. Run inside `nix develop`, which provides the toolchain and
+# IgniOS build. Run inside `nix develop`, which provides the toolchain and
 # exports LIMINE_DIR, OVMF_CODE and OVMF_VARS.
 
 IGNIS ?= ../ignisc.rs/build/bootstrap/stage1/ignis
@@ -7,7 +7,7 @@ QEMU := qemu-system-x86_64
 
 BUILD := build
 KERNEL := $(BUILD)/kernel.elf
-IMAGE := $(BUILD)/ignis-os.img
+IMAGE := $(BUILD)/ignios.img
 ESP := $(BUILD)/esp
 SERIAL_LOG := $(BUILD)/serial.log
 OVMF_VARS_COPY := $(BUILD)/ovmf-vars.fd
@@ -60,7 +60,7 @@ image: $(IMAGE)
 $(IMAGE): esp
 	rm -f $@
 	truncate -s 64M $@
-	mformat -i $@ -F -v IGNISOS ::
+	mformat -i $@ -F -v IGNIOS ::
 	mcopy -i $@ -s $(ESP)/EFI ::/
 	mcopy -i $@ $(ESP)/kernel.elf ::/kernel.elf
 
@@ -79,8 +79,8 @@ run-headless: $(IMAGE) $(OVMF_VARS_COPY)
 	timeout $(HEADLESS_SECONDS) $(QEMU) $(QEMU_FLAGS) -display none \
 		-serial file:$(SERIAL_LOG) || test $$? -eq 124
 	cat $(SERIAL_LOG)
-	grep -q 'Ignis OS booting' $(SERIAL_LOG)
-	grep -q '^ Ignis OS ' $(SERIAL_LOG)
+	grep -q 'IgniOS booting' $(SERIAL_LOG)
+	grep -q '^ IgniOS ' $(SERIAL_LOG)
 	grep -q '^> ' $(SERIAL_LOG)
 
 # Boots without a display until the console prompt appears on COM1, then

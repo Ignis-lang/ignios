@@ -1,10 +1,10 @@
-# Ignis OS
+# IgniOS
 
 A Unix-like x86_64 kernel written in [Ignis](https://github.com/Ignis-lang/ignis), booted by Limine on UEFI.
 
-Ignis OS is the first large Ignis program that lives outside the compiler. It doubles as a test bench: when the kernel hits a compiler bug, the bug is fixed in the compiler rather than worked around here. Volatile access, freestanding builds, C-layout records, C function pointers and Intel-syntax inline asm all landed in Ignis because this kernel needed them.
+IgniOS is the first large Ignis program that lives outside the compiler. It doubles as a test bench: when the kernel hits a compiler bug, the bug is fixed in the compiler rather than worked around here. Volatile access, freestanding builds, C-layout records, C function pointers and Intel-syntax inline asm all landed in Ignis because this kernel needed them.
 
-![Ignis OS console after typing a few lines](docs/screenshot.png)
+![IgniOS console after typing a few lines](docs/screenshot.png)
 
 ## Status
 
@@ -37,7 +37,7 @@ The build also needs an Ignis compiler with freestanding support (Ignis `main` f
 | Target | What it does |
 |---|---|
 | `kernel` | Builds `build/kernel.elf` |
-| `image` | Builds `build/ignis-os.img`, a FAT32 EFI system partition with Limine and the kernel |
+| `image` | Builds `build/ignios.img`, a FAT32 EFI system partition with Limine and the kernel |
 | `run` | Boots in QEMU with the serial console on stdio |
 | `run-headless` | Boots without a display and checks the banner and prompt in `build/serial.log` |
 | `screenshot` | Boots headless and saves the screen to `build/screen.png` |
