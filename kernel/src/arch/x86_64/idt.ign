@@ -9,7 +9,11 @@ import Gdt from "./gdt";
 
 extern IdtAsm {
   function ignis_interrupt_thunk(vector: u64): u64;
-  function ignis_idt_base(): u64;
+}
+
+/// The 256 gates, 16 bytes each, in zero-initialized storage.
+record IdtStorage {
+  static mut GATES: u8[4096];
 }
 
 /// The operand of `lidt`.
@@ -52,16 +56,21 @@ export namespace Idt {
 
     let descriptor: IdtPointer = IdtPointer {
       limit: (GATE_COUNT * GATE_SIZE - 1) as u16,
-      base: IdtAsm::ignis_idt_base(),
+      base: tableBase(),
     };
 
     asm (descriptor in mem) clobber(memory) { lidt {descriptor} }
   }
 
+  /// Address of the gate table, as `lidt` and `setGate` need it.
+  function tableBase(): u64 {
+    return @integerFromPointer(&mut IdtStorage::GATES as *mut u8);
+  }
+
   /// Writes one gate. The parameters are runtime values so the shifts below
   /// are 64-bit shifts.
   function setGate(vector: u64, handler: u64, selector: u64, ist: u64, attributes: u64): void {
-    let table: *mut u64 = IdtAsm::ignis_idt_base() as *mut u64;
+    let table: *mut u64 = tableBase() as *mut u64;
 
     let low: u64 = (handler & 0xFFFF) | (selector << 16) | (ist << 32) | (attributes << 40) | (((handler >> 16) & 0xFFFF) << 48);
     let high: u64 = handler >> 32;

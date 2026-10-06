@@ -24,17 +24,4 @@ ignis_gdt_reload_segments:
     mov gs, ax
     ret
 
-/* u64 ignis_double_fault_stack_top(void) */
-.global ignis_double_fault_stack_top
-ignis_double_fault_stack_top:
-    lea rax, [rip + double_fault_stack_end]
-    ret
-
-.section .bss
-
-.balign 16
-double_fault_stack:
-    .skip 16384
-double_fault_stack_end:
-
 .section .note.GNU-stack,"",@progbits

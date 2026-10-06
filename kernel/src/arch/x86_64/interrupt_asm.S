@@ -75,12 +75,6 @@ ignis_interrupt_thunk:
     mov rax, [rax + rdi * 8]
     ret
 
-/* u64 ignis_idt_base(void): the 256 gate table, 16 bytes per gate. */
-.global ignis_idt_base
-ignis_idt_base:
-    lea rax, [rip + idt_table]
-    ret
-
 .section .rodata
 
 .balign 8
@@ -91,11 +85,5 @@ ignis_interrupt_thunk_table:
 .irp vector, 32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47
     .quad ignis_interrupt_thunk_\vector
 .endr
-
-.section .bss
-
-.balign 16
-idt_table:
-    .skip 4096
 
 .section .note.GNU-stack,"",@progbits

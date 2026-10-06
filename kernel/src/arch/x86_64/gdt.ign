@@ -67,7 +67,11 @@ record GdtState {
 
 extern GdtAsm {
   function ignis_gdt_reload_segments(code: u16, data: u16): void;
-  function ignis_double_fault_stack_top(): u64;
+}
+
+/// The stack the double fault handler runs on.
+record DoubleFaultStack {
+  static mut MEMORY: u8[16384];
 }
 
 export namespace Gdt {
@@ -85,10 +89,20 @@ export namespace Gdt {
   const TSS_AVAILABLE_ACCESS: u64 = 0x89;
   const TSS_SLOT: u64 = 5;
 
+  /// Size of `DoubleFaultStack::MEMORY`; array sizes must be literals, so the
+  /// two values are kept equal by hand.
+  const DOUBLE_FAULT_STACK_SIZE: u64 = 16384;
+
+  /// One past the end of the double fault stack, the value IST1 holds. The CPU
+  /// aligns RSP to 16 bytes when it switches to an IST stack.
+  function doubleFaultStackTop(): u64 {
+    return @integerFromPointer(&mut DoubleFaultStack::MEMORY as *mut u8) + DOUBLE_FAULT_STACK_SIZE;
+  }
+
   /// Loads the table, reloads the segment registers and loads the task
   /// register. Interrupts must be off.
   function initialize(): void {
-    GdtState::tss.ist1 = GdtAsm::ignis_double_fault_stack_top();
+    GdtState::tss.ist1 = doubleFaultStackTop();
     GdtState::tss.ioMapBase = TSS_SIZE as u16;
 
     installTaskStateDescriptor();
