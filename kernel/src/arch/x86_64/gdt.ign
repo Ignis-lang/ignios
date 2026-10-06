@@ -81,10 +81,8 @@ export namespace Gdt {
   const DOUBLE_FAULT_IST: u8 = 1;
 
   const TSS_SIZE: u64 = 104;
-  /// Present, type 9 (available 64-bit TSS), already in bits 40-47. It is
-  /// not shifted at the use site because a u64 constant on the left of `<<`
-  /// is emitted as a 32-bit shift (odd/repros/const_u64_shift).
-  const TSS_AVAILABLE_ACCESS: u64 = 0x0000890000000000;
+  /// Access byte of the TSS descriptor: present, type 9 (available 64-bit TSS).
+  const TSS_AVAILABLE_ACCESS: u64 = 0x89;
   const TSS_SLOT: u64 = 5;
 
   /// Loads the table, reloads the segment registers and loads the task
@@ -134,7 +132,7 @@ export namespace Gdt {
     let base: u64 = (&mut GdtState::tss as *mut TaskStateSegment) as u64;
     let limit: u64 = TSS_SIZE - 1;
 
-    let low: u64 = (limit & 0xFFFF) | ((base & 0xFFFFFF) << 16) | TSS_AVAILABLE_ACCESS | (((limit >> 16) & 0xF) << 48) | (((base >> 24) & 0xFF) << 56);
+    let low: u64 = (limit & 0xFFFF) | ((base & 0xFFFFFF) << 16) | (TSS_AVAILABLE_ACCESS << 40) | (((limit >> 16) & 0xF) << 48) | (((base >> 24) & 0xFF) << 56);
 
     GdtState::entries[TSS_SLOT] = low;
     GdtState::entries[TSS_SLOT + 1] = base >> 32;
