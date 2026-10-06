@@ -9,6 +9,7 @@ import Color, Console from "./console";
 import _ from "./interrupts";
 import Keyboard from "./keyboard";
 import Limine from "./limine";
+import Pmm from "./pmm";
 import Ps2 from "./ps2";
 import ScancodeQueue from "./scancode_queue";
 import Serial from "./serial";
@@ -136,6 +137,22 @@ function reportGdt(): void {
   Serial::write("\n");
 }
 
+/// Builds the frame allocator, reports its counts and runs its self-test.
+function initializeMemory(): void {
+  Pmm::initialize();
+
+  Console::write("pmm: ");
+  Console::writeDecimal(Pmm::totalFrames());
+  Console::write(" usable frames, ");
+  Console::writeDecimal(Pmm::freeFrameCount());
+  Console::write(" free (");
+  Console::writeDecimal(Pmm::freeFrameCount() * 4 / 1024);
+  Console::writeLine(" MiB)");
+
+  Pmm::selfTest();
+  Console::writeLine("pmm: self-test ok");
+}
+
 function printPrompt(): void {
   Console::setColors(Color::BRIGHT_GREEN, Color::BLACK);
   Console::write("> ");
@@ -204,6 +221,8 @@ function kmain(): void {
 
   Console::initialize(framebuffer);
   printBanner(framebuffer);
+
+  initializeMemory();
 
   if (!initializeKeyboard()) {
     Cpu::haltForever();

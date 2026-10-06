@@ -50,6 +50,16 @@ export namespace Limine {
     public response: *mut FramebufferResponse;
   }
 
+  const MEMMAP_USABLE: u64 = 0;
+  const MEMMAP_RESERVED: u64 = 1;
+  const MEMMAP_ACPI_RECLAIMABLE: u64 = 2;
+  const MEMMAP_ACPI_NVS: u64 = 3;
+  const MEMMAP_BAD_MEMORY: u64 = 4;
+  const MEMMAP_BOOTLOADER_RECLAIMABLE: u64 = 5;
+  const MEMMAP_EXECUTABLE_AND_MODULES: u64 = 6;
+  const MEMMAP_FRAMEBUFFER: u64 = 7;
+  const MEMMAP_RESERVED_MAPPED: u64 = 8;
+
   @cLayout
   record MemmapEntry {
     public base: u64;
@@ -136,6 +146,11 @@ export namespace Limine {
   /// The memory map, or null when the bootloader provided none.
   function memmap(): *mut MemmapResponse {
     return readResponse<MemmapResponse>(&mut Requests::memmap.response as *mut *mut MemmapResponse);
+  }
+
+  /// Entry `index` of the memory map. The entries are sorted by base address.
+  function memmapEntry(response: *mut MemmapResponse, index: u64): *mut MemmapEntry {
+    return *((*response).entries + index);
   }
 
   /// The higher half direct map, or null when the bootloader provided none.
