@@ -42,6 +42,10 @@ export namespace Heap {
   const FREE_TAG: u64 = 0x46524545;
   const USED_TAG: u64 = 0x55534544;
 
+  /// Written over the header of a block that was merged into a neighbour, so
+  /// a second `free` of a pointer into it is not taken for a live block.
+  const ABSORBED_TAG: u64 = 0x44454144;
+
   /// Prepares an empty heap. Nothing is mapped until the first allocation.
   function initialize(): void {
     if (Vmm::translate(BASE) != Vmm::NOT_MAPPED) {
@@ -78,7 +82,8 @@ export namespace Heap {
   }
 
   /// Returns a block to the heap. Freeing null does nothing. A pointer that
-  /// is not a live block is a kernel bug and panics.
+  /// is not a live block is a kernel bug and panics, which includes a second
+  /// free of a block, also after it was merged into a neighbour.
   function free(pointer: *mut u8): void {
     if (pointer == null) {
       return;
@@ -309,11 +314,13 @@ export namespace Heap {
 
     if (next != 0 && block + size == next) {
       length += readSize(next);
+      writeTag(next, ABSORBED_TAG);
       next = readNext(next);
     }
 
     if (previous != 0 && previous + readSize(previous) == block) {
       length += readSize(previous);
+      writeTag(block, ABSORBED_TAG);
       start = previous;
     } else {
       relink(previous, block);
@@ -382,6 +389,10 @@ export namespace Heap {
 
   function writeNext(block: u64, next: u64): void {
     *(@pointerFromInteger<*mut u64>(block) + 2) = next;
+  }
+
+  function writeTag(block: u64, tag: u64): void {
+    *(@pointerFromInteger<*mut u64>(block) + 1) = tag;
   }
 
   function writeBlock(block: u64, size: u64, tag: u64): void {
