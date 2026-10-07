@@ -29,7 +29,7 @@ SCREEN_PNG := $(BUILD)/screen.png
 HEADLESS_SECONDS ?= 15
 
 # Every kernel source file. Listing them makes `make` rebuild when any changes.
-IGNIS_SOURCES := $(shell find kernel/src -name '*.ign')
+IGNIS_SOURCES := $(sort $(shell find kernel/src -name '*.ign'))
 IGNIS_OBJECT := $(BUILD)/ignis/user/obj/kernel.o
 
 # The user program and the files its build depends on.
@@ -40,7 +40,7 @@ HELLO_SOURCES := $(shell find user/hello user/lib -name '*.ign' -o -name '*.toml
 # Assembles the `.S` files. `ASFLAGS` use the kernel code model so symbol
 # addresses match what the Ignis-generated C expects.
 CLANG ?= clang
-ASM_SOURCES := $(shell find kernel/src -name '*.S')
+ASM_SOURCES := $(sort $(shell find kernel/src -name '*.S'))
 ASM_OBJECTS := $(patsubst kernel/src/%.S,$(BUILD)/asm/%.o,$(ASM_SOURCES))
 ASFLAGS := --target=x86_64-unknown-none -mcmodel=kernel -fno-pic -fno-pie -c
 

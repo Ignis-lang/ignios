@@ -231,6 +231,10 @@ export namespace Interrupts {
   /// Vector 3.
   const BREAKPOINT: u64 = 3;
 
+  /// Vector 8. Its saved CS and RIP are undefined (Intel SDM, "Interrupt 8,
+  /// Double Fault Exception"), so it can never be attributed to a process.
+  const DOUBLE_FAULT: u64 = 8;
+
   /// Vector 6.
   const INVALID_OPCODE: u64 = 6;
 
@@ -309,11 +313,12 @@ export namespace Interrupts {
 
   /// True for a processor exception that interrupted ring 3 and that a
   /// process can cause on its own. NMI and machine check are the machine's
-  /// business, not the process's, and stay fatal.
+  /// business, not the process's, and stay fatal. A double fault is always
+  /// fatal too: the CS it saves is undefined, so its RPL proves nothing.
   function isUserFault(frame: *mut InterruptFrame): boolean {
     let vector: u64 = (*frame).vector;
 
-    return ((*frame).cs & 3) == 3 && vector < FIRST_IRQ_VECTOR && vector != NMI && vector != MACHINE_CHECK;
+    return ((*frame).cs & 3) == 3 && vector < FIRST_IRQ_VECTOR && vector != NMI && vector != DOUBLE_FAULT && vector != MACHINE_CHECK;
   }
 
   /// Reports what the process did and ends it. Never returns: the thread
