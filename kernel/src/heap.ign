@@ -1,47 +1,124 @@
-//! The kernel heap: a region in the higher half that grows on demand with
-//! frames from the PMM, and a first-fit allocator over it.
+//!
+//! # Kernel Heap
+//!
+//! A first-fit allocator over a region of the higher half that grows on
+//! demand with frames from the PMM.
+//!
+//! ## Overview
 //!
 //! Every block starts with a 16-byte header, a size and a state tag, and the
 //! payload follows, so payloads are 16-byte aligned. Free blocks are chained
 //! in address order through a pointer stored in their payload, which lets
 //! `free` merge a block with both neighbours. A request for a larger
 //! alignment splits the space in front of the aligned payload off as a free
-//! block of its own. `allocate` and `free` run with
-//! interrupts disabled, which is all the mutual exclusion the single
-//! processor needs: no other thread can run in the middle of a list update.
+//! block of its own. `allocate` and `free` run with interrupts disabled,
+//! which is all the mutual exclusion the single processor needs: no other
+//! thread can run in the middle of a list update.
 //!
 //! The compiler's allocation handlers sit on top of it, so escaping capturing
 //! closures allocate here.
+//!
+//! ## Block Layout
+//!
+//! ```text
+//!   block address b (16-byte aligned)
+//!   ┌──────────────┬──────────────┬──────────────────────────────────┐
+//!   │ size   u64   │ tag    u64   │ payload                          │
+//!   │ b + 0        │ b + 8        │ b + 16  <- pointer given out     │
+//!   └──────────────┴──────────────┴──────────────────────────────────┘
+//!    size = whole block, header included
+//!
+//!   used block:  tag = USED_TAG ("USED")
+//!   free block:  tag = FREE_TAG ("FREE"), payload starts with `next`,
+//!                the address of the next free block, or 0
+//!
+//!   ┌────────┬─────────────┐   ┌────────┬─────────────┐   ┌────────┬───
+//!   │ FREE   │ next ───────┼──►│ FREE   │ next ───────┼──►│ FREE   │ ...
+//!   └────────┴─────────────┘   └────────┴─────────────┘   └────────┴───
+//!    HeapState::firstFree        address order: low to high
+//! ```
+//!
+//! ## Allocation
+//!
+//! `takeFirstFit` walks the free list for the first block that can hold an
+//! aligned payload. `carve` then cuts the used block out of it:
+//!
+//! ```text
+//!   free block before:   [ gap ][ payload ........ ][ tail ]
+//!                                ▲ aligned payload address
+//!
+//!   after carve:         [FREE gap][USED payload][FREE tail]
+//!
+//!   - the gap stays in the list as a free block, but only when it is at
+//!     least MIN_BLOCK_SIZE (32 bytes). If it would be smaller, the payload
+//!     moves up by one alignment unit instead, so the gap becomes big enough.
+//!   - the tail becomes a new free block when it is at least MIN_BLOCK_SIZE,
+//!     otherwise it is added to the used block.
+//! ```
+//!
+//! When no block fits, `grow` maps `GROW_PAGES` (16) more pages, or more if
+//! the request needs it, as one new free block at the end of the heap region
+//! and the search runs again.
+//!
+//! ## Free and Merge
+//!
+//! `insertFree` puts the block in address order and merges it with the block
+//! before it and the block after it when they touch. A block merged into a
+//! neighbour has its tag overwritten with `ABSORBED_TAG`, so freeing a stale
+//! pointer into it is caught instead of corrupting the list:
+//!
+//! ```text
+//!   before:  [FREE a][USED b][FREE c]       free(b)
+//!   after:   [FREE a + b + c]               b and c headers get "DEAD"
+//! ```
+//!
+//! See concept doc 10.
 
 import Cpu from "./arch/x86_64/cpu";
 import Pmm from "./pmm";
 import Vmm from "./vmm";
 
+/// Heap state, touched only with interrupts disabled.
 record HeapState {
+  /// Virtual address just past the last mapped heap page. The heap occupies
+  /// `BASE` up to this value.
   static mut mappedEnd: u64 = 0;
+
+  /// Address of the first free block, or 0 when none is free.
   static mut firstFree: u64 = 0;
+
+  /// Bytes in live blocks, headers included.
   static mut allocatedBytes: u64 = 0;
 }
 
+/// The heap API. `allocate` and `free` are the only entry points the rest of
+/// the kernel needs.
 export namespace Heap {
   /// Start of the heap, in its own top-level slot away from the direct map.
   const BASE: u64 = 0xFFFFC00000000000;
 
-  /// The most address space the heap may use.
+  /// The most address space the heap may use: 256 MiB (`0x10000000`).
   const LIMIT_SIZE: u64 = 0x10000000;
 
+  /// 4 KiB.
   const PAGE_SIZE: u64 = 4096;
 
   /// Pages mapped at once when the heap grows.
   const GROW_PAGES: u64 = 16;
 
+  /// Bytes in front of every payload.
   const HEADER_SIZE: u64 = 16;
+
+  /// The smallest alignment of a payload, and the granularity of block sizes.
   const MIN_ALIGNMENT: u64 = 16;
 
   /// A free block holds its header and the pointer to the next free block.
   const MIN_BLOCK_SIZE: u64 = 32;
 
+  /// Tag of a free block: the ASCII bytes "FREE" as a number.
   const FREE_TAG: u64 = 0x46524545;
+
+  /// Tag of a block in use: "USED".
   const USED_TAG: u64 = 0x55534544;
 
   /// Written over the header of a block that was merged into a neighbour, so
@@ -71,7 +148,8 @@ export namespace Heap {
     return pointer;
   }
 
-  /// The body of `allocate`. Interrupts must be disabled.
+  /// The body of `allocate`. Interrupts must be disabled. A size of 0 is served
+  /// as a 1-byte request, so every allocation returns a distinct pointer.
   function allocateLocked(size: u64, align: u64): *mut u8 {
     if (align == 0 || (align & (align - 1)) != 0) {
       return null;
@@ -254,6 +332,8 @@ export namespace Heap {
     }
   }
 
+  /// Returns a closure that captures `base`. The compiler allocates the
+  /// captured environment through `onAllocate`.
   function makeAdder(base: u64): (u64) -> u64 {
     return (value: u64): u64 -> value + base;
   }
@@ -394,34 +474,43 @@ export namespace Heap {
     return true;
   }
 
+  /// Rounds `value` up to a multiple of `alignment`, a power of two.
   function alignUp(value: u64, alignment: u64): u64 {
     return (value + alignment - 1) & ~(alignment - 1);
   }
 
+  /// Header and payload accessors. The address `block` is the start of the
+  /// header: the size is at offset 0, the tag at 8 and the free-list link at 16.
   function readSize(block: u64): u64 {
     return *(@pointerFromInteger<*mut u64>(block));
   }
 
+  /// The state tag of the block at `block`.
   function readTag(block: u64): u64 {
     return *(@pointerFromInteger<*mut u64>(block) + 1);
   }
 
+  /// The free-list link stored in the payload of the free block at `block`.
   function readNext(block: u64): u64 {
     return *(@pointerFromInteger<*mut u64>(block) + 2);
   }
 
+  /// Sets the size field of the header at `block`.
   function writeSize(block: u64, size: u64): void {
     *(@pointerFromInteger<*mut u64>(block)) = size;
   }
 
+  /// Sets the free-list link of the free block at `block`.
   function writeNext(block: u64, next: u64): void {
     *(@pointerFromInteger<*mut u64>(block) + 2) = next;
   }
 
+  /// Sets the tag field of the header at `block`.
   function writeTag(block: u64, tag: u64): void {
     *(@pointerFromInteger<*mut u64>(block) + 1) = tag;
   }
 
+  /// Writes the size and the tag of the header at `block`.
   function writeBlock(block: u64, size: u64, tag: u64): void {
     let header: *mut u64 = @pointerFromInteger<*mut u64>(block);
 
@@ -429,12 +518,15 @@ export namespace Heap {
     *(header + 1) = tag;
   }
 
+  /// Self-test helper: panics unless `pointer` is non-null and a multiple of
+  /// `alignment`.
   function checkAligned(pointer: *mut u8, alignment: u64): void {
     if (pointer == null || @integerFromPointer(pointer) % alignment != 0) {
       @panic("heap self-test: bad allocation or alignment");
     }
   }
 
+  /// Self-test helper: sets `length` bytes to `value`.
   function fillBlock(pointer: *mut u8, length: u64, value: u8): void {
     let mut index: u64 = 0;
 
@@ -444,6 +536,7 @@ export namespace Heap {
     }
   }
 
+  /// Self-test helper: panics unless `length` bytes all equal `value`.
   function expectBlock(pointer: *mut u8, length: u64, value: u8): void {
     let mut index: u64 = 0;
 
@@ -457,6 +550,10 @@ export namespace Heap {
   }
 }
 
+/// The compiler's allocation hook. The compiler calls it for allocations it
+/// makes itself, such as the environment of an escaping closure. It panics
+/// when the heap is out of memory, because the compiler-generated code has no
+/// way to handle a null result.
 @allocHandler
 function onAllocate(size: u64, align: u64): *mut u8 {
   let pointer: *mut u8 = Heap::allocate(size, align);
@@ -468,6 +565,7 @@ function onAllocate(size: u64, align: u64): *mut u8 {
   return pointer;
 }
 
+/// The compiler's release hook, the counterpart of `onAllocate`.
 @freeHandler
 function onFree(pointer: *mut u8): void {
   Heap::free(pointer);

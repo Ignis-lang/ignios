@@ -1,10 +1,15 @@
-//! The physical frame allocator: one bit per 4 KiB frame, set when the frame
-//! is in use or not managed.
+//!
+//! # Physical Memory Manager
+//!
+//! The frame allocator: one bit per 4 KiB frame, set when the frame is in use
+//! or not managed.
+//!
+//! ## Overview
 //!
 //! Only `usable` memory map entries are ever handed out. Bootloader
 //! reclaimable memory stays reserved, because the kernel still runs on the
 //! bootloader's stack and reads its responses. Frame 0 is never handed out,
-//! so address 0 can mean "no frame".
+//! so address 0 can mean "no frame" (`NO_FRAME`).
 //!
 //! The bitmap lives in the first usable region at or above 1 MiB that is big
 //! enough, reached through the higher half direct map. That sizes it to the
@@ -12,25 +17,76 @@
 //! `freeFrame` run with interrupts disabled, which is all the mutual
 //! exclusion the single processor needs: no other thread can run in the
 //! middle of a bitmap update.
+//!
+//! ## Bitmap Layout
+//!
+//! ```text
+//!   frame number f  <->  physical address f * 4096
+//!
+//!   word w of the bitmap covers frames w*64 .. w*64+63
+//!   bit b of word w is frame w*64 + b     (bit 0 = lowest frame)
+//!
+//!        word 0                         word 1
+//!   ┌───────────────────────┐   ┌───────────────────────┐
+//!   │ 63 ........ 2  1  0   │   │ 127 ....... 66 65 64  │  ...
+//!   │  1 .. 1 .. 1  1  1    │   │  0  0  1  0 ...       │
+//!   └───────────────────────┘   └───────────────────────┘
+//!     1 = used or never managed       0 = free
+//! ```
+//!
+//! The bitmap needs `ceil(highest usable end / 4096 / 64)` words. For the
+//! 256 MiB guest used in development that is 1024 words, 8 KiB, 2 frames.
+//!
+//! ## Allocation
+//!
+//! `takeFrame` scans word by word, starting at `searchWord`, for a word that
+//! is not all ones, then takes the lowest clear bit. `searchWord` is a hint
+//! that moves down when a lower frame is freed, so a freed frame is the next
+//! one handed out. The scan wraps once around the bitmap before it gives up.
+//!
+//! See concept doc 08.
 
 import Cpu from "./arch/x86_64/cpu";
 import Hhdm from "./hhdm";
 import Limine from "./limine";
 import Mem from "./lib/mem";
 
+/// Allocator state. Every field is touched only with interrupts disabled.
 record PmmState {
+  /// The bitmap, reached through the direct map. Null before `initialize`.
   static mut bitmap: *mut u64 = null;
+
+  /// Number of 64-bit words in the bitmap.
   static mut wordCount: u64 = 0;
+
+  /// Frames that were usable at boot, the bitmap's own frames included.
   static mut usableFrames: u64 = 0;
+
+  /// Frames currently free.
   static mut freeFrames: u64 = 0;
+
+  /// Index of the word where the next scan starts.
   static mut searchWord: u64 = 0;
 }
 
+/// The frame allocator API. Frames are identified by their physical address,
+/// which is always a multiple of `FRAME_SIZE`.
 export namespace Pmm {
+  /// Size of a frame: 4 KiB, the smallest page the page tables map.
   const FRAME_SIZE: u64 = 4096;
+
+  /// Frames tracked per bitmap word.
   const BITS_PER_WORD: u64 = 64;
+
+  /// A bitmap word with every bit set, meaning no frame in it is free.
   const ALL_USED: u64 = 0xFFFFFFFFFFFFFFFF;
+
+  /// 1 MiB. Memory below it is scarce on a PC (real mode, legacy devices), so
+  /// the bitmap is placed above it when possible.
   const LOW_MEMORY_LIMIT: u64 = 0x100000;
+
+  /// Frames the self-test allocates at once. The test keeps their addresses in
+  /// an array of this size.
   const SELF_TEST_FRAMES: u64 = 8;
 
   /// Returned by `allocateFrame` when no frame is free.
@@ -78,7 +134,8 @@ export namespace Pmm {
     reserveRange(bitmapBase, bytes);
   }
 
-  /// The physical address of a free frame, or `NO_FRAME`.
+  /// The physical address of a free frame, or `NO_FRAME`. The frame is not
+  /// zeroed.
   function allocateFrame(): u64 {
     let saved: u64 = Cpu::saveAndDisableInterrupts();
     let frame: u64 = takeFrame();
@@ -118,8 +175,10 @@ export namespace Pmm {
     return NO_FRAME;
   }
 
-  /// Returns a frame to the allocator. Freeing an address that is not an
-  /// allocated frame is a kernel bug and panics.
+  /// Returns a frame to the allocator. A misaligned address, one beyond the
+  /// bitmap, or a frame that is already free is a kernel bug and panics. The
+  /// check cannot tell an allocated frame from one that was never usable: both
+  /// are "used" in the bitmap.
   function freeFrame(address: u64): void {
     let saved: u64 = Cpu::saveAndDisableInterrupts();
     let frame: u64 = address / FRAME_SIZE;
@@ -144,6 +203,7 @@ export namespace Pmm {
     return PmmState::usableFrames;
   }
 
+  /// Frames currently free.
   function freeFrameCount(): u64 {
     return PmmState::freeFrames;
   }
@@ -284,24 +344,28 @@ export namespace Pmm {
     }
   }
 
+  /// True when the bit of `frame` is set.
   function isUsed(frame: u64): boolean {
     let word: u64 = *(PmmState::bitmap + frame / BITS_PER_WORD);
 
     return ((word >> (frame % BITS_PER_WORD)) & 1) != 0;
   }
 
+  /// Sets the bit of `frame`.
   function setUsed(frame: u64): void {
     let word: *mut u64 = PmmState::bitmap + frame / BITS_PER_WORD;
 
     *word = *word | ((1 as u64) << (frame % BITS_PER_WORD));
   }
 
+  /// Clears the bit of `frame`.
   function setFree(frame: u64): void {
     let word: *mut u64 = PmmState::bitmap + frame / BITS_PER_WORD;
 
     *word = *word & ~((1 as u64) << (frame % BITS_PER_WORD));
   }
 
+  /// Index of the lowest clear bit of `word`, which must not be all ones.
   function firstClearBit(word: u64): u64 {
     let mut bit: u64 = 0;
 

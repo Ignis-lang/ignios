@@ -1,4 +1,10 @@
-//! The kernel's own 4-level page tables.
+//!
+//! # Virtual Memory Manager
+//!
+//! The kernel's own 4-level page tables, and the walkers that also work on the
+//! page tables of any process.
+//!
+//! ## Overview
 //!
 //! The tables are built from PMM frames, written through the higher half
 //! direct map, and loaded into CR3 by `initialize`. They map:
@@ -25,6 +31,91 @@
 //!
 //! Only 4 KiB and 2 MiB pages exist. Kernel tables are never freed, and the
 //! code is not synchronized: the kernel has one processor.
+//!
+//! ## Virtual Address Split
+//!
+//! A 48-bit virtual address selects an entry in each of four tables, 512
+//! entries of 8 bytes in each (one 4 KiB frame per table):
+//!
+//! ```text
+//!   63      48 47     39 38     30 29     21 20     12 11          0
+//!   ┌─────────┬─────────┬─────────┬─────────┬─────────┬─────────────┐
+//!   │ sign    │ PML4    │ PDPT    │ PD      │ PT      │ page offset │
+//!   │ ext.    │ index   │ index   │ index   │ index   │ 12 bits     │
+//!   │ (bit 47)│ 9 bits  │ 9 bits  │ 9 bits  │ 9 bits  │             │
+//!   └─────────┴─────────┴─────────┴─────────┴─────────┴─────────────┘
+//!
+//!   CR3 ─► PML4 ──[l4]──► PDPT ──[l3]──► PD ──[l2]──► PT ──[l1]──► 4 KiB frame
+//!                                          │
+//!                                          └─ PS=1: this PD entry maps a 2 MiB
+//!                                             page, the offset is bits 20..0
+//!
+//!   level4Index = (a >> 39) & 0x1FF     level2Index = (a >> 21) & 0x1FF
+//!   level3Index = (a >> 30) & 0x1FF     level1Index = (a >> 12) & 0x1FF
+//! ```
+//!
+//! Bits 63..48 must equal bit 47 (canonical form), which splits the space in
+//! two halves: PML4 entries 0-255 are the lower half (user), 256-511 the
+//! upper half (kernel).
+//!
+//! ## Page Table Entry
+//!
+//! ```text
+//!   63  62..59 58..52  51..12                11..9   8   7    6   5   4    3    2    1    0
+//!   ┌──┬──────┬───────┬─────────────────────┬──────┬───┬────┬───┬───┬────┬────┬────┬────┬───┐
+//!   │NX│ PKEY │ avail │ physical address    │avail │ G │PAT │ D │ A │PCD │PWT │U/S │R/W │ P │
+//!   │  │      │       │ of frame or table   │      │   │/PS │   │   │    │    │    │    │   │
+//!   └──┴──────┴───────┴─────────────────────┴──────┴───┴────┴───┴───┴────┴────┴────┴────┴───┘
+//!
+//!   P     present                      A    accessed (set by the CPU)
+//!   R/W   writable                     D    dirty (set by the CPU, leaf only)
+//!   U/S   user accessible              PS   in a PD entry: maps a 2 MiB page
+//!   PWT   page write-through           PAT  in a PT entry (bit 7) or a 2 MiB PD
+//!   PCD   page cache disable                entry (bit 12): third memory-type bit
+//!   NX    no-execute (needs EFER.NXE)  G    global (not used here)
+//! ```
+//!
+//! The memory type of a page is the entry `PAT*4 + PCD*2 + PWT` of the
+//! IA32_PAT register (see `PAT_LAYOUT`). U/S and R/W are checked at every
+//! level, so an intermediate entry with U/S = 0 hides everything below it
+//! from ring 3. The leaf entry alone is what the kernel changes per page:
+//! intermediate entries are created present, writable and (for user spaces)
+//! user accessible.
+//!
+//! ## Virtual Address Space Map
+//!
+//! ```text
+//!   0x0000000000000000  ┌──────────────────────────────────────────┐
+//!                       │ page 0: never mapped (null pointers)     │
+//!   0x0000000000400000  ├──────────────────────────────────────────┤
+//!                       │ user program: text, rodata, data, bss    │ PML4 0..255
+//!                       │ (from the ELF, one region per segment)   │ one private
+//!   0x00007FFFFFFF7000  ├──────────────────────────────────────────┤ copy per
+//!                       │ user stack: 8 pages, grows down          │ process
+//!   0x00007FFFFFFFF000  ├──────────────────────────────────────────┤
+//!                       │ USER_LIMIT: this page is never mapped    │
+//!   0x0000800000000000  ├─ - - - - non-canonical hole - - - - - - -┤
+//!   0xFFFF800000000000  ├──────────────────────────────────────────┤ PML4 256
+//!                       │ direct map: physical p at offset + p     │
+//!   0xFFFFA00000000000  ├──────────────────────────────────────────┤ PML4 320
+//!                       │ local APIC page (uncached)               │
+//!   0xFFFFA00000010000  │ IOAPIC pages, one per chip (uncached)    │
+//!   0xFFFFB00000000000  ├──────────────────────────────────────────┤ PML4 352
+//!                       │ thread kernel stacks, 20 KiB per slot    │
+//!   0xFFFFC00000000000  ├──────────────────────────────────────────┤ PML4 384
+//!                       │ kernel heap (up to 256 MiB)              │
+//!   0xFFFFE00000000000  ├──────────────────────────────────────────┤ PML4 448
+//!                       │ TEST_ADDRESS, used by self-tests         │
+//!   0xFFFFFFFF80000000  ├──────────────────────────────────────────┤ PML4 511,
+//!                       │ kernel image: text, rodata, data, bss    │ PDPT 510
+//!                       └──────────────────────────────────────────┘
+//! ```
+//!
+//! The direct map starts at the offset Limine chose (`Hhdm::offset`), which
+//! is `0xFFFF800000000000` with 4-level paging. The other kernel regions each
+//! sit in a PML4 entry of their own so they cannot collide.
+//!
+//! See concept doc 09 and Intel SDM Vol. 3A, "Paging".
 
 import Cpu from "./arch/x86_64/cpu";
 import Hhdm from "./hhdm";
@@ -32,24 +123,47 @@ import Limine from "./limine";
 import Pmm from "./pmm";
 import Mem from "./lib/mem";
 
+/// The one piece of VMM state: the physical address of the kernel PML4.
 record VmmState {
+  /// Physical address of the kernel PML4, the value loaded into CR3.
   static mut root: u64 = 0;
 }
 
-/// Boundaries defined by `kernel/linker.ld`.
+/// Boundaries defined by `kernel/linker.ld`. A symbol declared here has an
+/// address and no value: take its address with `&`, never read it.
 extern LinkerSymbols {
+  /// First byte of the text segment.
   const __text_start: u8;
+
+  /// One past the last byte of the text segment (page aligned).
   const __text_end: u8;
+
+  /// First byte of the read-only data segment.
   const __rodata_start: u8;
+
+  /// One past the last byte of the read-only data segment (page aligned).
   const __rodata_end: u8;
+
+  /// First byte of the data segment, which holds `.data` followed by `.bss`.
   const __data_start: u8;
+
+  /// One past the last byte of the data segment (page aligned).
   const __data_end: u8;
 }
 
+/// The virtual memory API. The `*In` variants take the physical address of the
+/// PML4 to operate on, the others use the kernel's.
 export namespace Vmm {
+  /// 4 KiB, the size of a normal page and of a page table.
   const PAGE_SIZE: u64 = 4096;
+
+  /// 2 MiB (`0x200000`): one page directory entry with PS set maps this much.
   const LARGE_PAGE_SIZE: u64 = 2097152;
+
+  /// Nine bits, the width of one table index.
   const INDEX_MASK: u64 = 0x1FF;
+
+  /// Entries in a table: a 4 KiB frame holds 512 eight-byte entries.
   const ENTRIES_PER_TABLE: u64 = 512;
 
   /// PML4 entries 256 to 511 translate the upper half of the address space.
@@ -58,28 +172,48 @@ export namespace Vmm {
   /// Bits 12 to 51 of an entry: the physical address of the next table or
   /// of a 4 KiB page.
   const ADDRESS_MASK: u64 = 0x000FFFFFFFFFF000;
+
+  /// Bits 21 to 51 of a page directory entry that maps a 2 MiB page.
   const LARGE_ADDRESS_MASK: u64 = 0x000FFFFFFFE00000;
 
+  /// Entry bit 0: the entry is valid. A clear entry is ignored by the CPU, which
+  /// raises a page fault for an access through it.
   const PRESENT: u64 = 0x1;
+
+  /// Entry bit 7 (PS) in a page directory entry: the entry maps a 2 MiB page
+  /// instead of pointing to a page table.
   const HUGE: u64 = 0x80;
+
+  /// Entry bit 3 (PWT), one of the three memory-type bits.
   const WRITE_THROUGH: u64 = 0x8;
+
+  /// Entry bit 7 (PAT) of a 4 KiB page entry: the high bit of the PAT index.
   const PAT_SMALL: u64 = 0x80;
+
+  /// Entry bit 12 (PAT) of a 2 MiB page entry. The bit differs from `PAT_SMALL`
+  /// because bit 7 means PS there.
   const PAT_LARGE: u64 = 0x1000;
 
-  /// Flags for `map` and `mapLarge`. A page is read only and executable
-  /// unless they say otherwise.
+  /// Entry bit 1 (R/W): writes allowed. Together with the bits below it is a
+  /// flag argument of `map`.
   const WRITABLE: u64 = 0x2;
+
+  /// Entry bit 2 (U/S): ring 3 may access the page.
   const USER: u64 = 0x4;
+
+  /// Entry bit 63 (NX): instruction fetches fault. Needs EFER.NXE.
   const NO_EXECUTE: u64 = 0x8000000000000000;
 
-  /// Strong uncached memory type (PCD and PWT), for device registers.
+  /// Strong uncached memory type (PCD and PWT, entry bits 4 and 3), for device
+  /// registers. PAT index 3 is UC.
   const UNCACHED: u64 = 0x18;
 
   /// Selects PAT entry 5, which `programPat` sets to write-combining. It is
-  /// kept in an ignored entry bit and turned into the PAT, PCD and PWT bits
-  /// that fit the page size.
+  /// kept in an ignored entry bit (bit 9) and turned into the PAT, PCD and PWT
+  /// bits that fit the page size.
   const WRITE_COMBINING: u64 = 0x200;
 
+  /// MSR number of IA32_PAT.
   const PAT_MSR: u32 = 0x277;
 
   /// The PAT layout the kernel expects, one byte per entry from entry 0 in
@@ -87,10 +221,29 @@ export namespace Vmm {
   /// layout the Limine protocol documents for x86-64, so the mappings Limine
   /// made keep their meaning. The protocol leaves entries 6 and 7
   /// unspecified, and the kernel gives them the processor's reset values.
+  ///
+  /// ```text
+  ///   byte (entry)  value  type                 index = PAT PCD PWT
+  ///   0             0x06   WB write-back         0  = 0 0 0   normal RAM
+  ///   1             0x04   WT write-through      1  = 0 0 1
+  ///   2             0x07   UC- uncached (weak)   2  = 0 1 0
+  ///   3             0x00   UC  uncached          3  = 0 1 1   device registers
+  ///   4             0x05   WP write-protect      4  = 1 0 0
+  ///   5             0x01   WC write-combining    5  = 1 0 1   framebuffer
+  ///   6             0x07   UC-                   6  = 1 1 0
+  ///   7             0x00   UC                    7  = 1 1 1
+  /// ```
   const PAT_LAYOUT: u64 = 0x0007010500070406;
 
+  /// MSR number of IA32_EFER.
   const EFER_MSR: u32 = 0xC0000080;
+
+  /// IA32_EFER bit 11 (NXE): without it, entry bit 63 is reserved and a set
+  /// bit causes a fault.
   const EFER_NO_EXECUTE_ENABLE: u64 = 0x800;
+
+  /// CR0 bit 16 (WP): ring 0 also obeys the R/W bit, so the kernel cannot write
+  /// its own read-only pages by accident.
   const CR0_WRITE_PROTECT: u64 = 0x10000;
 
   /// Returned by `translate` for an address that is not mapped.
@@ -101,10 +254,22 @@ export namespace Vmm {
   /// mapped (8). Executable and modules (6) is left out on purpose.
   const DIRECT_MAPPED_KINDS: u64 = 0x1AD;
 
+  /// A virtual address in no region of the kernel, used by the self-tests to
+  /// map and unmap a frame. PML4 entry 448.
   const TEST_ADDRESS: u64 = 0xFFFFE00000000000;
 
   /// Builds the kernel page tables and switches to them. Needs the PMM and
   /// the Limine responses; the framebuffer may be null.
+  ///
+  /// The order matters:
+  ///
+  /// 1. EFER.NXE and CR0.WP are set first, so the entries built below can use
+  ///    bit 63 and the kernel respects read-only pages from the start.
+  /// 2. IA32_PAT is programmed before any entry that selects write-combining.
+  /// 3. The framebuffer is mapped before the direct map, so its write-combining
+  ///    mapping is the one that stays (`mapRange` leaves existing pages alone).
+  /// 4. The upper half is populated, then CR3 is loaded. The load drops every
+  ///    TLB entry that is not global, so the old Limine mappings are gone.
   function initialize(framebuffer: *mut Limine::Framebuffer): void {
     Cpu::writeMsr(EFER_MSR, Cpu::readMsr(EFER_MSR) | EFER_NO_EXECUTE_ENABLE);
     Cpu::writeCr0(Cpu::readCr0() | CR0_WRITE_PROTECT);
@@ -288,7 +453,9 @@ export namespace Vmm {
     return *entry;
   }
 
-  /// Drops the TLB entry of the page containing `virtualAddress`.
+  /// Drops the TLB entry of the page containing `virtualAddress`. A mapping
+  /// change is not visible to the processor until its old translation is gone
+  /// from the TLB (`invlpg`). Single processor: no shootdown is needed.
   function flush(virtualAddress: u64): void {
     Cpu::invalidatePage(virtualAddress);
   }
@@ -360,26 +527,34 @@ export namespace Vmm {
     return @integerFromPointer(&LinkerSymbols::__text_start as *u8);
   }
 
+  /// The address of `__text_end`.
   function textEndAddress(): u64 {
     return @integerFromPointer(&LinkerSymbols::__text_end as *u8);
   }
 
+  /// The address of `__rodata_start`.
   function rodataStartAddress(): u64 {
     return @integerFromPointer(&LinkerSymbols::__rodata_start as *u8);
   }
 
+  /// The address of `__rodata_end`.
   function rodataEndAddress(): u64 {
     return @integerFromPointer(&LinkerSymbols::__rodata_end as *u8);
   }
 
+  /// The address of `__data_start`.
   function dataStartAddress(): u64 {
     return @integerFromPointer(&LinkerSymbols::__data_start as *u8);
   }
 
+  /// The address of `__data_end`.
   function dataEndAddress(): u64 {
     return @integerFromPointer(&LinkerSymbols::__data_end as *u8);
   }
 
+  /// Maps the pages from `start` up to `end` of one linker segment to the
+  /// physical frames Limine loaded the image at, with `flags`. The offset
+  /// between the two is constant: `physicalBase - virtualBase`.
   function mapSegment(start: u64, end: u64, flags: u64): void {
     let response: *mut Limine::ExecutableAddressResponse = Limine::executableAddress();
     let delta: u64 = (*response).physicalBase - (*response).virtualBase;
@@ -464,6 +639,8 @@ export namespace Vmm {
     }
   }
 
+  /// Maps `length` bytes in 4 KiB pages, skipping pages that are already
+  /// mapped.
   function mapSmallRange(virtualStart: u64, physicalStart: u64, length: u64, flags: u64): void {
     let mut done: u64 = 0;
 
@@ -550,22 +727,27 @@ export namespace Vmm {
     return frame;
   }
 
+  /// The direct-map pointer to the table in the frame at `physical`.
   function tableAt(physical: u64): *mut u64 {
     return Hhdm::toVirtual(physical) as *mut u64;
   }
 
+  /// Index into the PML4: address bits 47..39.
   function level4Index(virtualAddress: u64): u64 {
     return (virtualAddress >> 39) & INDEX_MASK;
   }
 
+  /// Index into the PDPT: address bits 38..30.
   function level3Index(virtualAddress: u64): u64 {
     return (virtualAddress >> 30) & INDEX_MASK;
   }
 
+  /// Index into the page directory: address bits 29..21.
   function level2Index(virtualAddress: u64): u64 {
     return (virtualAddress >> 21) & INDEX_MASK;
   }
 
+  /// Index into the page table: address bits 20..12.
   function level1Index(virtualAddress: u64): u64 {
     return (virtualAddress >> 12) & INDEX_MASK;
   }

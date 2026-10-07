@@ -1,4 +1,9 @@
-//! Per-process address spaces.
+//!
+//! # Per-Process Address Spaces
+//!
+//! One PML4 per process: a private lower half and the shared kernel half.
+//!
+//! ## Overview
 //!
 //! An address space is its PML4, identified by the physical address of that
 //! frame. The lower half (PML4 entries 0 to 255, virtual addresses below
@@ -11,13 +16,41 @@
 //! code, the direct map and every kernel stack stay reachable after a CR3
 //! load.
 //!
+//! ```text
+//!   kernel PML4 (Vmm::rootTable)              process PML4 (AddressSpace::create)
+//!   ┌────────────────────────────┐            ┌────────────────────────────┐
+//!   │ 0..255   empty             │            │ 0..255   private, starts   │
+//!   │                            │            │          empty, filled by  │
+//!   │                            │            │          allocatePage      │
+//!   ├────────────────────────────┤            ├────────────────────────────┤
+//!   │ 256..511 ─► shared PDPTs ◄─┼────────────┼─ 256..511 same 256 entries │
+//!   └────────────────────────────┘            └────────────────────────────┘
+//! ```
+//!
 //! The page tables and the frames mapped in the lower half belong to the
 //! space: `destroy` returns all of them to the PMM. The kernel half is never
 //! freed, it is shared.
 //!
+//! ## Reaching User Memory
+//!
 //! The kernel reaches user memory through the page tables of the space, one
 //! page at a time (`translateUser`), and not through a raw user pointer: a
-//! bad pointer then fails a check instead of faulting in ring 0.
+//! bad pointer then fails a check instead of faulting in ring 0. Each copy
+//! function splits the range at page boundaries, translates every page to a
+//! physical address and copies through the direct map:
+//!
+//! ```text
+//!   copyFromUser(root, dst, src, length)
+//!     for each page-sized piece of [src, src + length):
+//!       translateUser(root, address, forWrite=false)
+//!           ├─ address >= USER_LIMIT ............ fail
+//!           ├─ no leaf entry, not present ....... fail
+//!           ├─ U/S clear ........................ fail
+//!           └─ otherwise physical = frame | offset
+//!       Mem::copy(dst + done, Hhdm::toVirtual(physical), chunk)
+//! ```
+//!
+//! See concept doc 14.
 
 import Hhdm from "./hhdm";
 import Pmm from "./pmm";
@@ -25,9 +58,17 @@ import Vmm from "./vmm";
 import Cpu from "./arch/x86_64/cpu";
 import Mem from "./lib/mem";
 
+/// The address space API. A space is identified by the physical address of
+/// its PML4, which every function here takes as `root`.
 export namespace AddressSpace {
+  /// 4 KiB.
   const PAGE_SIZE: u64 = 4096;
+
+  /// Entries in a table.
   const ENTRIES_PER_TABLE: u64 = 512;
+
+  /// PML4 entries 0 to 255 are the user half. The kernel half starts at this
+  /// index.
   const USER_HALF_ENTRIES: u64 = 256;
 
   /// One past the last user address a process may map. The last page below
@@ -39,10 +80,20 @@ export namespace AddressSpace {
   /// accessible, or not writable when a write was asked for.
   const NOT_MAPPED: u64 = 0xFFFFFFFFFFFFFFFF;
 
+  /// The user address both test spaces map: `0x400000`, where programs load.
   const SELF_TEST_ADDRESS: u64 = 0x400000;
+
+  /// A second user address, mapped in one space only to prove the other space
+  /// does not see it.
   const SELF_TEST_SECOND_ADDRESS: u64 = 0x600000;
+
+  /// Values written into the test frames so a read shows which frame it hit.
   const SELF_TEST_MARKER_A: u64 = 0xAAAA0000AAAA0001;
+
+  /// See `SELF_TEST_MARKER_A`: the value for the second space.
   const SELF_TEST_MARKER_B: u64 = 0xBBBB0000BBBB0002;
+
+  /// The value written to a kernel page mapped after both spaces exist.
   const SELF_TEST_KERNEL_MARKER: u64 = 0xCCCC0000CCCC0003;
 
   /// Makes an empty address space whose upper half is the kernel's. Returns
