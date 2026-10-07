@@ -1,0 +1,34 @@
+//!
+//! # Sched
+//!
+//! Kernel threads on one processor: the thread table, the run queue and the
+//! switch between threads, cooperative and driven by the timer.
+//!
+//! ## Public API
+//!
+//! | Name               | File            | Purpose                                                   |
+//! |--------------------|-----------------|-----------------------------------------------------------|
+//! | `Sched::Scheduler` | `scheduler.ign` | `spawn`, `yield`, `sleep`, `exitCurrent`, preemption, the run queue |
+//! | `Sched::Thread`    | `thread.ign`    | the thread table, thread states and the thread stacks     |
+//!
+//! Sleeping and waking are part of `Sched::Scheduler`: `sleep` and the wake-up
+//! scan call `switchToNext`, and `switchToNext` calls the wake-up scan, so
+//! they cannot live in separate files without an import cycle.
+//!
+//! ## Dependencies
+//!
+//! | Imports | Why                                                                  |
+//! |---------|----------------------------------------------------------------------|
+//! | `Arch`  | context switch, TSS and `SYSCALL` kernel stack, interrupt flag       |
+//! | `Mm`    | stack frames, stack mappings, the page tables a thread runs in       |
+//! | `Time`  | the tick counter that sleeping threads wait for                      |
+//!
+//! `Proc` and `Syscall` import `Sched`, and `Trap` calls
+//! `Sched::Scheduler::onTick` from the timer interrupt.
+
+import _ from "./scheduler";
+import _ from "./thread";
+
+/// Aggregate namespace of the scheduler. The files above contribute
+/// `Sched::Scheduler` and `Sched::Thread`.
+export namespace Sched {}

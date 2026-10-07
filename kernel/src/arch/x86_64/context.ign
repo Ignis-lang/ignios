@@ -53,8 +53,8 @@
 //!   T         <- RSP while the trampoline runs
 //! ```
 //!
-//! The trampoline calls `Scheduler::threadBegin`, enables interrupts, calls
-//! `entry(argument)` and, when it returns, calls `Scheduler::exitCurrent`.
+//! The trampoline calls `Sched::Scheduler::threadBegin`, enables interrupts, calls
+//! `entry(argument)` and, when it returns, calls `Sched::Scheduler::exitCurrent`.
 //! See concept doc 13.
 
 import _ from "./cpu";

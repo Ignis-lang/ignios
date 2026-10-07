@@ -15,7 +15,7 @@
 //!   ├─ vector 0xFF  local APIC spurious ......... return, no EOI
 //!   ├─ vector 0x21  keyboard (IOAPIC) ........... Drivers::Ps2::handleInterrupt, Lapic EOI
 //!   ├─ vector 0x30  local APIC timer ............ Time::Timer::handleTick, Lapic EOI,
-//!   │                                             Scheduler::onTick (may switch threads)
+//!   │                                             Sched::Scheduler::onTick (may switch threads)
 //!   ├─ vectors 0x20-0x2F (the rest)  8259 ....... acknowledge or absorb a spurious one
 //!   ├─ exception from ring 3 (cs & 3 == 3) ..... report, kill the process
 //!   └─ any other exception ...................... report on COM1 and the
@@ -87,9 +87,9 @@
 import Apic from "@apic";
 import Arch from "@arch";
 import Drivers from "@drivers";
+import Sched from "@sched";
 import Time from "@time";
 import Process from "./process";
-import Scheduler from "./scheduler";
 
 /// Interrupt vector numbers and the dispatcher.
 export namespace Interrupts {
@@ -184,7 +184,7 @@ export namespace Interrupts {
     if (vector == TIMER_VECTOR) {
       Time::Timer::handleTick();
       Apic::Lapic::endOfInterrupt();
-      Scheduler::onTick();
+      Sched::Scheduler::onTick();
       return;
     }
 

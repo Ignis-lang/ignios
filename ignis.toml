@@ -64,3 +64,4 @@ emit = ["c"]
 "@mm" = "kernel/src/mm"
 "@acpi" = "kernel/src/acpi"
 "@time" = "kernel/src/time"
+"@sched" = "kernel/src/sched"

@@ -5,11 +5,11 @@
 //!
 //! ## Overview
 //!
-//! A thread is a slot in a fixed table: an id, a state, the stack pointer it
-//! was switched out with, and a kernel stack of its own. Slot 0 is the boot
-//! thread, the code `kmain` was already running on Limine's stack. Slot 1 is
-//! the idle thread, which runs only when nothing else is ready. Every other
-//! slot is free until `spawn` fills it.
+//! A thread is a slot in the fixed table of `thread.ign`: an id, a state, the
+//! stack pointer it was switched out with, and a kernel stack of its own. Slot
+//! 0 is the boot thread, slot 1 is the idle thread, which runs only when
+//! nothing else is ready, and every other slot is free until `spawn` fills it.
+//! This file decides which slot runs.
 //!
 //! Ready threads wait in a FIFO run queue and run in the order they entered
 //! it. Once `enablePreemption` is called, the timer interrupt also takes the
@@ -36,55 +36,13 @@
 //! system call from ring 3 lands on it. The thread's end destroys the space
 //! it owns, right after the switch away from it.
 //!
-//! Stacks are `STACK_PAGES` pages of PMM frames mapped in a region of their
-//! own, below an unmapped guard page: a thread that overflows its stack
-//! takes a page fault instead of writing over another thread's stack.
-//!
-//! ## Thread States
-//!
-//! ```text
-//!                     spawn
-//!           UNUSED ───────────► READY ◄──────────────────────┐
-//!              ▲                  │  ▲                       │ wakeSleepers:
-//!              │ reapZombie       │  │ yield, or the time    │ now >= wakeTick
-//!              │ (next thread)    │  │ slice ran out         │
-//!            DEAD                 ▼  │                       │
-//!              ▲              RUNNING ──── sleep(ticks) ──► BLOCKED
-//!              │                  │
-//!              └──── exitCurrent ─┘
-//! ```
-//!
-//! Exactly one thread is RUNNING. The idle thread is never in the run queue:
-//! it runs when the queue is empty.
-//!
-//! ## Thread Stacks
-//!
-//! Each slot has `STACK_SPAN` bytes (5 pages) of virtual address space at
-//! `STACK_REGION + slot * STACK_SPAN`:
-//!
-//! ```text
-//!   high   base + 0x5000  ┌──────────────────────┐ <- stack top (RSP0 for user threads)
-//!                         │ stack page 4         │
-//!                         │ stack page 3         │    16 KiB of frames from the PMM,
-//!                         │ stack page 2         │    grows downward
-//!                         │ stack page 1         │
-//!   low    base + 0x1000  ├──────────────────────┤
-//!                         │ guard page (unmapped)│ <- overflow faults here
-//!          base + 0x0000  └──────────────────────┘
-//!
-//!   STACK_REGION = 0xFFFFB00000000000
-//! ```
-//!
-//! The boot thread (slot 0) keeps running on Limine's stack and has no such
-//! region.
-//!
 //! ## Preemption
 //!
 //! ```text
-//!   LAPIC timer ──► vector 0x30 ──► Interrupts::dispatch
+//!   LAPIC timer ──► vector 0x30 ──► Trap::dispatch
 //!                                     ├─ Time::Timer::handleTick       ticks += 1
 //!                                     ├─ Apic::Lapic::endOfInterrupt
-//!                                     └─ Scheduler::onTick       (interrupts still off)
+//!                                     └─ Sched::Scheduler::onTick       (interrupts still off)
 //!                                           ├─ count the tick against the thread
 //!                                           ├─ wake sleepers
 //!                                           └─ slice over and others ready?
@@ -100,41 +58,11 @@
 import Arch from "@arch";
 import Mm from "@mm";
 import Time from "@time";
+import _ from "./thread";
 
-/// One entry of the thread table.
-@cLayout
-record Thread {
-  /// Unique thread id, assigned from a counter that never goes back. Slot
-  /// numbers are reused, ids are not.
-  public id: u64;
-
-  /// One of `UNUSED`, `READY`, `RUNNING`, `BLOCKED` or `DEAD`.
-  public state: u64;
-
-  /// The stack pointer the thread was switched out with. Meaningful when the
-  /// thread is not running.
-  public savedRsp: u64;
-
-  /// Lowest address of the slot's stack region: the guard page. 0 for the boot
-  /// thread, which does not run on a region stack.
-  public stackBase: u64;
-
-  /// Tick count at which a `BLOCKED` thread becomes ready.
-  public wakeTick: u64;
-
-  /// Timer ticks that arrived while this thread was running.
-  public runTicks: u64;
-
-  /// Physical address of the PML4 the thread owns, or 0 for the kernel's.
-  public root: u64;
-}
-
-/// The scheduler state. The array sizes must equal `Scheduler::MAX_THREADS`,
+/// The scheduler state. The array sizes must equal `Sched::Scheduler::MAX_THREADS`,
 /// and have to be integer literals.
 record SchedulerState {
-  /// The thread table, indexed by slot.
-  static mut threads: Thread[16];
-
   /// The run queue: a ring buffer of slot numbers.
   static mut queue: u64[16];
 
@@ -150,9 +78,6 @@ record SchedulerState {
   /// Slot of the thread that just died plus 1, or 0 for none. The next thread to
   /// run frees its stack (`reapZombie`).
   static mut zombie: u64;
-
-  /// The id the next created thread gets.
-  static mut nextId: u64;
 
   /// Context switches since boot.
   static mut switches: u64;
@@ -171,64 +96,19 @@ record SchedulerState {
 }
 
 /// The scheduler API.
-export namespace Scheduler {
-  /// Size of the thread table, the boot and idle threads included.
-  const MAX_THREADS: u64 = 16;
-
-  /// Slot of the boot thread.
-  const BOOT_SLOT: u64 = 0;
-
-  /// Slot of the idle thread.
-  const IDLE_SLOT: u64 = 1;
-
-  /// Returned by `spawn` when the table is full or the stack cannot be
-  /// mapped.
-  const NO_THREAD: u64 = 0xFFFFFFFFFFFFFFFF;
-
-  /// A free slot.
-  const UNUSED: u64 = 0;
-
-  /// In the run queue, waiting for the processor.
-  const READY: u64 = 1;
-
-  /// The thread the processor is executing.
-  const RUNNING: u64 = 2;
-
-  /// Asleep until `wakeTick`.
-  const BLOCKED: u64 = 3;
-
-  /// Finished, waiting for the next thread to free its stack.
-  const DEAD: u64 = 4;
-
+namespace Sched::Scheduler {
   /// Timer ticks a thread may run before the timer interrupt hands the
   /// processor to the next ready thread: 10 ticks at 100 Hz is 100 ms.
   const TIME_SLICE_TICKS: u64 = 10;
 
-  /// 4 KiB.
-  const PAGE_SIZE: u64 = 4096;
-
-  /// Stack pages per thread: 16 KiB.
-  const STACK_PAGES: u64 = 4;
-
-  /// A stack plus the guard page below it.
-  const STACK_SPAN: u64 = (STACK_PAGES + 1) * PAGE_SIZE;
-
-  /// Where thread stacks live, one `STACK_SPAN` per slot, away from the
-  /// direct map, the heap, the APIC pages and the page-table test address.
-  const STACK_REGION: u64 = 0xFFFFB00000000000;
-
   /// Builds the table with the boot thread running and the idle thread
   /// ready. The kernel page tables and the PMM must be up.
   function initialize(): void {
-    let boot: *mut Thread = slotPointer(BOOT_SLOT);
+    Sched::Thread::initializeBootThread();
 
-    (*boot).id = 0;
-    (*boot).state = RUNNING;
+    SchedulerState::current = Sched::Thread::BOOT_SLOT;
 
-    SchedulerState::current = BOOT_SLOT;
-    SchedulerState::nextId = 1;
-
-    if (!createThread(IDLE_SLOT, Arch::ContextAsm::ignis_function_address(idleLoop), 0, 0)) {
+    if (!Sched::Thread::createThread(Sched::Thread::IDLE_SLOT, Arch::ContextAsm::ignis_function_address(idleLoop), 0, 0)) {
       @panic("scheduler: cannot create the idle thread");
     }
 
@@ -257,14 +137,14 @@ export namespace Scheduler {
       return;
     }
 
-    let current: *mut Thread = slotPointer(SchedulerState::current);
+    let current: *mut Sched::Thread::Control = Sched::Thread::slotPointer(SchedulerState::current);
 
     (*current).runTicks += 1;
     wakeSleepers();
 
-    if (SchedulerState::current == IDLE_SLOT) {
+    if (SchedulerState::current == Sched::Thread::IDLE_SLOT) {
       if (SchedulerState::queueLength > 0) {
-        makeReady(IDLE_SLOT);
+        makeReady(Sched::Thread::IDLE_SLOT);
         switchToNext();
       }
 
@@ -300,20 +180,20 @@ export namespace Scheduler {
   /// the thread cannot be created. 0 means the kernel's own address space.
   function spawnIn(entry: u64, argument: u64, root: u64): u64 {
     let saved: u64 = Arch::Cpu::saveAndDisableInterrupts();
-    let slot: u64 = findFreeSlot();
+    let slot: u64 = Sched::Thread::findFreeSlot();
 
-    if (slot == NO_THREAD || !createThread(slot, entry, argument, root)) {
+    if (slot == Sched::Thread::NO_THREAD || !Sched::Thread::createThread(slot, entry, argument, root)) {
       if (root != 0) {
         Mm::AddressSpace::destroy(root);
       }
 
       Arch::Cpu::restoreInterrupts(saved);
-      return NO_THREAD;
+      return Sched::Thread::NO_THREAD;
     }
 
     enqueue(slot);
 
-    let id: u64 = (*slotPointer(slot)).id;
+    let id: u64 = (*Sched::Thread::slotPointer(slot)).id;
 
     Arch::Cpu::restoreInterrupts(saved);
 
@@ -344,14 +224,14 @@ export namespace Scheduler {
     }
 
     let saved: u64 = Arch::Cpu::saveAndDisableInterrupts();
-    let current: *mut Thread = slotPointer(SchedulerState::current);
+    let current: *mut Sched::Thread::Control = Sched::Thread::slotPointer(SchedulerState::current);
 
-    if (SchedulerState::current == IDLE_SLOT) {
+    if (SchedulerState::current == Sched::Thread::IDLE_SLOT) {
       @panic("scheduler: the idle thread cannot sleep");
     }
 
     (*current).wakeTick = Time::Timer::ticks() + ticks;
-    (*current).state = BLOCKED;
+    (*current).state = Sched::Thread::BLOCKED;
     switchToNext();
 
     Arch::Cpu::restoreInterrupts(saved);
@@ -364,11 +244,11 @@ export namespace Scheduler {
   function exitCurrent(): never {
     Arch::Cpu::disableInterrupts();
 
-    if (SchedulerState::current == BOOT_SLOT || SchedulerState::current == IDLE_SLOT) {
+    if (SchedulerState::current == Sched::Thread::BOOT_SLOT || SchedulerState::current == Sched::Thread::IDLE_SLOT) {
       @panic("scheduler: the boot or idle thread cannot exit");
     }
 
-    (*slotPointer(SchedulerState::current)).state = DEAD;
+    (*Sched::Thread::slotPointer(SchedulerState::current)).state = Sched::Thread::DEAD;
     SchedulerState::zombie = SchedulerState::current + 1;
     switchToNext();
 
@@ -384,29 +264,7 @@ export namespace Scheduler {
 
   /// The id of the running thread.
   function currentId(): u64 {
-    return (*slotPointer(SchedulerState::current)).id;
-  }
-
-  /// True while a thread with this id is in the table, dead or not yet
-  /// freed included.
-  function isAlive(id: u64): boolean {
-    let saved: u64 = Arch::Cpu::saveAndDisableInterrupts();
-    let mut alive: boolean = false;
-    let mut slot: u64 = 0;
-
-    while (slot < MAX_THREADS) {
-      let thread: *mut Thread = slotPointer(slot);
-
-      if ((*thread).state != UNUSED && (*thread).id == id) {
-        alive = true;
-      }
-
-      slot += 1;
-    }
-
-    Arch::Cpu::restoreInterrupts(saved);
-
-    return alive;
+    return (*Sched::Thread::slotPointer(SchedulerState::current)).id;
   }
 
   /// How many times the processor changed threads.
@@ -420,138 +278,12 @@ export namespace Scheduler {
     return SchedulerState::preemptions;
   }
 
-  /// The state of slot `slot` as a word for display, "free" for an unused
-  /// slot.
-  function stateName(slot: u64): str {
-    let state: u64 = (*slotPointer(slot)).state;
-
-    if (state == READY) {
-      return "ready";
-    }
-
-    if (state == RUNNING) {
-      return "running";
-    }
-
-    if (state == BLOCKED) {
-      return "sleeping";
-    }
-
-    if (state == DEAD) {
-      return "dead";
-    }
-
-    return "free";
-  }
-
-  /// The id of the thread in `slot`. Meaningful when the slot is in use.
-  function slotId(slot: u64): u64 {
-    return (*slotPointer(slot)).id;
-  }
-
-  /// True when `slot` holds a thread.
-  function slotInUse(slot: u64): boolean {
-    return (*slotPointer(slot)).state != UNUSED;
-  }
-
-  /// Timer ticks the thread in `slot` has been running when a tick arrived.
-  /// The count grows only once preemption is enabled.
-  function slotRunTicks(slot: u64): u64 {
-    return (*slotPointer(slot)).runTicks;
-  }
-
-  /// The tick a sleeping thread wakes at, or 0 when `slot` is not asleep.
-  function slotWakeTick(slot: u64): u64 {
-    if ((*slotPointer(slot)).state != BLOCKED) {
-      return 0;
-    }
-
-    return (*slotPointer(slot)).wakeTick;
-  }
-
-  /// Threads currently in the table, idle and boot included.
-  function threadCount(): u64 {
-    let mut count: u64 = 0;
-    let mut slot: u64 = 0;
-
-    while (slot < MAX_THREADS) {
-      if ((*slotPointer(slot)).state != UNUSED) {
-        count += 1;
-      }
-
-      slot += 1;
-    }
-
-    return count;
-  }
-
   /// The idle thread: sleeps until an interrupt and then lets anything that
   /// became ready run.
   function idleLoop(argument: u64): void {
     while (true) {
       yield();
       Arch::Cpu::waitForInterrupt();
-    }
-  }
-
-  /// Fills `slot` with a thread that has never run. Returns false, leaving
-  /// the slot free, when the stack cannot be mapped.
-  function createThread(slot: u64, entry: u64, argument: u64, root: u64): boolean {
-    let base: u64 = STACK_REGION + slot * STACK_SPAN;
-
-    if (!mapStack(base)) {
-      return false;
-    }
-
-    let thread: *mut Thread = slotPointer(slot);
-
-    (*thread).id = SchedulerState::nextId;
-    (*thread).state = READY;
-    (*thread).stackBase = base;
-    (*thread).wakeTick = 0;
-    (*thread).runTicks = 0;
-    (*thread).root = root;
-    (*thread).savedRsp = Arch::Context::prepareStack(base + STACK_SPAN, entry, argument);
-
-    SchedulerState::nextId += 1;
-
-    return true;
-  }
-
-  /// Maps the pages above the guard page at `base`, or none of them.
-  function mapStack(base: u64): boolean {
-    let mut page: u64 = 1;
-
-    while (page <= STACK_PAGES) {
-      let frame: u64 = Mm::Pmm::allocateFrame();
-
-      if (frame == Mm::Pmm::NO_FRAME || !Mm::Vmm::map(base + page * PAGE_SIZE, frame, Mm::Vmm::WRITABLE | Mm::Vmm::NO_EXECUTE)) {
-        if (frame != Mm::Pmm::NO_FRAME) {
-          Mm::Pmm::freeFrame(frame);
-        }
-
-        unmapStack(base, page - 1);
-        return false;
-      }
-
-      page += 1;
-    }
-
-    return true;
-  }
-
-  /// Unmaps the first `pages` stack pages above the guard page at `base` and
-  /// returns their frames to the PMM.
-  function unmapStack(base: u64, pages: u64): void {
-    let mut page: u64 = 1;
-
-    while (page <= pages) {
-      let address: u64 = base + page * PAGE_SIZE;
-      let frame: u64 = Mm::Vmm::translate(address);
-
-      Mm::Vmm::unmap(address);
-      Mm::Pmm::freeFrame(frame);
-      page += 1;
     }
   }
 
@@ -566,28 +298,28 @@ export namespace Scheduler {
 
     SchedulerState::zombie = 0;
 
-    let thread: *mut Thread = slotPointer(marker - 1);
+    let thread: *mut Sched::Thread::Control = Sched::Thread::slotPointer(marker - 1);
 
-    unmapStack((*thread).stackBase, STACK_PAGES);
+    Sched::Thread::unmapStack((*thread).stackBase, Sched::Thread::STACK_PAGES);
 
     if ((*thread).root != 0) {
       Mm::AddressSpace::destroy((*thread).root);
       (*thread).root = 0;
     }
 
-    (*thread).state = UNUSED;
+    (*thread).state = Sched::Thread::UNUSED;
   }
 
   /// Loads what the thread in `slot` runs on: its page tables, and, when it
   /// owns an address space, its kernel stack as the one ring 3 enters on.
   function activateSpaceOf(slot: u64): void {
-    let thread: *mut Thread = slotPointer(slot);
+    let thread: *mut Sched::Thread::Control = Sched::Thread::slotPointer(slot);
     let mut root: u64 = (*thread).root;
 
     if (root == 0) {
       root = Mm::Vmm::rootTable();
     } else {
-      Arch::UserMode::setKernelStack((*thread).stackBase + STACK_SPAN);
+      Arch::UserMode::setKernelStack((*thread).stackBase + Sched::Thread::STACK_SPAN);
     }
 
     if (Arch::Cpu::readCr3() != root) {
@@ -604,13 +336,13 @@ export namespace Scheduler {
     wakeSleepers();
 
     let outgoing: u64 = SchedulerState::current;
-    let mut next: u64 = IDLE_SLOT;
+    let mut next: u64 = Sched::Thread::IDLE_SLOT;
 
     if (SchedulerState::queueLength > 0) {
       next = dequeue();
     }
 
-    (*slotPointer(next)).state = RUNNING;
+    (*Sched::Thread::slotPointer(next)).state = Sched::Thread::RUNNING;
     SchedulerState::sliceLeft = TIME_SLICE_TICKS;
 
     if (next == outgoing) {
@@ -622,7 +354,7 @@ export namespace Scheduler {
 
     activateSpaceOf(next);
 
-    Arch::Context::switchTo(&mut (*slotPointer(outgoing)).savedRsp as *mut u64, (*slotPointer(next)).savedRsp);
+    Arch::Context::switchTo(&mut (*Sched::Thread::slotPointer(outgoing)).savedRsp as *mut u64, (*Sched::Thread::slotPointer(next)).savedRsp);
 
     reapZombie();
   }
@@ -632,10 +364,10 @@ export namespace Scheduler {
     let now: u64 = Time::Timer::ticks();
     let mut slot: u64 = 0;
 
-    while (slot < MAX_THREADS) {
-      let thread: *mut Thread = slotPointer(slot);
+    while (slot < Sched::Thread::MAX_THREADS) {
+      let thread: *mut Sched::Thread::Control = Sched::Thread::slotPointer(slot);
 
-      if ((*thread).state == BLOCKED && (*thread).wakeTick <= now) {
+      if ((*thread).state == Sched::Thread::BLOCKED && (*thread).wakeTick <= now) {
         makeReady(slot);
       }
 
@@ -646,9 +378,9 @@ export namespace Scheduler {
   /// Marks `slot` ready and queues it. The idle thread is never queued: it
   /// runs when the queue is empty.
   function makeReady(slot: u64): void {
-    (*slotPointer(slot)).state = READY;
+    (*Sched::Thread::slotPointer(slot)).state = Sched::Thread::READY;
 
-    if (slot != IDLE_SLOT) {
+    if (slot != Sched::Thread::IDLE_SLOT) {
       enqueue(slot);
     }
   }
@@ -657,7 +389,7 @@ export namespace Scheduler {
   /// `MAX_THREADS` entries, so it can never overflow: a thread is queued at most
   /// once.
   function enqueue(slot: u64): void {
-    let tail: u64 = (SchedulerState::queueHead + SchedulerState::queueLength) % MAX_THREADS;
+    let tail: u64 = (SchedulerState::queueHead + SchedulerState::queueLength) % Sched::Thread::MAX_THREADS;
 
     *(queueBase() + tail) = slot;
     SchedulerState::queueLength += 1;
@@ -667,35 +399,10 @@ export namespace Scheduler {
   function dequeue(): u64 {
     let slot: u64 = *(queueBase() + SchedulerState::queueHead);
 
-    SchedulerState::queueHead = (SchedulerState::queueHead + 1) % MAX_THREADS;
+    SchedulerState::queueHead = (SchedulerState::queueHead + 1) % Sched::Thread::MAX_THREADS;
     SchedulerState::queueLength -= 1;
 
     return slot;
-  }
-
-  /// A free slot above the idle thread, or `NO_THREAD`.
-  function findFreeSlot(): u64 {
-    let mut slot: u64 = IDLE_SLOT + 1;
-
-    while (slot < MAX_THREADS) {
-      if ((*slotPointer(slot)).state == UNUSED) {
-        return slot;
-      }
-
-      slot += 1;
-    }
-
-    return NO_THREAD;
-  }
-
-  /// A pointer to the table entry of `slot`.
-  function slotPointer(slot: u64): *mut Thread {
-    return tableBase() + slot;
-  }
-
-  /// A pointer to the first entry of the thread table.
-  function tableBase(): *mut Thread {
-    return &mut SchedulerState::threads as *mut Thread;
   }
 
   /// A pointer to the first entry of the run queue.

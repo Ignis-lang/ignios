@@ -36,7 +36,7 @@
 //!   │    ├─ Mm::Modules::initialize .. map Limine modules           modules.ign       doc 15
 //!   │    ├─ Mm::Heap::initialize ..... kernel heap                  heap.ign          doc 10
 //!   │    └─ Mm::AddressSpace::selfTest                              address_space.ign doc 14
-//!   ├─ Scheduler::initialize, Process::initialize, Syscall::initialize
+//!   ├─ Sched::Scheduler::initialize, Process::initialize, Syscall::initialize
 //!   ├─ Arch::UserMode::initialize ...... EFER.SCE, STAR/LSTAR/FMASK   usermode.ign      doc 14
 //!   ├─ Acpi::initialize/report ... RSDP, XSDT, MADT             acpi.ign          doc 12
 //!   ├─ Arch::Pic::initialize ........... remap and mask the 8259      pic.ign           doc 05
@@ -44,7 +44,7 @@
 //!   ├─ Apic::Ioapic::initialize + routeIsa(keyboard)                  ioapic.ign        doc 12
 //!   ├─ initializeTimer ........... APIC timer, 100 Hz           timer.ign         doc 12
 //!   ├─ Arch::Context::selfTest, SchedulerTest::*                      scheduler_test.ign doc 13
-//!   ├─ Scheduler::enablePreemption
+//!   ├─ Sched::Scheduler::enablePreemption
 //!   ├─ UserTest::run ............. ring 3 smoke tests           user_test.ign     doc 14
 //!   ├─ initializeKeyboard ........ 8042 enable, IRQ1 live       ps2.ign           doc 06
 //!   └─ runTerminal ............... prompt loop, never returns
@@ -79,11 +79,11 @@ import Boot from "@boot";
 import Drivers from "@drivers";
 import Lib from "@lib";
 import Mm from "@mm";
+import Sched from "@sched";
 import Time from "@time";
 import Interrupts from "./interrupts";
 import Process from "./process";
 import Programs from "./programs";
-import Scheduler from "./scheduler";
 import SchedulerTest from "./scheduler_test";
 import Syscall from "./syscall";
 import ThreadCommands from "./thread_commands";
@@ -568,7 +568,7 @@ function kmain(): void {
 
   initializeMemory(framebuffer);
 
-  Scheduler::initialize();
+  Sched::Scheduler::initialize();
   Process::initialize();
   Syscall::initialize();
 
@@ -611,7 +611,7 @@ function kmain(): void {
   SchedulerTest::runCooperative();
 
   Drivers::Console::write("scheduler: self-test ok, round-robin, sleep and slot reuse, ");
-  Drivers::Console::writeDecimal(Scheduler::switchCount());
+  Drivers::Console::writeDecimal(Sched::Scheduler::switchCount());
   Drivers::Console::writeLine(" switches");
 
   SchedulerTest::runAddressSpaces();
@@ -619,7 +619,7 @@ function kmain(): void {
 
   // From here the timer tick can switch threads. The self-tests above ran
   // cooperatively because their expectations assume no preemption.
-  Scheduler::enablePreemption();
+  Sched::Scheduler::enablePreemption();
 
   let preemptions: u64 = SchedulerTest::runPreemptive();
 

@@ -12,15 +12,15 @@
 //! | `runAddressSpaces`  | two threads read the same user address and each sees its own page, so a switch loads the right CR3, and no frame leaks |
 //! | `runPreemptive`     | two threads that never yield both get the processor, taken by the timer |
 //!
-//! A thread function can only be turned into the address `Scheduler::spawn`
+//! A thread function can only be turned into the address `Sched::Scheduler::spawn`
 //! takes where it is named, so every `spawn` here names its function.
 //! `main.ign` runs them in the order above and prints a line after each.
 
 import Arch from "@arch";
 import Boot from "@boot";
 import Mm from "@mm";
+import Sched from "@sched";
 import Time from "@time";
-import Scheduler from "./scheduler";
 
 /// Results the test threads report back to the boot thread.
 record SchedulerTestState {
@@ -108,9 +108,9 @@ export namespace SchedulerTest {
 
       *(Boot::Hhdm::toVirtual(frame) as *mut u64) = SPACE_MARKER + index;
 
-      ids[index] = Scheduler::spawnIn(Arch::ContextAsm::ignis_function_address(spaceReader), index, root);
+      ids[index] = Sched::Scheduler::spawnIn(Arch::ContextAsm::ignis_function_address(spaceReader), index, root);
 
-      if (ids[index] == Scheduler::NO_THREAD) {
+      if (ids[index] == Sched::Thread::NO_THREAD) {
         @panic("address space switch self-test: cannot spawn");
       }
 
@@ -141,14 +141,14 @@ export namespace SchedulerTest {
   /// timer took the processor away from a thread that had not given it up.
   function runPreemptive(): u64 {
     let saved: u64 = Arch::Cpu::saveAndDisableInterrupts();
-    let preemptionsBefore: u64 = Scheduler::preemptionCount();
+    let preemptionsBefore: u64 = Sched::Scheduler::preemptionCount();
 
     SchedulerTestState::stop = 0;
     SchedulerTestState::spins[0] = 0;
     SchedulerTestState::spins[1] = 0;
 
-    let first: u64 = Scheduler::spawn(Arch::ContextAsm::ignis_function_address(spinner), 0);
-    let second: u64 = Scheduler::spawn(Arch::ContextAsm::ignis_function_address(spinner), 1);
+    let first: u64 = Sched::Scheduler::spawn(Arch::ContextAsm::ignis_function_address(spinner), 0);
+    let second: u64 = Sched::Scheduler::spawn(Arch::ContextAsm::ignis_function_address(spinner), 1);
 
     let end: u64 = Time::Timer::ticks() + PREEMPTION_TICKS;
 
@@ -167,7 +167,7 @@ export namespace SchedulerTest {
       @panic("preemption self-test: a spinning thread never got the processor");
     }
 
-    let preemptions: u64 = Scheduler::preemptionCount() - preemptionsBefore;
+    let preemptions: u64 = Sched::Scheduler::preemptionCount() - preemptionsBefore;
 
     if (preemptions < 2) {
       @panic("preemption self-test: the timer did not take the processor away");
@@ -185,10 +185,10 @@ export namespace SchedulerTest {
     SchedulerTestState::counter = 0;
     SchedulerTestState::traceLength = 0;
 
-    let threadsBefore: u64 = Scheduler::threadCount();
-    let first: u64 = Scheduler::spawn(Arch::ContextAsm::ignis_function_address(roundRobinWorker), 0);
-    let second: u64 = Scheduler::spawn(Arch::ContextAsm::ignis_function_address(roundRobinWorker), 1);
-    let third: u64 = Scheduler::spawn(Arch::ContextAsm::ignis_function_address(roundRobinWorker), 2);
+    let threadsBefore: u64 = Sched::Thread::threadCount();
+    let first: u64 = Sched::Scheduler::spawn(Arch::ContextAsm::ignis_function_address(roundRobinWorker), 0);
+    let second: u64 = Sched::Scheduler::spawn(Arch::ContextAsm::ignis_function_address(roundRobinWorker), 1);
+    let third: u64 = Sched::Scheduler::spawn(Arch::ContextAsm::ignis_function_address(roundRobinWorker), 2);
 
     if (second != first + 1 || third != second + 1) {
       @panic("scheduler self-test: thread ids are not sequential");
@@ -214,7 +214,7 @@ export namespace SchedulerTest {
       @panic("scheduler self-test: the shared counter is wrong");
     }
 
-    if (Scheduler::threadCount() != threadsBefore) {
+    if (Sched::Thread::threadCount() != threadsBefore) {
       @panic("scheduler self-test: exited threads were not freed");
     }
   }
@@ -224,7 +224,7 @@ export namespace SchedulerTest {
   function testSleep(): void {
     SchedulerTestState::sleptTicks = 0;
 
-    let id: u64 = Scheduler::spawn(Arch::ContextAsm::ignis_function_address(sleepWorker), SLEEP_TICKS);
+    let id: u64 = Sched::Scheduler::spawn(Arch::ContextAsm::ignis_function_address(sleepWorker), SLEEP_TICKS);
 
     joinRange(id, id);
 
@@ -236,19 +236,19 @@ export namespace SchedulerTest {
   /// Filling every slot must make the next `spawn` fail cleanly, and the
   /// slots must be usable again once their threads are gone.
   function testFullTable(): void {
-    let free: u64 = Scheduler::MAX_THREADS - Scheduler::threadCount();
-    let mut first: u64 = Scheduler::NO_THREAD;
-    let mut last: u64 = Scheduler::NO_THREAD;
+    let free: u64 = Sched::Thread::MAX_THREADS - Sched::Thread::threadCount();
+    let mut first: u64 = Sched::Thread::NO_THREAD;
+    let mut last: u64 = Sched::Thread::NO_THREAD;
     let mut spawned: u64 = 0;
 
     while (true) {
-      let id: u64 = Scheduler::spawn(Arch::ContextAsm::ignis_function_address(sleepWorker), 2);
+      let id: u64 = Sched::Scheduler::spawn(Arch::ContextAsm::ignis_function_address(sleepWorker), 2);
 
-      if (id == Scheduler::NO_THREAD) {
+      if (id == Sched::Thread::NO_THREAD) {
         break;
       }
 
-      if (first == Scheduler::NO_THREAD) {
+      if (first == Sched::Thread::NO_THREAD) {
         first = id;
       }
 
@@ -262,9 +262,9 @@ export namespace SchedulerTest {
 
     joinRange(first, last);
 
-    let again: u64 = Scheduler::spawn(Arch::ContextAsm::ignis_function_address(sleepWorker), 1);
+    let again: u64 = Sched::Scheduler::spawn(Arch::ContextAsm::ignis_function_address(sleepWorker), 1);
 
-    if (again == Scheduler::NO_THREAD) {
+    if (again == Sched::Thread::NO_THREAD) {
       @panic("scheduler self-test: a freed slot could not be reused");
     }
 
@@ -278,8 +278,8 @@ export namespace SchedulerTest {
     let mut id: u64 = first;
 
     while (id <= last) {
-      while (Scheduler::isAlive(id)) {
-        Scheduler::sleep(1);
+      while (Sched::Thread::isAlive(id)) {
+        Sched::Scheduler::sleep(1);
       }
 
       id += 1;
@@ -297,7 +297,7 @@ export namespace SchedulerTest {
         SchedulerTestState::spaceReads[index] += 1;
       }
 
-      Scheduler::yield();
+      Sched::Scheduler::yield();
       round += 1;
     }
   }
@@ -326,7 +326,7 @@ export namespace SchedulerTest {
       SchedulerTestState::trace[SchedulerTestState::traceLength] = index as u8;
       SchedulerTestState::traceLength += 1;
       SchedulerTestState::counter += index + 1;
-      Scheduler::yield();
+      Sched::Scheduler::yield();
       step += 1;
     }
   }
@@ -335,7 +335,7 @@ export namespace SchedulerTest {
   function sleepWorker(ticks: u64): void {
     let start: u64 = Time::Timer::ticks();
 
-    Scheduler::sleep(ticks);
+    Sched::Scheduler::sleep(ticks);
     SchedulerTestState::sleptTicks = Time::Timer::ticks() - start;
   }
 }

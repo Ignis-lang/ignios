@@ -1,0 +1,325 @@
+//!
+//! # Threads
+//!
+//! The thread table: one slot per kernel thread, its state and its stack.
+//!
+//! ## Overview
+//!
+//! A thread is a slot in a fixed table: an id, a state, the stack pointer it
+//! was switched out with, and a kernel stack of its own. Slot 0 is the boot
+//! thread, the code `kmain` was already running on Limine's stack. Slot 1 is
+//! the idle thread, which runs only when nothing else is ready. Every other
+//! slot is free until `Sched::Scheduler::spawn` fills it. This file owns the
+//! table and the stacks. `scheduler.ign` decides which slot runs.
+//!
+//! ## Thread States
+//!
+//! ```text
+//!                     spawn
+//!           UNUSED ───────────► READY ◄──────────────────────┐
+//!              ▲                  │  ▲                       │ wakeSleepers:
+//!              │ reapZombie       │  │ yield, or the time    │ now >= wakeTick
+//!              │ (next thread)    │  │ slice ran out         │
+//!            DEAD                 ▼  │                       │
+//!              ▲              RUNNING ──── sleep(ticks) ──► BLOCKED
+//!              │                  │
+//!              └──── exitCurrent ─┘
+//! ```
+//!
+//! Exactly one thread is RUNNING. The idle thread is never in the run queue:
+//! it runs when the queue is empty.
+//!
+//! ## Thread Stacks
+//!
+//! Each slot has `STACK_SPAN` bytes (5 pages) of virtual address space at
+//! `STACK_REGION + slot * STACK_SPAN`:
+//!
+//! ```text
+//!   high   base + 0x5000  ┌──────────────────────┐ <- stack top (RSP0 for user threads)
+//!                         │ stack page 4         │
+//!                         │ stack page 3         │    16 KiB of frames from the PMM,
+//!                         │ stack page 2         │    grows downward
+//!                         │ stack page 1         │
+//!   low    base + 0x1000  ├──────────────────────┤
+//!                         │ guard page (unmapped)│ <- overflow faults here
+//!          base + 0x0000  └──────────────────────┘
+//!
+//!   STACK_REGION = 0xFFFFB00000000000
+//! ```
+//!
+//! The boot thread (slot 0) keeps running on Limine's stack and has no such
+//! region. Stacks are `STACK_PAGES` pages of PMM frames mapped in a region of
+//! their own, below an unmapped guard page: a thread that overflows its stack
+//! takes a page fault instead of writing over another thread's stack.
+//!
+//! See concept doc 13.
+
+import Arch from "@arch";
+import Mm from "@mm";
+
+/// The thread table. The array size must equal `Sched::Thread::MAX_THREADS`,
+/// and has to be an integer literal.
+record ThreadState {
+  /// The thread table, indexed by slot.
+  static mut threads: Sched::Thread::Control[16];
+
+  /// The id the next created thread gets.
+  static mut nextId: u64;
+}
+
+/// The thread table and the thread stacks.
+namespace Sched::Thread {
+  /// One entry of the thread table.
+  @cLayout
+  record Control {
+    /// Unique thread id, assigned from a counter that never goes back. Slot
+    /// numbers are reused, ids are not.
+    public id: u64;
+
+    /// One of `UNUSED`, `READY`, `RUNNING`, `BLOCKED` or `DEAD`.
+    public state: u64;
+
+    /// The stack pointer the thread was switched out with. Meaningful when the
+    /// thread is not running.
+    public savedRsp: u64;
+
+    /// Lowest address of the slot's stack region: the guard page. 0 for the boot
+    /// thread, which does not run on a region stack.
+    public stackBase: u64;
+
+    /// Tick count at which a `BLOCKED` thread becomes ready.
+    public wakeTick: u64;
+
+    /// Timer ticks that arrived while this thread was running.
+    public runTicks: u64;
+
+    /// Physical address of the PML4 the thread owns, or 0 for the kernel's.
+    public root: u64;
+  }
+
+  /// Size of the thread table, the boot and idle threads included.
+  const MAX_THREADS: u64 = 16;
+
+  /// Slot of the boot thread.
+  const BOOT_SLOT: u64 = 0;
+
+  /// Slot of the idle thread.
+  const IDLE_SLOT: u64 = 1;
+
+  /// Returned by `spawn` when the table is full or the stack cannot be
+  /// mapped.
+  const NO_THREAD: u64 = 0xFFFFFFFFFFFFFFFF;
+
+  /// A free slot.
+  const UNUSED: u64 = 0;
+
+  /// In the run queue, waiting for the processor.
+  const READY: u64 = 1;
+
+  /// The thread the processor is executing.
+  const RUNNING: u64 = 2;
+
+  /// Asleep until `wakeTick`.
+  const BLOCKED: u64 = 3;
+
+  /// Finished, waiting for the next thread to free its stack.
+  const DEAD: u64 = 4;
+
+  /// 4 KiB.
+  const PAGE_SIZE: u64 = 4096;
+
+  /// Stack pages per thread: 16 KiB.
+  const STACK_PAGES: u64 = 4;
+
+  /// A stack plus the guard page below it.
+  const STACK_SPAN: u64 = (STACK_PAGES + 1) * PAGE_SIZE;
+
+  /// Where thread stacks live, one `STACK_SPAN` per slot, away from the
+  /// direct map, the heap, the APIC pages and the page-table test address.
+  const STACK_REGION: u64 = 0xFFFFB00000000000;
+
+  /// True while a thread with this id is in the table, dead or not yet
+  /// freed included.
+  function isAlive(id: u64): boolean {
+    let saved: u64 = Arch::Cpu::saveAndDisableInterrupts();
+    let mut alive: boolean = false;
+    let mut slot: u64 = 0;
+
+    while (slot < MAX_THREADS) {
+      let thread: *mut Control = slotPointer(slot);
+
+      if ((*thread).state != UNUSED && (*thread).id == id) {
+        alive = true;
+      }
+
+      slot += 1;
+    }
+
+    Arch::Cpu::restoreInterrupts(saved);
+
+    return alive;
+  }
+
+  /// The state of slot `slot` as a word for display, "free" for an unused
+  /// slot.
+  function stateName(slot: u64): str {
+    let state: u64 = (*slotPointer(slot)).state;
+
+    if (state == READY) {
+      return "ready";
+    }
+
+    if (state == RUNNING) {
+      return "running";
+    }
+
+    if (state == BLOCKED) {
+      return "sleeping";
+    }
+
+    if (state == DEAD) {
+      return "dead";
+    }
+
+    return "free";
+  }
+
+  /// The id of the thread in `slot`. Meaningful when the slot is in use.
+  function slotId(slot: u64): u64 {
+    return (*slotPointer(slot)).id;
+  }
+
+  /// True when `slot` holds a thread.
+  function slotInUse(slot: u64): boolean {
+    return (*slotPointer(slot)).state != UNUSED;
+  }
+
+  /// Timer ticks the thread in `slot` has been running when a tick arrived.
+  /// The count grows only once preemption is enabled.
+  function slotRunTicks(slot: u64): u64 {
+    return (*slotPointer(slot)).runTicks;
+  }
+
+  /// The tick a sleeping thread wakes at, or 0 when `slot` is not asleep.
+  function slotWakeTick(slot: u64): u64 {
+    if ((*slotPointer(slot)).state != BLOCKED) {
+      return 0;
+    }
+
+    return (*slotPointer(slot)).wakeTick;
+  }
+
+  /// Threads currently in the table, idle and boot included.
+  function threadCount(): u64 {
+    let mut count: u64 = 0;
+    let mut slot: u64 = 0;
+
+    while (slot < MAX_THREADS) {
+      if ((*slotPointer(slot)).state != UNUSED) {
+        count += 1;
+      }
+
+      slot += 1;
+    }
+
+    return count;
+  }
+
+  /// Fills `slot` with a thread that has never run. Returns false, leaving
+  /// the slot free, when the stack cannot be mapped.
+  function createThread(slot: u64, entry: u64, argument: u64, root: u64): boolean {
+    let base: u64 = STACK_REGION + slot * STACK_SPAN;
+
+    if (!mapStack(base)) {
+      return false;
+    }
+
+    let thread: *mut Control = slotPointer(slot);
+
+    (*thread).id = ThreadState::nextId;
+    (*thread).state = READY;
+    (*thread).stackBase = base;
+    (*thread).wakeTick = 0;
+    (*thread).runTicks = 0;
+    (*thread).root = root;
+    (*thread).savedRsp = Arch::Context::prepareStack(base + STACK_SPAN, entry, argument);
+
+    ThreadState::nextId += 1;
+
+    return true;
+  }
+
+  /// Maps the pages above the guard page at `base`, or none of them.
+  function mapStack(base: u64): boolean {
+    let mut page: u64 = 1;
+
+    while (page <= STACK_PAGES) {
+      let frame: u64 = Mm::Pmm::allocateFrame();
+
+      if (frame == Mm::Pmm::NO_FRAME || !Mm::Vmm::map(base + page * PAGE_SIZE, frame, Mm::Vmm::WRITABLE | Mm::Vmm::NO_EXECUTE)) {
+        if (frame != Mm::Pmm::NO_FRAME) {
+          Mm::Pmm::freeFrame(frame);
+        }
+
+        unmapStack(base, page - 1);
+        return false;
+      }
+
+      page += 1;
+    }
+
+    return true;
+  }
+
+  /// Unmaps the first `pages` stack pages above the guard page at `base` and
+  /// returns their frames to the PMM.
+  function unmapStack(base: u64, pages: u64): void {
+    let mut page: u64 = 1;
+
+    while (page <= pages) {
+      let address: u64 = base + page * PAGE_SIZE;
+      let frame: u64 = Mm::Vmm::translate(address);
+
+      Mm::Vmm::unmap(address);
+      Mm::Pmm::freeFrame(frame);
+      page += 1;
+    }
+  }
+
+  /// A free slot above the idle thread, or `NO_THREAD`.
+  function findFreeSlot(): u64 {
+    let mut slot: u64 = IDLE_SLOT + 1;
+
+    while (slot < MAX_THREADS) {
+      if ((*slotPointer(slot)).state == UNUSED) {
+        return slot;
+      }
+
+      slot += 1;
+    }
+
+    return NO_THREAD;
+  }
+
+  /// A pointer to the table entry of `slot`.
+  function slotPointer(slot: u64): *mut Control {
+    return tableBase() + slot;
+  }
+
+  /// A pointer to the first entry of the thread table.
+  function tableBase(): *mut Control {
+    return &mut ThreadState::threads as *mut Control;
+  }
+
+  /// Marks slot 0 as the running boot thread, id 0, and starts the id counter
+  /// at 1. The boot thread already runs on Limine's stack, so it gets no
+  /// stack of its own.
+  function initializeBootThread(): void {
+    let boot: *mut Control = slotPointer(BOOT_SLOT);
+
+    (*boot).id = 0;
+    (*boot).state = RUNNING;
+
+    ThreadState::nextId = 1;
+  }
+}

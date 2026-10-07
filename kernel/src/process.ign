@@ -7,7 +7,7 @@
 //! ## Overview
 //!
 //! A process is a slot in a fixed table next to a kernel thread that owns the
-//! address space (`Scheduler::spawnIn`). The thread starts in `userMain`,
+//! address space (`Sched::Scheduler::spawnIn`). The thread starts in `userMain`,
 //! which drops to ring 3 and never comes back: from then on the thread is
 //! only the kernel stack that interrupts and system calls of the process run
 //! on. When the process ends, through `exit` or because it was killed, the
@@ -28,12 +28,12 @@
 //!          ├─ mapStack                        8 zeroed no-execute pages
 //!          └─ launch
 //!               ├─ slot := RUNNING, id := nextId++
-//!               └─ Scheduler::spawnIn(userMain, slot, root)   thread owns `root`
+//!               └─ Sched::Scheduler::spawnIn(userMain, slot, root)   thread owns `root`
 //!
 //!   the new thread:  userMain ─► Arch::UserMode::enter ─► ring 3 ...
 //!                                    ... syscall exit(n) or a fault ...
 //!   finishCurrent:   status := n, state := EXITED, print "process N exited"
-//!                      └─ Scheduler::exitCurrent   thread DEAD
+//!                      └─ Sched::Scheduler::exitCurrent   thread DEAD
 //!   next thread:     reapZombie frees the kernel stack and destroys the
 //!                    address space (every frame goes back to the PMM)
 //!   Process::wait:   sleeps until EXITED and the thread is gone,
@@ -59,8 +59,8 @@ import Boot from "@boot";
 import Drivers from "@drivers";
 import Lib from "@lib";
 import Mm from "@mm";
+import Sched from "@sched";
 import Elf, LoadedImage from "./elf";
-import Scheduler from "./scheduler";
 
 /// One entry of the process table.
 @cLayout
@@ -245,9 +245,9 @@ export namespace Process {
     (*process).status = 0;
     (*process).abi = ABI_LINUX;
 
-    let thread: u64 = Scheduler::spawnIn(Arch::ContextAsm::ignis_function_address(userMain), slot, root);
+    let thread: u64 = Sched::Scheduler::spawnIn(Arch::ContextAsm::ignis_function_address(userMain), slot, root);
 
-    if (thread == Scheduler::NO_THREAD) {
+    if (thread == Sched::Thread::NO_THREAD) {
       (*process).state = FREE;
       Arch::Cpu::restoreInterrupts(saved);
       return NO_PROCESS;
@@ -275,8 +275,8 @@ export namespace Process {
 
     let process: *mut ProcessEntry = slotPointer(slot);
 
-    while ((*process).state != EXITED || Scheduler::isAlive((*process).thread)) {
-      Scheduler::sleep(1);
+    while ((*process).state != EXITED || Sched::Thread::isAlive((*process).thread)) {
+      Sched::Scheduler::sleep(1);
     }
 
     let status: u64 = (*process).status;
@@ -356,7 +356,7 @@ export namespace Process {
     Drivers::Console::writeDecimal(status);
     Drivers::Console::writeLine("");
 
-    Scheduler::exitCurrent();
+    Sched::Scheduler::exitCurrent();
   }
 
   /// Runs in the thread of a new process: drops to ring 3. The argument is
@@ -369,7 +369,7 @@ export namespace Process {
 
   /// The slot of the process whose thread is running, or `NO_PROCESS`.
   function currentSlot(): u64 {
-    let thread: u64 = Scheduler::currentId();
+    let thread: u64 = Sched::Scheduler::currentId();
     let mut slot: u64 = 0;
 
     while (slot < MAX_PROCESSES) {
