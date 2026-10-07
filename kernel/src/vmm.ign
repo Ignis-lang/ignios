@@ -15,6 +15,9 @@
 //!   be written through the direct map;
 //! - the framebuffer, write-combining.
 //!
+//! Write-combining is a PAT memory type, so `initialize` programs IA32_PAT
+//! itself before it loads CR3 instead of trusting the bootloader's layout.
+//!
 //! Only 4 KiB and 2 MiB pages exist. Tables are never freed, and the code is
 //! not synchronized: the kernel has one processor.
 
@@ -53,10 +56,19 @@ export namespace Vmm {
   /// Strong uncached memory type (PCD and PWT), for device registers.
   const UNCACHED: u64 = 0x18;
 
-  /// Selects PAT entry 5, which Limine programs as write-combining. It is
+  /// Selects PAT entry 5, which `programPat` sets to write-combining. It is
   /// kept in an ignored entry bit and turned into the PAT, PCD and PWT bits
   /// that fit the page size.
   const WRITE_COMBINING: u64 = 0x200;
+
+  const PAT_MSR: u32 = 0x277;
+
+  /// The PAT layout the kernel expects, one byte per entry from entry 0 in
+  /// the lowest byte: WB, WT, UC-, UC, WP, WC, UC-, UC. Entries 0 to 5 are the
+  /// layout the Limine protocol documents for x86-64, so the mappings Limine
+  /// made keep their meaning. The protocol leaves entries 6 and 7
+  /// unspecified, and the kernel gives them the processor's reset values.
+  const PAT_LAYOUT: u64 = 0x0007010500070406;
 
   const EFER_MSR: u32 = 0xC0000080;
   const EFER_NO_EXECUTE_ENABLE: u64 = 0x800;
@@ -78,6 +90,8 @@ export namespace Vmm {
     Cpu::writeMsr(EFER_MSR, Cpu::readMsr(EFER_MSR) | EFER_NO_EXECUTE_ENABLE);
     Cpu::writeCr0(Cpu::readCr0() | CR0_WRITE_PROTECT);
 
+    programPat();
+
     VmmState::root = allocateTable();
 
     mapKernelImage();
@@ -89,6 +103,14 @@ export namespace Vmm {
     mapDirectMap();
 
     Cpu::writeCr3(VmmState::root);
+  }
+
+  /// Writes `PAT_LAYOUT` to IA32_PAT. `initialize` calls it before loading
+  /// CR3, so every mapping made afterwards, and the pages Limine mapped that
+  /// the kernel keeps using, see the same memory types. Writing the MSR does
+  /// not flush the TLB, but the CR3 load that follows does.
+  function programPat(): void {
+    Cpu::writeMsr(PAT_MSR, PAT_LAYOUT);
   }
 
   /// The physical address of the PML4 in use.

@@ -119,7 +119,13 @@ export namespace Interrupts {
     emitText("  vector ");
     emitDecimal(vector);
     emitText(", error code ");
-    emitHex((*frame).errorCode);
+
+    if (hasErrorCode(vector)) {
+      emitHex((*frame).errorCode);
+    } else {
+      emitText("none");
+    }
+
     emitText("\n");
 
     emitText("  rip ");
@@ -139,6 +145,27 @@ export namespace Interrupts {
       emitHex(readCr2());
       emitText("\n");
     }
+  }
+
+  /// True for the vectors where the processor pushes an error code: double
+  /// fault, invalid TSS, segment not present, stack fault, general
+  /// protection, page fault, alignment check, control protection, VMM
+  /// communication and security exceptions. For the others the thunk pushes a
+  /// dummy zero, which is not worth printing.
+  function hasErrorCode(vector: u64): boolean {
+    return match (vector) {
+      8 -> true,
+      10 -> true,
+      11 -> true,
+      12 -> true,
+      13 -> true,
+      14 -> true,
+      17 -> true,
+      21 -> true,
+      29 -> true,
+      30 -> true,
+      _ -> false,
+    };
   }
 
   function readCr2(): u64 {
@@ -182,7 +209,7 @@ export namespace Interrupts {
       6 -> "#UD",
       7 -> "#NM",
       8 -> "#DF",
-      9 -> "#MF",
+      9 -> "none",
       10 -> "#TS",
       11 -> "#NP",
       12 -> "#SS",

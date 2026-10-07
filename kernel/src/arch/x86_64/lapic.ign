@@ -1,8 +1,11 @@
 //! The local APIC in xAPIC mode.
 //!
-//! UEFI firmware leaves the local APIC enabled with its LINT0 input masked.
-//! LINT0 is the line the 8259 drives, and the kernel does not use the 8259
-//! (the IOAPIC delivers device interrupts), so LINT0 stays masked. The
+//! Limine hands over the local APIC enabled, and with base revision 5 or
+//! later it masks every LVT entry that has Fixed, Lowest Priority, NMI or
+//! ExtINT delivery, which includes LINT0. LINT0 is the line the 8259 drives,
+//! and the kernel does not use the 8259 (the IOAPIC delivers device
+//! interrupts), so `initialize` writes LINT0 masked explicitly rather than
+//! rely on that. The
 //! registers are memory mapped, so `initialize` first maps the APIC page
 //! uncached into the kernel address space. It then enables the APIC through
 //! the spurious interrupt vector register, leaves LINT0 as a masked external

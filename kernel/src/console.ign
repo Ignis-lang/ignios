@@ -1,14 +1,21 @@
 //! Text console on the Limine framebuffer.
 //!
 //! The screen is a grid of 8x16 cells. Each cell is drawn with a foreground
-//! and a background color from a 16-color palette, the cursor is an underline
-//! XORed into its cell, and the text scrolls up one row when the bottom is
-//! reached. Everything written to the console is mirrored to COM1, so a
-//! headless run can read the same text from the serial log.
+//! and a background color from a 16-color palette, the cursor is the bottom
+//! two pixel rows of its cell drawn with the colors swapped, and the text
+//! scrolls up one row when the bottom is reached. Everything written to the
+//! console is mirrored to COM1, so a headless run can read the same text from
+//! the serial log.
 //!
-//! Scrolling moves the framebuffer itself, reading video memory back. That is
-//! cheap under QEMU but slow on real hardware, where a shadow buffer in normal
-//! memory would be the fix once the kernel can allocate one.
+//! The console keeps the character and the palette colors of every cell in
+//! RAM. The cursor is drawn and erased from that copy, so it never reads the
+//! framebuffer, which is slow on write-combining memory. A framebuffer with
+//! more than `MAX_COLUMNS` x `MAX_ROWS` cells uses only that many.
+//!
+//! Scrolling still moves the framebuffer itself, reading video memory back.
+//! That is cheap under QEMU but slow on real hardware, where a shadow buffer
+//! of pixels in normal memory would be the fix once the kernel can allocate
+//! one.
 
 import Font from "./font";
 import Limine from "./limine";
@@ -82,6 +89,16 @@ record ConsoleState {
 
   static mut foreground: u32 = 0;
   static mut background: u32 = 0;
+  static mut foregroundIndex: u8 = 0;
+  static mut backgroundIndex: u8 = 0;
+
+  /// The character and the palette colors of each cell, row by row. The
+  /// foreground index is in the high nibble of a color byte and the
+  /// background index in the low one. The sizes must equal
+  /// `Console::MAX_COLUMNS * Console::MAX_ROWS`, and have to be integer
+  /// literals.
+  static mut cellCharacters: u8[64800];
+  static mut cellColors: u8[64800];
 }
 
 export namespace Console {
@@ -89,6 +106,10 @@ export namespace Console {
   const MEMORY_MODEL_RGB: u8 = 1;
   const TAB_WIDTH: u64 = 8;
   const CURSOR_HEIGHT: u64 = 2;
+
+  /// The most cells the console tracks, enough for a 3840x2160 screen.
+  const MAX_COLUMNS: u64 = 480;
+  const MAX_ROWS: u64 = 135;
 
   const BACKSPACE: u8 = 0x08;
   const TAB: u8 = 0x09;
@@ -118,6 +139,14 @@ export namespace Console {
     ConsoleState::columns = ConsoleState::width / Font::WIDTH;
     ConsoleState::rows = ConsoleState::height / Font::HEIGHT;
 
+    if (ConsoleState::columns > MAX_COLUMNS) {
+      ConsoleState::columns = MAX_COLUMNS;
+    }
+
+    if (ConsoleState::rows > MAX_ROWS) {
+      ConsoleState::rows = MAX_ROWS;
+    }
+
     if (ConsoleState::columns == 0 || ConsoleState::rows == 0) {
       @panic("framebuffer is smaller than one console cell");
     }
@@ -146,6 +175,8 @@ export namespace Console {
     hideCursor();
     ConsoleState::foreground = packColor(foreground);
     ConsoleState::background = packColor(background);
+    ConsoleState::foregroundIndex = foreground;
+    ConsoleState::backgroundIndex = background;
 
     if (cursorWasDrawn) {
       showCursor();
@@ -157,6 +188,7 @@ export namespace Console {
   function clear(): void {
     ConsoleState::cursorDrawn = false;
     fillPixels(0, 0, ConsoleState::width, ConsoleState::height, ConsoleState::background);
+    fillCells(0, ConsoleState::rows);
     ConsoleState::column = 0;
     ConsoleState::row = 0;
     showCursor();
@@ -279,22 +311,76 @@ export namespace Console {
     let lastRowTop: u64 = (ConsoleState::rows - 1) * Font::HEIGHT;
 
     fillPixels(0, lastRowTop, ConsoleState::width, Font::HEIGHT, ConsoleState::background);
+
+    let cellRowBytes: u64 = ConsoleState::columns;
+    let cellBytes: u64 = cellRowBytes * (ConsoleState::rows - 1);
+
+    Mem::move(cellCharacterAddress(0), cellCharacterAddress(cellRowBytes) as *u8, cellBytes);
+    Mem::move(cellColorAddress(0), cellColorAddress(cellRowBytes) as *u8, cellBytes);
+
+    fillCells(ConsoleState::rows - 1, 1);
   }
 
-  function drawGlyph(character: u8, column: u64, row: u64): void {
-    let glyph: *u8 = Font::glyph(character);
-    let foreground: u32 = ConsoleState::foreground;
-    let background: u32 = ConsoleState::background;
-    let mut line: u64 = 0;
+  /// Sets `rowCount` rows of cells, from `firstRow`, to blanks in the
+  /// current colors.
+  function fillCells(firstRow: u64, rowCount: u64): void {
+    let colors: u8 = (ConsoleState::foregroundIndex << 4) | ConsoleState::backgroundIndex;
+    let mut index: u64 = firstRow * ConsoleState::columns;
+    let end: u64 = index + rowCount * ConsoleState::columns;
 
-    while (line < Font::HEIGHT) {
+    while (index < end) {
+      *cellCharacterAddress(index) = SPACE;
+      *cellColorAddress(index) = colors;
+      index += 1;
+    }
+  }
+
+  function cellCharacterAddress(index: u64): *mut u8 {
+    return (&mut ConsoleState::cellCharacters as *mut u8) + index;
+  }
+
+  function cellColorAddress(index: u64): *mut u8 {
+    return (&mut ConsoleState::cellColors as *mut u8) + index;
+  }
+
+  /// Stores `character` in the cell at (`column`, `row`) with the current
+  /// colors and draws the whole cell.
+  function drawGlyph(character: u8, column: u64, row: u64): void {
+    let index: u64 = row * ConsoleState::columns + column;
+
+    *cellCharacterAddress(index) = character;
+    *cellColorAddress(index) = (ConsoleState::foregroundIndex << 4) | ConsoleState::backgroundIndex;
+
+    drawCellLines(column, row, 0, Font::HEIGHT, false);
+  }
+
+  /// Draws pixel rows `firstLine` up to `firstLine + lineCount` of the cell
+  /// at (`column`, `row`) from the stored character and colors, swapping the
+  /// colors when `inverted`.
+  function drawCellLines(
+    column: u64,
+    row: u64,
+    firstLine: u64,
+    lineCount: u64,
+    inverted: boolean
+  ): void {
+    let index: u64 = row * ConsoleState::columns + column;
+    let colors: u8 = *cellColorAddress(index);
+    let glyph: *u8 = Font::glyph(*cellCharacterAddress(index));
+    let foreground: u32 = packColor(colors >> 4);
+    let background: u32 = packColor(colors & 0xF);
+    let ink: u32 = inverted ? background : foreground;
+    let paper: u32 = inverted ? foreground : background;
+    let mut line: u64 = firstLine;
+
+    while (line < firstLine + lineCount) {
       let bits: u8 = *(glyph + line);
       let pixels: *mut u32 = pixelAddress(column * Font::WIDTH, row * Font::HEIGHT + line);
       let mut mask: u8 = 0x80;
       let mut x: u64 = 0;
 
       while (x < Font::WIDTH) {
-        *(pixels + x) = (bits & mask) != 0 ? foreground : background;
+        *(pixels + x) = (bits & mask) != 0 ? ink : paper;
         mask >>= 1;
         x += 1;
       }
@@ -326,37 +412,23 @@ export namespace Console {
 
   function showCursor(): void {
     if (ConsoleState::initialized && !ConsoleState::cursorDrawn) {
-      toggleCursor();
+      drawCursorLines(true);
       ConsoleState::cursorDrawn = true;
     }
   }
 
   function hideCursor(): void {
     if (ConsoleState::cursorDrawn) {
-      toggleCursor();
+      drawCursorLines(false);
       ConsoleState::cursorDrawn = false;
     }
   }
 
-  /// XORs the bottom CURSOR_HEIGHT pixel rows of the cursor cell with the
-  /// difference between the two colors, so a second call restores the cell.
-  function toggleCursor(): void {
-    let difference: u32 = ConsoleState::foreground ^ ConsoleState::background;
-    let left: u64 = ConsoleState::column * Font::WIDTH;
-    let top: u64 = ConsoleState::row * Font::HEIGHT + Font::HEIGHT - CURSOR_HEIGHT;
-    let mut y: u64 = 0;
-
-    while (y < CURSOR_HEIGHT) {
-      let pixels: *mut u32 = pixelAddress(left, top + y);
-      let mut x: u64 = 0;
-
-      while (x < Font::WIDTH) {
-        *(pixels + x) = *(pixels + x) ^ difference;
-        x += 1;
-      }
-
-      y += 1;
-    }
+  /// Draws the bottom CURSOR_HEIGHT pixel rows of the cursor cell from the
+  /// cell copy, with the colors swapped for the cursor and as they are to
+  /// erase it. It never reads the framebuffer.
+  function drawCursorLines(inverted: boolean): void {
+    drawCellLines(ConsoleState::column, ConsoleState::row, Font::HEIGHT - CURSOR_HEIGHT, CURSOR_HEIGHT, inverted);
   }
 
   /// The framebuffer pixel for a palette index, with each 8-bit channel
