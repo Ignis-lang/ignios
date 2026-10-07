@@ -46,10 +46,10 @@
 //!
 //! See concept doc 08.
 
+import Lib from "@lib";
 import Cpu from "./arch/x86_64/cpu";
 import Hhdm from "./hhdm";
 import Limine from "./limine";
-import Mem from "./lib/mem";
 
 /// Allocator state. Every field is touched only with interrupts disabled.
 record PmmState {
@@ -117,7 +117,7 @@ export namespace Pmm {
     PmmState::freeFrames = 0;
     PmmState::searchWord = 0;
 
-    Mem::fill(PmmState::bitmap as *mut u8, 0xFF, bytes);
+    Lib::Mem::fill(PmmState::bitmap as *mut u8, 0xFF, bytes);
 
     let mut index: u64 = 0;
 

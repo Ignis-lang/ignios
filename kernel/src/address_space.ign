@@ -47,16 +47,16 @@
 //!           ├─ no leaf entry, not present ....... fail
 //!           ├─ U/S clear ........................ fail
 //!           └─ otherwise physical = frame | offset
-//!       Mem::copy(dst + done, Hhdm::toVirtual(physical), chunk)
+//!       Lib::Mem::copy(dst + done, Hhdm::toVirtual(physical), chunk)
 //! ```
 //!
 //! See concept doc 14.
 
+import Lib from "@lib";
 import Hhdm from "./hhdm";
 import Pmm from "./pmm";
 import Vmm from "./vmm";
 import Cpu from "./arch/x86_64/cpu";
-import Mem from "./lib/mem";
 
 /// The address space API. A space is identified by the physical address of
 /// its PML4, which every function here takes as `root`.
@@ -109,8 +109,8 @@ export namespace AddressSpace {
     let table: *mut u64 = Vmm::tableAt(root) as *mut u64;
     let kernelTable: *mut u64 = Vmm::tableAt(Vmm::rootTable()) as *mut u64;
 
-    Mem::fill(table as *mut u8, 0, USER_HALF_ENTRIES * 8);
-    Mem::copy((table + USER_HALF_ENTRIES) as *mut u8, (kernelTable + USER_HALF_ENTRIES) as *u8, USER_HALF_ENTRIES * 8);
+    Lib::Mem::fill(table as *mut u8, 0, USER_HALF_ENTRIES * 8);
+    Lib::Mem::copy((table + USER_HALF_ENTRIES) as *mut u8, (kernelTable + USER_HALF_ENTRIES) as *u8, USER_HALF_ENTRIES * 8);
 
     return root;
   }
@@ -164,7 +164,7 @@ export namespace AddressSpace {
       return Pmm::NO_FRAME;
     }
 
-    Mem::fill(Hhdm::toVirtual(frame), 0, PAGE_SIZE);
+    Lib::Mem::fill(Hhdm::toVirtual(frame), 0, PAGE_SIZE);
 
     if (!mapPage(root, virtualAddress, frame, flags)) {
       Pmm::freeFrame(frame);
@@ -245,7 +245,7 @@ export namespace AddressSpace {
 
       let chunk: u64 = bytesToPageEnd(address, length - done);
 
-      Mem::copy(destination + done, Hhdm::toVirtual(physical) as *u8, chunk);
+      Lib::Mem::copy(destination + done, Hhdm::toVirtual(physical) as *u8, chunk);
       done += chunk;
     }
 
@@ -273,7 +273,7 @@ export namespace AddressSpace {
 
       let chunk: u64 = bytesToPageEnd(address, length - done);
 
-      Mem::copy(Hhdm::toVirtual(physical), source + done, chunk);
+      Lib::Mem::copy(Hhdm::toVirtual(physical), source + done, chunk);
       done += chunk;
     }
 
@@ -300,7 +300,7 @@ export namespace AddressSpace {
 
       let chunk: u64 = bytesToPageEnd(destination + done, length - done);
 
-      Mem::copy(Hhdm::toVirtual(physical), source + done, chunk);
+      Lib::Mem::copy(Hhdm::toVirtual(physical), source + done, chunk);
       done += chunk;
     }
 

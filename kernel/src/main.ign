@@ -72,6 +72,7 @@
 //! the kernel ends there. There is no unwinding: the machine stops in
 //! `Cpu::haltForever`.
 
+import Lib from "@lib";
 import Acpi from "./acpi";
 import AddressSpace from "./address_space";
 import Context from "./arch/x86_64/context";
@@ -92,7 +93,6 @@ import Pmm from "./pmm";
 import Process from "./process";
 import Programs from "./programs";
 import Ps2 from "./ps2";
-import ScancodeQueue from "./scancode_queue";
 import Scheduler from "./scheduler";
 import SchedulerTest from "./scheduler_test";
 import Serial from "./serial";
@@ -101,7 +101,6 @@ import ThreadCommands from "./thread_commands";
 import UserTest from "./user_test";
 import Timer from "./timer";
 import Vmm from "./vmm";
-import _ from "./lib/mem";
 
 /// Set by the first panic so a second panic knows the console path already
 /// failed or is in use.
@@ -516,14 +515,14 @@ function runTerminal(): void {
   while (true) {
     Cpu::disableInterrupts();
 
-    if (ScancodeQueue::isEmpty()) {
+    if (Lib::ScancodeQueue::isEmpty()) {
       Cpu::waitForInterrupt();
       continue;
     }
 
     Cpu::enableInterrupts();
 
-    let character: u8 = Keyboard::decode(ScancodeQueue::pop());
+    let character: u8 = Keyboard::decode(Lib::ScancodeQueue::pop());
 
     if (character == NEWLINE) {
       Console::writeChar(NEWLINE);

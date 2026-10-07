@@ -12,7 +12,7 @@
 //! the screen. No buffer is needed on either side.
 //!
 //! ```text
-//!   Format::decimal(1234, emit)        Format::hexadecimal(0xBEEF, emit)
+//!   Lib::Format::decimal(1234, emit)   Lib::Format::hexadecimal(0xBEEF, emit)
 //!        │                                  │
 //!        ├─ emit('1')                       ├─ emit('0')
 //!        ├─ emit('2')                       ├─ emit('x')
@@ -24,7 +24,7 @@
 //! `0x57` is `'a' - 10` (`'a'` is `0x61`).
 
 /// The formatting functions.
-export namespace Format {
+namespace Lib::Format {
   /// Emits `value` in decimal, most significant digit first, without leading
   /// zeros and without padding. Zero prints as `0`.
   ///

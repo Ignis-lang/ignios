@@ -117,11 +117,11 @@
 //!
 //! See concept doc 09 and Intel SDM Vol. 3A, "Paging".
 
+import Lib from "@lib";
 import Cpu from "./arch/x86_64/cpu";
 import Hhdm from "./hhdm";
 import Limine from "./limine";
 import Pmm from "./pmm";
-import Mem from "./lib/mem";
 
 /// The one piece of VMM state: the physical address of the kernel PML4.
 record VmmState {
@@ -722,7 +722,7 @@ export namespace Vmm {
       @panic("vmm: out of frames for page tables");
     }
 
-    Mem::fill(Hhdm::toVirtual(frame), 0, PAGE_SIZE);
+    Lib::Mem::fill(Hhdm::toVirtual(frame), 0, PAGE_SIZE);
 
     return frame;
   }

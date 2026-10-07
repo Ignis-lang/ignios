@@ -1,0 +1,35 @@
+//!
+//! # Lib
+//!
+//! Small building blocks that depend on nothing else in the kernel: memory
+//! primitives, integer formatting and the keyboard scancode ring buffer.
+//!
+//! ## Public API
+//!
+//! | Namespace            | File                | Purpose                                           |
+//! |----------------------|---------------------|---------------------------------------------------|
+//! | `Lib::Mem`           | `mem.ign`           | `memcpy`, `memset`, `memmove`, `memcmp`           |
+//! | `Lib::Format`        | `format.ign`        | decimal and hexadecimal text through a callback   |
+//! | `Lib::ScancodeQueue` | `scancode_queue.ign`| lock-free ring buffer between IRQ1 and the shell  |
+//!
+//! ## Dependencies
+//!
+//! None. Every other subsystem may import `Lib`:
+//!
+//! ```ignis
+//! import Lib from "@lib";
+//!
+//! Lib::Mem::fill(buffer, 0, length);
+//! ```
+//!
+//! The `import _` lines below make the compiler read each file, which is what
+//! adds its namespace to `Lib`. A file that no import reaches is not compiled,
+//! even when assembly refers to its `@externName` symbols.
+
+import _ from "./format";
+import _ from "./mem";
+import _ from "./scancode_queue";
+
+/// Aggregate namespace of the library. The files above contribute
+/// `Lib::Mem`, `Lib::Format` and `Lib::ScancodeQueue`.
+export namespace Lib {}

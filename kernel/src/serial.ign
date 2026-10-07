@@ -51,9 +51,9 @@
 //!
 //! See concept doc 06 and the National Semiconductor PC16550D datasheet.
 
+import Lib from "@lib";
 import Cpu from "./arch/x86_64/cpu";
 import Port from "./arch/x86_64/io";
-import Format from "./lib/format";
 
 /// The serial port API.
 export namespace Serial {
@@ -151,20 +151,20 @@ export namespace Serial {
     Cpu::restoreInterrupts(saved);
   }
 
-  /// Writes `value` in decimal (see `Format::decimal`).
+  /// Writes `value` in decimal (see `Lib::Format::decimal`).
   function writeDecimal(value: u64): void {
     let saved: u64 = Cpu::saveAndDisableInterrupts();
 
-    Format::decimal(value, writeByte);
+    Lib::Format::decimal(value, writeByte);
 
     Cpu::restoreInterrupts(saved);
   }
 
-  /// Writes `value` as `0x` and 16 hex digits (see `Format::hexadecimal`).
+  /// Writes `value` as `0x` and 16 hex digits (see `Lib::Format::hexadecimal`).
   function writeHex(value: u64): void {
     let saved: u64 = Cpu::saveAndDisableInterrupts();
 
-    Format::hexadecimal(value, writeByte);
+    Lib::Format::hexadecimal(value, writeByte);
 
     Cpu::restoreInterrupts(saved);
   }

@@ -51,3 +51,9 @@ cflags = [
 
 # Keep the generated C file (build/ignis/user/src/kernel.c) for inspection.
 emit = ["c"]
+
+# One alias per kernel subsystem. An import such as `import Mm from "@mm"`
+# resolves to the facade `mod.ign` of the directory, and the other subsystems
+# never import a file inside it.
+[aliases]
+"@lib" = "kernel/src/lib"

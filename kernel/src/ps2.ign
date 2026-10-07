@@ -51,15 +51,15 @@
 //!
 //! ```text
 //!   key -> keyboard -> 8042 -> IRQ1 -> IOAPIC pin 1 -> vector 0x21
-//!       -> Interrupts::dispatch -> Ps2::handleInterrupt -> ScancodeQueue::push
+//!       -> Interrupts::dispatch -> Ps2::handleInterrupt -> Lib::ScancodeQueue::push
 //! ```
 //!
 //! See concept doc 06 and the OSDev wiki pages "I8042 PS/2 Controller" and
 //! "PS/2 Keyboard".
 
+import Lib from "@lib";
 import Cpu from "./arch/x86_64/cpu";
 import Port from "./arch/x86_64/io";
-import ScancodeQueue from "./scancode_queue";
 
 /// The PS/2 controller API.
 export namespace Ps2 {
@@ -154,7 +154,7 @@ export namespace Ps2 {
       let value: u8 = Port::readByte(DATA);
 
       if ((status & AUXILIARY_DATA) == 0) {
-        ScancodeQueue::push(value);
+        Lib::ScancodeQueue::push(value);
       }
     }
   }

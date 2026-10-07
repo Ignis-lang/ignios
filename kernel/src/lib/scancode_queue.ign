@@ -42,7 +42,7 @@ record ScancodeQueueState {
   /// Index of the next free slot, where `push` stores.
   static mut tail: u64 = 0;
 
-  /// The queued bytes. The size must equal `ScancodeQueue::CAPACITY`.
+  /// The queued bytes. The size must equal `Lib::ScancodeQueue::CAPACITY`.
   static mut slots: u8[64] = [
     0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
     0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
@@ -53,7 +53,7 @@ record ScancodeQueueState {
 
 /// The queue API: `push` from the interrupt handler, `isEmpty` and `pop` from
 /// the terminal loop.
-export namespace ScancodeQueue {
+namespace Lib::ScancodeQueue {
   /// Slot count. It must equal the array size in `ScancodeQueueState`, and
   /// be a power of two.
   const CAPACITY: u64 = 64;

@@ -30,7 +30,7 @@
 //! to that pattern matcher. See concept doc 02.
 
 /// The memory primitives. Their C names are set with `@externName`.
-export namespace Mem {
+namespace Lib::Mem {
   /// Copies `count` bytes from `source` to `destination` and returns
   /// `destination`, as C `memcpy`. The ranges must not overlap; use `move` when
   /// they might.
