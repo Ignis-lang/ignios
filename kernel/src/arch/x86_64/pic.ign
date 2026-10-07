@@ -1,7 +1,9 @@
 //! The legacy 8259 programmable interrupt controller pair.
 //!
 //! The lines are remapped to vectors 0x20-0x2F so they do not collide with
-//! the CPU exceptions, and every line is masked except the keyboard (IRQ1).
+//! the CPU exceptions, and every line is masked: the IOAPIC delivers device
+//! interrupts. The remap stays so a stray or spurious 8259 interrupt lands on
+//! a known vector instead of on a CPU exception.
 
 import Port from "./io";
 
@@ -27,8 +29,8 @@ export namespace Pic {
   const MASTER_OFFSET: u8 = 0x20;
   const SLAVE_OFFSET: u8 = 0x28;
 
-  /// Every line masked but IRQ1, the keyboard.
-  const MASTER_MASK: u8 = 0xFD;
+  /// Every line masked.
+  const MASTER_MASK: u8 = 0xFF;
   const SLAVE_MASK: u8 = 0xFF;
 
   const SLAVE_FIRST_LINE: u8 = 8;
@@ -36,7 +38,7 @@ export namespace Pic {
   const SPURIOUS_SLAVE_LINE: u8 = 15;
   const LINE_7_BIT: u8 = 0x80;
 
-  /// Remaps both controllers and masks every line but the keyboard.
+  /// Remaps both controllers and masks every line.
   function initialize(): void {
     Port::writeByte(MASTER_COMMAND, INITIALIZE);
     delay();
@@ -60,6 +62,15 @@ export namespace Pic {
 
     Port::writeByte(MASTER_DATA, MASTER_MASK);
     Port::writeByte(SLAVE_DATA, SLAVE_MASK);
+  }
+
+  /// The interrupt mask register of both controllers: the master in bits
+  /// 0-7, the slave in bits 8-15, a set bit meaning the line is masked.
+  function masks(): u16 {
+    let master: u16 = Port::readByte(MASTER_DATA) as u16;
+    let slave: u16 = Port::readByte(SLAVE_DATA) as u16;
+
+    return master | ((slave as u16) << 8);
   }
 
   /// Tells the controllers the interrupt on `line` was handled. A line of

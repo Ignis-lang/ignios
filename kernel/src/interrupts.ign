@@ -2,9 +2,11 @@
 //! registers and calls `dispatch` with a pointer to the saved frame.
 //!
 //! Every CPU exception is fatal for now: it is reported on COM1 and on the
-//! console, then the processor halts. Hardware interrupts come from the PIC
-//! at vectors 0x20-0x2F, and only the keyboard line is unmasked. The local
-//! APIC's spurious vector is ignored without any acknowledgement.
+//! console, then the processor halts. Device interrupts come from the IOAPIC
+//! and are acknowledged at the local APIC: the keyboard arrives at vector
+//! 0x21. The 8259 is fully masked, but its vectors 0x20-0x2F stay mapped to
+//! thunks so a spurious 8259 interrupt is absorbed. The local APIC's
+//! spurious vector is ignored without any acknowledgement.
 
 import Cpu from "./arch/x86_64/cpu";
 import Lapic from "./arch/x86_64/lapic";
@@ -46,7 +48,10 @@ record InterruptFrame {
 export namespace Interrupts {
   const FIRST_IRQ_VECTOR: u64 = 32;
   const IRQ_VECTOR_COUNT: u64 = 16;
-  const KEYBOARD_LINE: u8 = 1;
+
+  /// The vector the IOAPIC raises for the keyboard. It equals the vector of
+  /// 8259 line 1, which is harmless because that line is masked.
+  const KEYBOARD_VECTOR: u64 = 0x21;
   const PAGE_FAULT: u64 = 14;
 
   /// Called by the common stub for every vector, on the interrupted stack.
@@ -58,8 +63,14 @@ export namespace Interrupts {
       return;
     }
 
+    if (vector == KEYBOARD_VECTOR) {
+      Ps2::handleInterrupt();
+      Lapic::endOfInterrupt();
+      return;
+    }
+
     if (vector >= FIRST_IRQ_VECTOR && vector < FIRST_IRQ_VECTOR + IRQ_VECTOR_COUNT) {
-      handleHardwareInterrupt((vector - FIRST_IRQ_VECTOR) as u8);
+      handleLegacyInterrupt((vector - FIRST_IRQ_VECTOR) as u8);
       return;
     }
 
@@ -68,17 +79,13 @@ export namespace Interrupts {
     Cpu::haltForever();
   }
 
-  /// Runs the handler of a PIC line, then acknowledges it. A spurious
-  /// interrupt has no handler and skips the acknowledgement of its own
-  /// controller.
-  function handleHardwareInterrupt(line: u8): void {
+  /// Absorbs an interrupt that came from the 8259, which is fully masked.
+  /// A spurious one skips the acknowledgement of its own controller; any
+  /// other is acknowledged and dropped.
+  function handleLegacyInterrupt(line: u8): void {
     if (Pic::isSpurious(line)) {
       Pic::endSpurious(line);
       return;
-    }
-
-    if (line == KEYBOARD_LINE) {
-      Ps2::handleInterrupt();
     }
 
     Pic::endOfInterrupt(line);

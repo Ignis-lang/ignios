@@ -1,0 +1,196 @@
+//! The I/O APIC: the chip that receives device interrupt lines and turns each
+//! one into a vector sent to a local APIC.
+//!
+//! An IOAPIC has two memory-mapped registers: IOREGSEL at offset 0 takes the
+//! index of an internal register, and IOWIN at offset 0x10 reads or writes it.
+//! The internal registers are the id, the version (which also holds the
+//! highest redirection entry number) and one 64-bit redirection entry per
+//! input pin, split into a low and a high 32-bit register. An entry says
+//! which vector the pin raises, whether the line is level or edge triggered
+//! and active high or low, whether it is masked, and which local APIC gets
+//! it. Pins are numbered by global system interrupt (GSI): each IOAPIC serves
+//! a contiguous range starting at the GSI base the MADT gives it.
+//!
+//! `initialize` maps every IOAPIC the MADT lists, uncached, and masks all of
+//! their entries. `routeIsa` then points one ISA interrupt line at a vector,
+//! using the MADT interrupt source overrides for the GSI, polarity and
+//! trigger. Everything is sent to the processor that runs the code (the
+//! bootstrap processor), in physical destination mode.
+
+import Acpi from "../../acpi";
+import Lapic from "./lapic";
+import Vmm from "../../vmm";
+
+record IoapicState {
+  static mut maxEntries: u8[8];
+  static mut versions: u8[8];
+}
+
+export namespace Ioapic {
+  /// Where the kernel maps the first IOAPIC page, then one page per further
+  /// IOAPIC. It lies in the same higher-half region as the local APIC page.
+  const MAPPING: u64 = 0xFFFFA00000010000;
+  const PAGE_SIZE: u64 = 4096;
+
+  const SELECT_OFFSET: u64 = 0x00;
+  const WINDOW_OFFSET: u64 = 0x10;
+
+  const ID_REGISTER: u32 = 0x00;
+  const VERSION_REGISTER: u32 = 0x01;
+  const FIRST_REDIRECTION_REGISTER: u32 = 0x10;
+
+  const MASKED: u32 = 0x10000;
+  const ACTIVE_LOW: u32 = 0x2000;
+  const LEVEL_TRIGGERED: u32 = 0x8000;
+
+  /// Bit position of the destination APIC id in the high redirection
+  /// register.
+  const DESTINATION_SHIFT: u32 = 24;
+
+  /// Returned by `routeIsa` when no IOAPIC serves the line.
+  const NO_GSI: u32 = 0xFFFFFFFF;
+
+  /// Maps and masks every IOAPIC in the MADT. The kernel page tables and the
+  /// ACPI tables must be ready. Panics when a page cannot be mapped.
+  function initialize(): void {
+    let count: u64 = Acpi::ioapicCount();
+
+    let mut index: u64 = 0;
+
+    while (index < count) {
+      let flags: u64 = Vmm::WRITABLE | Vmm::NO_EXECUTE | Vmm::UNCACHED;
+
+      if (!Vmm::map(pageOf(index), Acpi::ioapicAddress(index), flags)) {
+        @panic("ioapic: cannot map an IOAPIC page");
+      }
+
+      let version: u32 = readRegister(index, VERSION_REGISTER);
+
+      @write<u8>((&mut IoapicState::versions as *mut u8) + index, (version & 0xFF) as u8);
+      @write<u8>((&mut IoapicState::maxEntries as *mut u8) + index, ((version >> 16) & 0xFF) as u8);
+
+      maskAll(index);
+      index += 1;
+    }
+  }
+
+  /// The id field of IOAPIC `index`.
+  function id(index: u64): u32 {
+    return readRegister(index, ID_REGISTER) >> DESTINATION_SHIFT;
+  }
+
+  /// The version of IOAPIC `index`.
+  function version(index: u64): u8 {
+    return *((&mut IoapicState::versions as *mut u8) + index);
+  }
+
+  /// How many redirection entries IOAPIC `index` has.
+  function entryCount(index: u64): u64 {
+    return (*((&mut IoapicState::maxEntries as *mut u8) + index) as u64) + 1;
+  }
+
+  /// Points ISA interrupt line `irq` at `vector` on this processor. The GSI,
+  /// polarity and trigger mode come from the MADT override for that line, or
+  /// are the ISA defaults (GSI equal to the line, active high, edge). Returns
+  /// the GSI used, or 0xFFFFFFFF when no IOAPIC serves it.
+  function routeIsa(irq: u8, vector: u8): u32 {
+    let gsi: u32 = Acpi::isaIrqGsi(irq);
+    let flags: u16 = Acpi::isaIrqFlags(irq);
+
+    if (!route(gsi, vector, Acpi::flagsActiveLow(flags), Acpi::flagsLevelTriggered(flags))) {
+      return NO_GSI;
+    }
+
+    return gsi;
+  }
+
+  /// Programs the redirection entry of `gsi` as an unmasked, fixed-delivery
+  /// interrupt to this processor. Returns false when no IOAPIC serves `gsi`.
+  function route(gsi: u32, vector: u8, activeLow: boolean, levelTriggered: boolean): boolean {
+    let index: u64 = findIoapic(gsi);
+
+    if (index == Acpi::ioapicCount()) {
+      return false;
+    }
+
+    let pin: u32 = gsi - Acpi::ioapicGsiBase(index);
+
+    let mut low: u32 = vector as u32;
+
+    // `|=` makes `ignis fmt` fail its safety check, so the OR is spelled out.
+    if (activeLow) {
+      low = low | ACTIVE_LOW;
+    }
+
+    if (levelTriggered) {
+      low = low | LEVEL_TRIGGERED;
+    }
+
+    writeRegister(index, FIRST_REDIRECTION_REGISTER + pin * 2 + 1, Lapic::id() << DESTINATION_SHIFT);
+    writeRegister(index, FIRST_REDIRECTION_REGISTER + pin * 2, low);
+
+    return true;
+  }
+
+  /// The raw 64-bit redirection entry of `gsi`, or zero when no IOAPIC
+  /// serves it.
+  function redirection(gsi: u32): u64 {
+    let index: u64 = findIoapic(gsi);
+
+    if (index == Acpi::ioapicCount()) {
+      return 0;
+    }
+
+    let pin: u32 = gsi - Acpi::ioapicGsiBase(index);
+    let low: u64 = readRegister(index, FIRST_REDIRECTION_REGISTER + pin * 2) as u64;
+    let high: u64 = readRegister(index, FIRST_REDIRECTION_REGISTER + pin * 2 + 1) as u64;
+
+    return (high << 32) | low;
+  }
+
+  /// The index of the IOAPIC whose GSI range holds `gsi`, or the IOAPIC
+  /// count when none does.
+  function findIoapic(gsi: u32): u64 {
+    let count: u64 = Acpi::ioapicCount();
+
+    let mut index: u64 = 0;
+
+    while (index < count) {
+      let base: u64 = Acpi::ioapicGsiBase(index) as u64;
+
+      if ((gsi as u64) >= base && (gsi as u64) < base + entryCount(index)) {
+        return index;
+      }
+
+      index += 1;
+    }
+
+    return count;
+  }
+
+  function maskAll(index: u64): void {
+    let entries: u64 = entryCount(index);
+
+    let mut pin: u64 = 0;
+
+    while (pin < entries) {
+      writeRegister(index, FIRST_REDIRECTION_REGISTER + (pin as u32) * 2, MASKED);
+      pin += 1;
+    }
+  }
+
+  function pageOf(index: u64): u64 {
+    return MAPPING + index * PAGE_SIZE;
+  }
+
+  function readRegister(index: u64, register: u32): u32 {
+    @writeVolatile<u32>(@pointerFromInteger<*mut u32>(pageOf(index) + SELECT_OFFSET), register);
+
+    return @readVolatile<u32>(@pointerFromInteger<*mut u32>(pageOf(index) + WINDOW_OFFSET));
+  }
+
+  function writeRegister(index: u64, register: u32, value: u32): void {
+    @writeVolatile<u32>(@pointerFromInteger<*mut u32>(pageOf(index) + SELECT_OFFSET), register);
+    @writeVolatile<u32>(@pointerFromInteger<*mut u32>(pageOf(index) + WINDOW_OFFSET), value);
+  }
+}

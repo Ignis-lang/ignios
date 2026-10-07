@@ -4,11 +4,12 @@ import Acpi from "./acpi";
 import Cpu from "./arch/x86_64/cpu";
 import Gdt from "./arch/x86_64/gdt";
 import Idt from "./arch/x86_64/idt";
+import Ioapic from "./arch/x86_64/ioapic";
 import Lapic from "./arch/x86_64/lapic";
 import Pic from "./arch/x86_64/pic";
 import Color, Console from "./console";
 import Heap from "./heap";
-import _ from "./interrupts";
+import Interrupts from "./interrupts";
 import Keyboard from "./keyboard";
 import Limine from "./limine";
 import Pmm from "./pmm";
@@ -26,6 +27,9 @@ const BACKSPACE: u8 = 0x08;
 const NEWLINE: u8 = 0x0A;
 const FIRST_PRINTABLE: u8 = 0x20;
 const LAST_PRINTABLE: u8 = 0x7E;
+
+/// The ISA interrupt line of the PS/2 keyboard.
+const KEYBOARD_IRQ: u8 = 1;
 
 /// Bytes one input line can hold. It must equal the array size in
 /// `runTerminal`, which has to be an integer literal.
@@ -128,7 +132,7 @@ function initializeKeyboard(): boolean {
     return false;
   }
 
-  Console::writeLine("keyboard: PS/2, scancode set 1, US layout, IRQ1");
+  Console::writeLine("keyboard: PS/2, scancode set 1, US layout, IRQ1 through the IOAPIC");
   return true;
 }
 
@@ -188,7 +192,38 @@ function reportLapic(): void {
   Console::writeDecimal(Lapic::isGloballyEnabled() ? 1 : 0);
   Console::write(", svr enabled ");
   Console::writeDecimal(Lapic::isSoftwareEnabled() ? 1 : 0);
-  Console::writeLine(", virtual wire (LINT0 ExtINT, LINT1 NMI)");
+  Console::writeLine(", LINT0 masked, LINT1 NMI");
+}
+
+function reportIoapic(keyboardGsi: u32): void {
+  let mut index: u64 = 0;
+
+  while (index < Acpi::ioapicCount()) {
+    Console::write("ioapic: id ");
+    Console::writeDecimal(Ioapic::id(index) as u64);
+    Console::write(", version ");
+    Console::writeHex(Ioapic::version(index) as u64);
+    Console::write(", ");
+    Console::writeDecimal(Ioapic::entryCount(index));
+    Console::write(" redirection entries, gsi base ");
+    Console::writeDecimal(Acpi::ioapicGsiBase(index) as u64);
+    Console::writeLine("");
+    index += 1;
+  }
+
+  Console::write("ioapic: keyboard IRQ ");
+  Console::writeDecimal(KEYBOARD_IRQ as u64);
+  Console::write(" -> GSI ");
+  Console::writeDecimal(keyboardGsi as u64);
+  Console::write(", vector ");
+  Console::writeHex(Interrupts::KEYBOARD_VECTOR);
+  Console::write(", entry ");
+  Console::writeHex(Ioapic::redirection(keyboardGsi));
+  Console::writeLine("");
+
+  Console::write("pic: masked, imr ");
+  Console::writeHex(Pic::masks() as u64);
+  Console::writeLine("");
 }
 
 function printPrompt(): void {
@@ -268,6 +303,16 @@ function kmain(): void {
   Pic::initialize();
   Lapic::initialize();
   reportLapic();
+
+  Ioapic::initialize();
+
+  let keyboardGsi: u32 = Ioapic::routeIsa(KEYBOARD_IRQ, Interrupts::KEYBOARD_VECTOR as u8);
+
+  if (keyboardGsi == Ioapic::NO_GSI) {
+    @panic("no IOAPIC serves the keyboard interrupt");
+  }
+
+  reportIoapic(keyboardGsi);
 
   if (!initializeKeyboard()) {
     Cpu::haltForever();
