@@ -1,0 +1,384 @@
+//! Per-process address spaces.
+//!
+//! An address space is its PML4, identified by the physical address of that
+//! frame. The lower half (PML4 entries 0 to 255, virtual addresses below
+//! `USER_LIMIT`) is private: only the process's own pages are mapped there,
+//! all with the U/S bit set. The upper half (entries 256 to 511) is the
+//! kernel's: `create` copies those 256 entries from the kernel PML4, and
+//! `Vmm::initialize` already gave every one of them a page directory pointer
+//! table, so the copies point at the same tables for good. A kernel mapping
+//! made after a space was created appears in that space too, and the kernel
+//! code, the direct map and every kernel stack stay reachable after a CR3
+//! load.
+//!
+//! The page tables and the frames mapped in the lower half belong to the
+//! space: `destroy` returns all of them to the PMM. The kernel half is never
+//! freed, it is shared.
+//!
+//! The kernel reaches user memory through the page tables of the space, one
+//! page at a time (`translateUser`), and not through a raw user pointer: a
+//! bad pointer then fails a check instead of faulting in ring 0.
+
+import Hhdm from "./hhdm";
+import Pmm from "./pmm";
+import Vmm from "./vmm";
+import Cpu from "./arch/x86_64/cpu";
+import Mem from "./lib/mem";
+
+export namespace AddressSpace {
+  const PAGE_SIZE: u64 = 4096;
+  const ENTRIES_PER_TABLE: u64 = 512;
+  const USER_HALF_ENTRIES: u64 = 256;
+
+  /// One past the last user address a process may map. The last page below
+  /// the 47-bit boundary stays unmapped on purpose: a `syscall` instruction
+  /// at its very end would leave a non-canonical return address in RCX.
+  const USER_LIMIT: u64 = 0x00007FFFFFFFF000;
+
+  /// Returned by `translateUser` when the page is not mapped, not user
+  /// accessible, or not writable when a write was asked for.
+  const NOT_MAPPED: u64 = 0xFFFFFFFFFFFFFFFF;
+
+  const SELF_TEST_ADDRESS: u64 = 0x400000;
+  const SELF_TEST_SECOND_ADDRESS: u64 = 0x600000;
+  const SELF_TEST_MARKER_A: u64 = 0xAAAA0000AAAA0001;
+  const SELF_TEST_MARKER_B: u64 = 0xBBBB0000BBBB0002;
+  const SELF_TEST_KERNEL_MARKER: u64 = 0xCCCC0000CCCC0003;
+
+  /// Makes an empty address space whose upper half is the kernel's. Returns
+  /// the physical address of its PML4, or `Pmm::NO_FRAME` when no frame is
+  /// left.
+  function create(): u64 {
+    let root: u64 = Pmm::allocateFrame();
+
+    if (root == Pmm::NO_FRAME) {
+      return Pmm::NO_FRAME;
+    }
+
+    let table: *mut u64 = Vmm::tableAt(root) as *mut u64;
+    let kernelTable: *mut u64 = Vmm::tableAt(Vmm::rootTable()) as *mut u64;
+
+    Mem::fill(table as *mut u8, 0, USER_HALF_ENTRIES * 8);
+    Mem::copy((table + USER_HALF_ENTRIES) as *mut u8, (kernelTable + USER_HALF_ENTRIES) as *u8, USER_HALF_ENTRIES * 8);
+
+    return root;
+  }
+
+  /// Frees every user page and page table of the space and its PML4. The
+  /// space must not be the one the processor is running in.
+  function destroy(root: u64): void {
+    if (Cpu::readCr3() == root) {
+      @panic("address space: destroying the active space");
+    }
+
+    let pml4: *mut u64 = Vmm::tableAt(root) as *mut u64;
+    let mut index: u64 = 0;
+
+    while (index < USER_HALF_ENTRIES) {
+      let entry: u64 = *(pml4 + index);
+
+      if ((entry & Vmm::PRESENT) != 0) {
+        freeLevel(entry & Vmm::ADDRESS_MASK, 3);
+      }
+
+      index += 1;
+    }
+
+    Pmm::freeFrame(root);
+  }
+
+  /// Loads the space into CR3.
+  function activate(root: u64): void {
+    Cpu::writeCr3(root);
+  }
+
+  /// Maps the page at `virtualAddress` in the space to the frame `frame`
+  /// with the U/S bit set. Returns false and changes nothing when the address
+  /// is not page aligned, is not below `USER_LIMIT`, or is already mapped.
+  function mapPage(root: u64, virtualAddress: u64, frame: u64, flags: u64): boolean {
+    if (virtualAddress >= USER_LIMIT) {
+      return false;
+    }
+
+    return Vmm::mapIn(root, virtualAddress, frame, flags | Vmm::USER);
+  }
+
+  /// Maps a new zeroed frame at `virtualAddress` and returns it, or
+  /// `Pmm::NO_FRAME` when no frame is left or the address cannot be mapped.
+  /// The space owns the frame from then on.
+  function allocatePage(root: u64, virtualAddress: u64, flags: u64): u64 {
+    let frame: u64 = Pmm::allocateFrame();
+
+    if (frame == Pmm::NO_FRAME) {
+      return Pmm::NO_FRAME;
+    }
+
+    Mem::fill(Hhdm::toVirtual(frame), 0, PAGE_SIZE);
+
+    if (!mapPage(root, virtualAddress, frame, flags)) {
+      Pmm::freeFrame(frame);
+      return Pmm::NO_FRAME;
+    }
+
+    return frame;
+  }
+
+  /// True when the byte range lies entirely below `USER_LIMIT`.
+  function isUserRange(address: u64, length: u64): boolean {
+    if (address >= USER_LIMIT || length > USER_LIMIT - address) {
+      return false;
+    }
+
+    return true;
+  }
+
+  /// The physical address behind the user address `virtualAddress`, or
+  /// `NOT_MAPPED` unless the page is present, user accessible, and writable
+  /// when `forWrite`.
+  function translateUser(root: u64, virtualAddress: u64, forWrite: boolean): u64 {
+    if (virtualAddress >= USER_LIMIT) {
+      return NOT_MAPPED;
+    }
+
+    let entry: u64 = Vmm::leafEntryIn(root, virtualAddress);
+
+    if ((entry & Vmm::PRESENT) == 0 || (entry & Vmm::USER) == 0) {
+      return NOT_MAPPED;
+    }
+
+    if (forWrite && (entry & Vmm::WRITABLE) == 0) {
+      return NOT_MAPPED;
+    }
+
+    return (entry & Vmm::ADDRESS_MASK) | (virtualAddress & (PAGE_SIZE - 1));
+  }
+
+  /// Copies `length` bytes from the user address `source` to the kernel
+  /// buffer `destination`. Returns false, with the buffer partly written,
+  /// when any byte of the range is outside the user half or on a page the
+  /// process cannot read.
+  function copyFromUser(root: u64, destination: *mut u8, source: u64, length: u64): boolean {
+    if (!isUserRange(source, length)) {
+      return false;
+    }
+
+    let mut done: u64 = 0;
+
+    while (done < length) {
+      let address: u64 = source + done;
+      let physical: u64 = translateUser(root, address, false);
+
+      if (physical == NOT_MAPPED) {
+        return false;
+      }
+
+      let chunk: u64 = bytesToPageEnd(address, length - done);
+
+      Mem::copy(destination + done, Hhdm::toVirtual(physical) as *u8, chunk);
+      done += chunk;
+    }
+
+    return true;
+  }
+
+  /// Copies `length` bytes from the kernel buffer `source` to the user
+  /// address `destination`. Returns false, with the range partly written,
+  /// when any byte of it is outside the user half or on a page the process
+  /// cannot write.
+  function copyToUser(root: u64, destination: u64, source: *u8, length: u64): boolean {
+    if (!isUserRange(destination, length)) {
+      return false;
+    }
+
+    let mut done: u64 = 0;
+
+    while (done < length) {
+      let address: u64 = destination + done;
+      let physical: u64 = translateUser(root, address, true);
+
+      if (physical == NOT_MAPPED) {
+        return false;
+      }
+
+      let chunk: u64 = bytesToPageEnd(address, length - done);
+
+      Mem::copy(Hhdm::toVirtual(physical), source + done, chunk);
+      done += chunk;
+    }
+
+    return true;
+  }
+
+  /// Checks the guarantees of an address space: the lower half is private,
+  /// the upper half is shared, including mappings made after the space was
+  /// created, pages carry the U/S bit, and `destroy` gives back every frame.
+  /// Panics on the first violation. Interrupts are left as they were found.
+  function selfTest(): void {
+    let saved: u64 = Cpu::saveAndDisableInterrupts();
+    let freeBefore: u64 = Pmm::freeFrameCount();
+    let kernelRoot: u64 = Vmm::rootTable();
+
+    let first: u64 = create();
+    let second: u64 = create();
+
+    if (first == Pmm::NO_FRAME || second == Pmm::NO_FRAME || first == second || first == kernelRoot) {
+      @panic("address space self-test: bad PML4");
+    }
+
+    testSharedHalf(first, second, kernelRoot);
+    testPrivateHalf(first, second, kernelRoot);
+    testSwitching(first, second, kernelRoot);
+
+    destroy(first);
+    destroy(second);
+
+    if (Pmm::freeFrameCount() != freeBefore) {
+      @panic("address space self-test: destroy leaked frames");
+    }
+
+    Cpu::restoreInterrupts(saved);
+  }
+
+  /// The two spaces start with the kernel's upper-half entries and nothing
+  /// below.
+  function testSharedHalf(first: u64, second: u64, kernelRoot: u64): void {
+    let kernel: *mut u64 = Vmm::tableAt(kernelRoot) as *mut u64;
+    let one: *mut u64 = Vmm::tableAt(first) as *mut u64;
+    let two: *mut u64 = Vmm::tableAt(second) as *mut u64;
+
+    let mut index: u64 = 0;
+
+    while (index < ENTRIES_PER_TABLE) {
+      if (index < USER_HALF_ENTRIES) {
+        if (*(one + index) != 0 || *(two + index) != 0) {
+          @panic("address space self-test: a new space has user mappings");
+        }
+      } else if (*(one + index) != *(kernel + index) || *(two + index) != *(kernel + index)) {
+        @panic("address space self-test: the kernel half is not shared");
+      }
+
+      index += 1;
+    }
+  }
+
+  /// The same user address maps to different frames in the two spaces, with
+  /// the U/S bit, and nothing leaks into the other space or the kernel's.
+  function testPrivateHalf(first: u64, second: u64, kernelRoot: u64): void {
+    let flags: u64 = Vmm::WRITABLE | Vmm::NO_EXECUTE;
+
+    let frameA: u64 = allocatePage(first, SELF_TEST_ADDRESS, flags);
+    let frameB: u64 = allocatePage(second, SELF_TEST_ADDRESS, flags);
+    let extra: u64 = allocatePage(first, SELF_TEST_SECOND_ADDRESS, flags);
+
+    if (frameA == Pmm::NO_FRAME || frameB == Pmm::NO_FRAME || extra == Pmm::NO_FRAME || frameA == frameB) {
+      @panic("address space self-test: no distinct frames");
+    }
+
+    *(Hhdm::toVirtual(frameA) as *mut u64) = SELF_TEST_MARKER_A;
+    *(Hhdm::toVirtual(frameB) as *mut u64) = SELF_TEST_MARKER_B;
+
+    if (Vmm::translateIn(first, SELF_TEST_ADDRESS) != frameA || Vmm::translateIn(second, SELF_TEST_ADDRESS) != frameB) {
+      @panic("address space self-test: a page maps to the wrong frame");
+    }
+
+    if (Vmm::translateIn(kernelRoot, SELF_TEST_ADDRESS) != Vmm::NOT_MAPPED) {
+      @panic("address space self-test: a user page leaked into the kernel space");
+    }
+
+    if (Vmm::translateIn(second, SELF_TEST_SECOND_ADDRESS) != Vmm::NOT_MAPPED) {
+      @panic("address space self-test: a user page leaked into another space");
+    }
+
+    let entry: u64 = Vmm::leafEntryIn(first, SELF_TEST_ADDRESS);
+    let top: u64 = *(Vmm::tableAt(first) as *mut u64);
+
+    if ((entry & Vmm::USER) == 0 || (entry & Vmm::WRITABLE) == 0 || (entry & Vmm::NO_EXECUTE) == 0) {
+      @panic("address space self-test: wrong permission bits on a user page");
+    }
+
+    if ((top & Vmm::USER) == 0) {
+      @panic("address space self-test: the PML4 entry lacks the U/S bit");
+    }
+
+    if ((Vmm::leafEntryIn(first, Vmm::textStartAddress()) & Vmm::USER) != 0) {
+      @panic("address space self-test: kernel text is user accessible");
+    }
+
+    if (translateUser(first, SELF_TEST_ADDRESS, true) != frameA || translateUser(first, USER_LIMIT, false) != NOT_MAPPED) {
+      @panic("address space self-test: translateUser disagrees with the tables");
+    }
+
+    if (mapPage(first, USER_LIMIT, frameA, flags) || mapPage(first, SELF_TEST_ADDRESS, frameA, flags)) {
+      @panic("address space self-test: an invalid mapping was accepted");
+    }
+  }
+
+  /// Loads each space in turn and reads the same user address, and a kernel
+  /// page mapped after both spaces were created. The kernel page must show
+  /// the same value everywhere and the user page a different one per space.
+  function testSwitching(first: u64, second: u64, kernelRoot: u64): void {
+    let frame: u64 = Pmm::allocateFrame();
+
+    if (frame == Pmm::NO_FRAME || !Vmm::map(Vmm::TEST_ADDRESS, frame, Vmm::WRITABLE | Vmm::NO_EXECUTE)) {
+      @panic("address space self-test: cannot map the kernel test page");
+    }
+
+    let kernelPage: *mut u64 = @pointerFromInteger<*mut u64>(Vmm::TEST_ADDRESS);
+    let userPage: *mut u64 = @pointerFromInteger<*mut u64>(SELF_TEST_ADDRESS);
+
+    *kernelPage = SELF_TEST_KERNEL_MARKER;
+
+    activate(first);
+
+    let userInFirst: u64 = *userPage;
+    let kernelInFirst: u64 = *kernelPage;
+
+    activate(second);
+
+    let userInSecond: u64 = *userPage;
+    let kernelInSecond: u64 = *kernelPage;
+
+    activate(kernelRoot);
+
+    Vmm::unmap(Vmm::TEST_ADDRESS);
+    Pmm::freeFrame(frame);
+
+    if (userInFirst != SELF_TEST_MARKER_A || userInSecond != SELF_TEST_MARKER_B) {
+      @panic("address space self-test: loading CR3 did not change the user half");
+    }
+
+    if (kernelInFirst != SELF_TEST_KERNEL_MARKER || kernelInSecond != SELF_TEST_KERNEL_MARKER) {
+      @panic("address space self-test: a later kernel mapping is not shared");
+    }
+  }
+
+  /// Bytes from `address` to the end of its page, at most `limit`.
+  function bytesToPageEnd(address: u64, limit: u64): u64 {
+    let room: u64 = PAGE_SIZE - (address & (PAGE_SIZE - 1));
+
+    return room < limit ? room : limit;
+  }
+
+  /// Frees a table `level` levels above the page frames (3 is a page
+  /// directory pointer table, 1 a page table) with everything below it.
+  function freeLevel(table: u64, level: u64): void {
+    let entries: *mut u64 = Vmm::tableAt(table) as *mut u64;
+    let mut index: u64 = 0;
+
+    while (index < ENTRIES_PER_TABLE) {
+      let entry: u64 = *(entries + index);
+
+      if ((entry & Vmm::PRESENT) != 0) {
+        if (level == 1) {
+          Pmm::freeFrame(entry & Vmm::ADDRESS_MASK);
+        } else {
+          freeLevel(entry & Vmm::ADDRESS_MASK, level - 1);
+        }
+      }
+
+      index += 1;
+    }
+
+    Pmm::freeFrame(table);
+  }
+}

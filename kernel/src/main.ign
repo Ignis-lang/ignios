@@ -1,6 +1,7 @@
 //! IgniOS kernel entry point.
 
 import Acpi from "./acpi";
+import AddressSpace from "./address_space";
 import Context from "./arch/x86_64/context";
 import Cpu from "./arch/x86_64/cpu";
 import Gdt from "./arch/x86_64/gdt";
@@ -193,6 +194,9 @@ function initializeMemory(framebuffer: *mut Limine::Framebuffer): void {
   Console::write(" KiB mapped, ");
   Console::writeDecimal(Heap::allocatedBytes());
   Console::writeLine(" bytes in use");
+
+  AddressSpace::selfTest();
+  Console::writeLine("address space: self-test ok, private user half, shared kernel half, frames returned");
 }
 
 function reportLapic(): void {
@@ -421,6 +425,9 @@ function kmain(): void {
   Console::write("scheduler: self-test ok, round-robin, sleep and slot reuse, ");
   Console::writeDecimal(Scheduler::switchCount());
   Console::writeLine(" switches");
+
+  SchedulerTest::runAddressSpaces();
+  Console::writeLine("scheduler: address-space self-test ok, each thread ran in its own CR3 and every frame came back");
 
   Scheduler::enablePreemption();
 

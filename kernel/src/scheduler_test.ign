@@ -4,10 +4,14 @@
 //! A thread function can only be turned into the address `Scheduler::spawn`
 //! takes where it is named, so every `spawn` here names its function.
 
+import AddressSpace from "./address_space";
 import ContextAsm from "./arch/x86_64/context";
 import Cpu from "./arch/x86_64/cpu";
+import Hhdm from "./hhdm";
+import Pmm from "./pmm";
 import Scheduler from "./scheduler";
 import Timer from "./timer";
+import Vmm from "./vmm";
 
 record SchedulerTestState {
   static mut counter: u64;
@@ -16,12 +20,19 @@ record SchedulerTestState {
   static mut sleptTicks: u64;
   static mut stop: u64;
   static mut spins: u64[2];
+  static mut spaceReads: u64[2];
 }
 
 export namespace SchedulerTest {
   const WORKERS: u64 = 3;
   const STEPS: u64 = 3;
   const SLEEP_TICKS: u64 = 5;
+
+  /// The user address both address-space threads read, and the marker that
+  /// thread `index` finds there: `SPACE_MARKER + index`.
+  const SPACE_ADDRESS: u64 = 0x400000;
+  const SPACE_MARKER: u64 = 0x5100;
+  const SPACE_ROUNDS: u64 = 4;
 
   /// Ticks the preemption check lets two threads that never yield compete.
   const PREEMPTION_TICKS: u64 = 40;
@@ -35,6 +46,55 @@ export namespace SchedulerTest {
     testRoundRobin();
     testSleep();
     testFullTable();
+
+    Cpu::restoreInterrupts(saved);
+  }
+
+  /// Two threads in two address spaces read the same user address while
+  /// they yield to each other, and each must see its own page every time:
+  /// the scheduler loads the CR3 of the thread it switches to. Frees the
+  /// spaces' frames when the threads end and checks the PMM count. Interrupts
+  /// are left as they were found.
+  function runAddressSpaces(): void {
+    let saved: u64 = Cpu::saveAndDisableInterrupts();
+    let freeBefore: u64 = Pmm::freeFrameCount();
+    let mut ids: u64[2];
+    let mut index: u64 = 0;
+
+    while (index < 2) {
+      SchedulerTestState::spaceReads[index] = 0;
+
+      let root: u64 = AddressSpace::create();
+      let frame: u64 = AddressSpace::allocatePage(root, SPACE_ADDRESS, Vmm::WRITABLE | Vmm::NO_EXECUTE);
+
+      if (root == Pmm::NO_FRAME || frame == Pmm::NO_FRAME) {
+        @panic("address space switch self-test: no memory");
+      }
+
+      *(Hhdm::toVirtual(frame) as *mut u64) = SPACE_MARKER + index;
+
+      ids[index] = Scheduler::spawnIn(ContextAsm::ignis_function_address(spaceReader), index, root);
+
+      if (ids[index] == Scheduler::NO_THREAD) {
+        @panic("address space switch self-test: cannot spawn");
+      }
+
+      index += 1;
+    }
+
+    joinRange(ids[0], ids[1]);
+
+    if (SchedulerTestState::spaceReads[0] != SPACE_ROUNDS || SchedulerTestState::spaceReads[1] != SPACE_ROUNDS) {
+      @panic("address space switch self-test: a thread saw another thread's page");
+    }
+
+    if (Cpu::readCr3() != Vmm::rootTable()) {
+      @panic("address space switch self-test: CR3 is not back on the kernel space");
+    }
+
+    if (Pmm::freeFrameCount() != freeBefore) {
+      @panic("address space switch self-test: an address space leaked frames");
+    }
 
     Cpu::restoreInterrupts(saved);
   }
@@ -188,6 +248,22 @@ export namespace SchedulerTest {
       }
 
       id += 1;
+    }
+  }
+
+  /// Reads the user address `SPACE_ADDRESS` `SPACE_ROUNDS` times, yielding
+  /// between the reads, and counts the reads that found its own marker.
+  function spaceReader(index: u64): void {
+    let page: *mut u64 = @pointerFromInteger<*mut u64>(SPACE_ADDRESS);
+    let mut round: u64 = 0;
+
+    while (round < SPACE_ROUNDS) {
+      if (*page == SPACE_MARKER + index) {
+        SchedulerTestState::spaceReads[index] += 1;
+      }
+
+      Scheduler::yield();
+      round += 1;
     }
   }
 

@@ -23,10 +23,16 @@
 //! so a thread that switches out with interrupts off and is resumed later
 //! restores its own state, not the state of the thread that ran before.
 //!
+//! A thread may own an address space, the physical address of a PML4 made by
+//! `AddressSpace::create`. Every switch loads the incoming thread's PML4, or
+//! the kernel's when it owns none, and the thread's end destroys the space it
+//! owns, right after the switch away from it.
+//!
 //! Stacks are `STACK_PAGES` pages of PMM frames mapped in a region of their
 //! own, below an unmapped guard page: a thread that overflows its stack
 //! takes a page fault instead of writing over another thread's stack.
 
+import AddressSpace from "./address_space";
 import Context, ContextAsm from "./arch/x86_64/context";
 import Cpu from "./arch/x86_64/cpu";
 import Pmm from "./pmm";
@@ -42,6 +48,7 @@ record Thread {
   public stackBase: u64;
   public wakeTick: u64;
   public runTicks: u64;
+  public root: u64;
 }
 
 /// The scheduler state. The array sizes must equal `Scheduler::MAX_THREADS`,
@@ -111,7 +118,7 @@ export namespace Scheduler {
     SchedulerState::current = BOOT_SLOT;
     SchedulerState::nextId = 1;
 
-    if (!createThread(IDLE_SLOT, ContextAsm::ignis_function_address(idleLoop), 0)) {
+    if (!createThread(IDLE_SLOT, ContextAsm::ignis_function_address(idleLoop), 0, 0)) {
       @panic("scheduler: cannot create the idle thread");
     }
 
@@ -175,10 +182,21 @@ export namespace Scheduler {
   /// Returns the thread id, or `NO_THREAD` when every slot is taken or the
   /// stack cannot be mapped.
   function spawn(entry: u64, argument: u64): u64 {
+    return spawnIn(entry, argument, 0);
+  }
+
+  /// `spawn` for a thread that runs in the address space `root`, which the
+  /// thread then owns: it is destroyed when the thread ends, and also when
+  /// the thread cannot be created. 0 means the kernel's own address space.
+  function spawnIn(entry: u64, argument: u64, root: u64): u64 {
     let saved: u64 = Cpu::saveAndDisableInterrupts();
     let slot: u64 = findFreeSlot();
 
-    if (slot == NO_THREAD || !createThread(slot, entry, argument)) {
+    if (slot == NO_THREAD || !createThread(slot, entry, argument, root)) {
+      if (root != 0) {
+        AddressSpace::destroy(root);
+      }
+
       Cpu::restoreInterrupts(saved);
       return NO_THREAD;
     }
@@ -368,7 +386,7 @@ export namespace Scheduler {
 
   /// Fills `slot` with a thread that has never run. Returns false, leaving
   /// the slot free, when the stack cannot be mapped.
-  function createThread(slot: u64, entry: u64, argument: u64): boolean {
+  function createThread(slot: u64, entry: u64, argument: u64, root: u64): boolean {
     let base: u64 = STACK_REGION + slot * STACK_SPAN;
 
     if (!mapStack(base)) {
@@ -382,6 +400,7 @@ export namespace Scheduler {
     (*thread).stackBase = base;
     (*thread).wakeTick = 0;
     (*thread).runTicks = 0;
+    (*thread).root = root;
     (*thread).savedRsp = Context::prepareStack(base + STACK_SPAN, entry, argument);
 
     SchedulerState::nextId += 1;
@@ -440,7 +459,26 @@ export namespace Scheduler {
     let thread: *mut Thread = slotPointer(marker - 1);
 
     unmapStack((*thread).stackBase, STACK_PAGES);
+
+    if ((*thread).root != 0) {
+      AddressSpace::destroy((*thread).root);
+      (*thread).root = 0;
+    }
+
     (*thread).state = UNUSED;
+  }
+
+  /// Loads the page tables the thread in `slot` runs in.
+  function activateSpaceOf(slot: u64): void {
+    let mut root: u64 = (*slotPointer(slot)).root;
+
+    if (root == 0) {
+      root = Vmm::rootTable();
+    }
+
+    if (Cpu::readCr3() != root) {
+      Cpu::writeCr3(root);
+    }
   }
 
   /// Picks the next thread, which is the head of the run queue or the idle
@@ -467,6 +505,8 @@ export namespace Scheduler {
 
     SchedulerState::current = next;
     SchedulerState::switches += 1;
+
+    activateSpaceOf(next);
 
     Context::switchTo(&mut (*slotPointer(outgoing)).savedRsp as *mut u64, (*slotPointer(next)).savedRsp);
 
