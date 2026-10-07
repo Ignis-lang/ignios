@@ -18,6 +18,10 @@ HEADLESS_SECONDS ?= 15
 IGNIS_SOURCES := $(shell find kernel/src -name '*.ign')
 IGNIS_OBJECT := $(BUILD)/ignis/user/obj/kernel.o
 
+HELLO := $(BUILD)/hello.elf
+HELLO_OBJECT := $(BUILD)/user/hello/user/obj/hello.o
+HELLO_SOURCES := $(shell find user/hello user/lib -name '*.ign' -o -name '*.toml')
+
 CLANG ?= clang
 ASM_SOURCES := $(shell find kernel/src -name '*.S')
 ASM_OBJECTS := $(patsubst kernel/src/%.S,$(BUILD)/asm/%.o,$(ASM_SOURCES))
@@ -31,7 +35,10 @@ QEMU_FLAGS := -machine q35,accel=kvm:tcg -m 256M -no-reboot \
 	-drive if=pflash,unit=1,format=raw,file=$(OVMF_VARS_COPY) \
 	-drive format=raw,file=$(IMAGE)
 
-.PHONY: all kernel esp image run run-headless screenshot keytest font clean
+USER_LDFLAGS := -m elf_x86_64 -nostdlib -static --no-dynamic-linker \
+	-z max-page-size=0x1000 -z noexecstack --build-id=none -T user/user.ld
+
+.PHONY: all kernel user esp image run run-headless screenshot keytest font clean
 
 all: image
 
@@ -40,6 +47,14 @@ kernel: $(KERNEL)
 $(IGNIS_OBJECT): $(IGNIS_SOURCES) ignis.toml
 	$(IGNIS) build
 
+user: $(HELLO)
+
+$(HELLO_OBJECT): $(HELLO_SOURCES)
+	cd user/hello && $(IGNIS) build
+
+$(HELLO): $(HELLO_OBJECT) user/user.ld
+	$(LD) $(USER_LDFLAGS) -o $@ $(HELLO_OBJECT)
+
 $(BUILD)/asm/%.o: kernel/src/%.S
 	@mkdir -p $(dir $@)
 	$(CLANG) $(ASFLAGS) -o $@ $<
@@ -47,13 +62,14 @@ $(BUILD)/asm/%.o: kernel/src/%.S
 $(KERNEL): $(IGNIS_OBJECT) $(ASM_OBJECTS) kernel/linker.ld
 	$(LD) $(LDFLAGS) -o $@ $(IGNIS_OBJECT) $(ASM_OBJECTS)
 
-esp: $(KERNEL) boot/limine.conf
+esp: $(KERNEL) $(HELLO) boot/limine.conf
 	@test -n "$(LIMINE_DIR)" || { echo "LIMINE_DIR is not set; run inside nix develop" >&2; exit 1; }
 	rm -rf $(ESP)
 	mkdir -p $(ESP)/EFI/BOOT
 	cp $(LIMINE_DIR)/BOOTX64.EFI $(ESP)/EFI/BOOT/BOOTX64.EFI
 	cp boot/limine.conf $(ESP)/EFI/BOOT/limine.conf
 	cp $(KERNEL) $(ESP)/kernel.elf
+	cp $(HELLO) $(ESP)/hello.elf
 
 image: $(IMAGE)
 
@@ -63,6 +79,7 @@ $(IMAGE): esp
 	mformat -i $@ -F -v IGNIOS ::
 	mcopy -i $@ -s $(ESP)/EFI ::/
 	mcopy -i $@ $(ESP)/kernel.elf ::/kernel.elf
+	mcopy -i $@ $(ESP)/hello.elf ::/hello.elf
 
 $(OVMF_VARS_COPY):
 	@test -n "$(OVMF_VARS)" || { echo "OVMF_VARS is not set; run inside nix develop" >&2; exit 1; }

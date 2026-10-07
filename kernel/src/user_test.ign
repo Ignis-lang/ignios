@@ -4,6 +4,7 @@
 
 import Console from "./console";
 import Process from "./process";
+import Programs from "./programs";
 import Timer from "./timer";
 
 extern UserTestAsm {
@@ -53,6 +54,19 @@ export namespace UserTest {
     Console::writeLine(" timer ticks passed while it ran in ring 3 and every one returned by iretq");
 
     runSyscalls();
+    runHello();
+  }
+
+  /// Runs `hello`, the ELF program the bootloader loaded as a module. It
+  /// prints from ring 3 and exits with 0 when its own checks pass.
+  function runHello(): void {
+    let status: u64 = Programs::runNamed("hello");
+
+    if (status != 0) {
+      @panic("user test: the hello program failed");
+    }
+
+    Console::writeLine("user: hello from a static ELF64 module loaded by Limine ran and exited with status 0");
   }
 
   /// Runs the system call program, which prints from ring 3 and checks the

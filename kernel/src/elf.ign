@@ -1,0 +1,276 @@
+//! A loader for static ELF64 executables.
+//!
+//! The accepted file is what the user linker script produces: a 64-bit
+//! little-endian `ET_EXEC` for x86-64 that needs no relocation, with its
+//! program headers inside the file. Only `PT_LOAD` headers matter. For each
+//! one the loader maps `p_memsz` bytes at `p_vaddr` in the process's address
+//! space, rounded out to whole pages, copies the first `p_filesz` bytes from
+//! the file and leaves the rest zero, which is how `.bss` appears. A page is
+//! writable when the segment has `PF_W` and executable when it has `PF_X`; a
+//! segment with both is refused, so no user page is ever writable and
+//! executable at once. Two segments may not share a page, and nothing may be
+//! mapped below one page or at or above `AddressSpace::USER_LIMIT`.
+//!
+//! The loader trusts nothing in the file: every offset, size and address is
+//! checked against the file size and the user range before it is used, with
+//! comparisons that cannot overflow.
+
+import AddressSpace from "./address_space";
+import Console from "./console";
+import Pmm from "./pmm";
+import Vmm from "./vmm";
+
+/// `Elf64_Ehdr`, 64 bytes.
+@cLayout
+record ElfHeader {
+  public ident: u8[16];
+  public kind: u16;
+  public machine: u16;
+  public version: u32;
+  public entry: u64;
+  public programHeaderOffset: u64;
+  public sectionHeaderOffset: u64;
+  public flags: u32;
+  public headerSize: u16;
+  public programHeaderSize: u16;
+  public programHeaderCount: u16;
+  public sectionHeaderSize: u16;
+  public sectionHeaderCount: u16;
+  public sectionNameIndex: u16;
+}
+
+/// `Elf64_Phdr`, 56 bytes.
+@cLayout
+record ProgramHeader {
+  public kind: u32;
+  public flags: u32;
+  public offset: u64;
+  public virtualAddress: u64;
+  public physicalAddress: u64;
+  public fileSize: u64;
+  public memorySize: u64;
+  public alignment: u64;
+}
+
+/// What `Elf::load` reports about a loaded image.
+@cLayout
+export record LoadedImage {
+  public entry: u64;
+  public segments: u64;
+  public pages: u64;
+}
+
+export namespace Elf {
+  const HEADER_SIZE: u64 = 64;
+  const PROGRAM_HEADER_SIZE: u64 = 56;
+  const MAX_PROGRAM_HEADERS: u64 = 32;
+  const PAGE_SIZE: u64 = 4096;
+
+  const CLASS_64: u8 = 2;
+  const DATA_LITTLE_ENDIAN: u8 = 1;
+  const VERSION_CURRENT: u8 = 1;
+  const TYPE_EXECUTABLE: u16 = 2;
+  const MACHINE_X86_64: u16 = 62;
+
+  const SEGMENT_LOAD: u32 = 1;
+  const FLAG_EXECUTE: u32 = 1;
+  const FLAG_WRITE: u32 = 2;
+
+  /// `Elf::load` results: 0 is success, anything else names what was wrong.
+  const OK: u64 = 0;
+  const ERR_TOO_SMALL: u64 = 1;
+  const ERR_MAGIC: u64 = 2;
+  const ERR_FORMAT: u64 = 3;
+  const ERR_PROGRAM_HEADERS: u64 = 4;
+  const ERR_NO_SEGMENTS: u64 = 5;
+  const ERR_SEGMENT_RANGE: u64 = 6;
+  const ERR_SEGMENT_FILE: u64 = 7;
+  const ERR_WRITE_EXECUTE: u64 = 8;
+  const ERR_OVERLAP: u64 = 9;
+  const ERR_MEMORY: u64 = 10;
+  const ERR_ENTRY: u64 = 11;
+
+  /// Loads the executable in the `size` bytes at `image` into the address
+  /// space `root` and fills `result`. On failure the pages mapped so far
+  /// stay in the space, which the caller destroys.
+  function load(image: *u8, size: u64, root: u64, result: *mut LoadedImage): u64 {
+    let problem: u64 = checkHeader(image, size);
+
+    if (problem != OK) {
+      return problem;
+    }
+
+    let header: *ElfHeader = image as *ElfHeader;
+    let first: u64 = (*header).programHeaderOffset;
+    let count: u64 = (*header).programHeaderCount as u64;
+
+    (*result).entry = (*header).entry;
+    (*result).segments = 0;
+    (*result).pages = 0;
+
+    let mut index: u64 = 0;
+
+    while (index < count) {
+      let segment: *ProgramHeader = (image + first + index * PROGRAM_HEADER_SIZE) as *ProgramHeader;
+
+      if ((*segment).kind == SEGMENT_LOAD) {
+        let error: u64 = loadSegment(image, size, root, segment, result);
+
+        if (error != OK) {
+          return error;
+        }
+      }
+
+      index += 1;
+    }
+
+    if ((*result).segments == 0) {
+      return ERR_NO_SEGMENTS;
+    }
+
+    return checkEntry(root, (*result).entry);
+  }
+
+  /// A short description of an error from `load`.
+  function describe(error: u64): str {
+    return match (error) {
+      0 -> "no error",
+      1 -> "the file is smaller than an ELF header",
+      2 -> "not an ELF file",
+      3 -> "not a static little-endian x86-64 ELF64 executable",
+      4 -> "the program headers are not inside the file",
+      5 -> "no loadable segment",
+      6 -> "a segment lies outside the user address space",
+      7 -> "a segment's file bytes lie outside the file",
+      8 -> "a segment is both writable and executable",
+      9 -> "two segments share a page",
+      10 -> "out of memory",
+      11 -> "the entry point is not in an executable user page",
+      _ -> "unknown error",
+    };
+  }
+
+  /// Checks the ELF header and that the program header table fits the file.
+  function checkHeader(image: *u8, size: u64): u64 {
+    if (size < HEADER_SIZE) {
+      return ERR_TOO_SMALL;
+    }
+
+    let header: *ElfHeader = image as *ElfHeader;
+
+    if ((*header).ident[0] != 0x7F || (*header).ident[1] != 0x45 || (*header).ident[2] != 0x4C || (*header).ident[3] != 0x46) {
+      return ERR_MAGIC;
+    }
+
+    if ((*header).ident[4] != CLASS_64 || (*header).ident[5] != DATA_LITTLE_ENDIAN || (*header).ident[6] != VERSION_CURRENT) {
+      return ERR_FORMAT;
+    }
+
+    if ((*header).kind != TYPE_EXECUTABLE || (*header).machine != MACHINE_X86_64 || (*header).programHeaderSize != PROGRAM_HEADER_SIZE) {
+      return ERR_FORMAT;
+    }
+
+    let count: u64 = (*header).programHeaderCount as u64;
+    let offset: u64 = (*header).programHeaderOffset;
+
+    if (count == 0 || count > MAX_PROGRAM_HEADERS || offset % 8 != 0) {
+      return ERR_PROGRAM_HEADERS;
+    }
+
+    if (offset > size || count * PROGRAM_HEADER_SIZE > size - offset) {
+      return ERR_PROGRAM_HEADERS;
+    }
+
+    return OK;
+  }
+
+  /// Maps and fills the pages of one `PT_LOAD` header, and prints a line
+  /// about it.
+  function loadSegment(
+    image: *u8,
+    size: u64,
+    root: u64,
+    segment: *ProgramHeader,
+    result: *mut LoadedImage
+  ): u64 {
+    let address: u64 = (*segment).virtualAddress;
+    let memorySize: u64 = (*segment).memorySize;
+    let fileSize: u64 = (*segment).fileSize;
+    let offset: u64 = (*segment).offset;
+    let flags: u32 = (*segment).flags;
+
+    if (memorySize == 0 || address < PAGE_SIZE || !AddressSpace::isUserRange(address, memorySize)) {
+      return ERR_SEGMENT_RANGE;
+    }
+
+    if (fileSize > memorySize || offset > size || fileSize > size - offset || offset % PAGE_SIZE != address % PAGE_SIZE) {
+      return ERR_SEGMENT_FILE;
+    }
+
+    if ((flags & FLAG_WRITE) != 0 && (flags & FLAG_EXECUTE) != 0) {
+      return ERR_WRITE_EXECUTE;
+    }
+
+    let mut pageFlags: u64 = 0;
+
+    if ((flags & FLAG_WRITE) != 0) {
+      pageFlags = Vmm::WRITABLE;
+    }
+
+    if ((flags & FLAG_EXECUTE) == 0) {
+      pageFlags = pageFlags | Vmm::NO_EXECUTE;
+    }
+
+    let first: u64 = address / PAGE_SIZE * PAGE_SIZE;
+    let end: u64 = (address + memorySize + PAGE_SIZE - 1) / PAGE_SIZE * PAGE_SIZE;
+
+    let mut page: u64 = first;
+
+    while (page < end) {
+      if (Vmm::translateIn(root, page) != Vmm::NOT_MAPPED) {
+        return ERR_OVERLAP;
+      }
+
+      if (AddressSpace::allocatePage(root, page, pageFlags) == Pmm::NO_FRAME) {
+        return ERR_MEMORY;
+      }
+
+      page += PAGE_SIZE;
+    }
+
+    if (!AddressSpace::loadBytes(root, address, image + offset, fileSize)) {
+      return ERR_SEGMENT_FILE;
+    }
+
+    (*result).segments += 1;
+    (*result).pages += (end - first) / PAGE_SIZE;
+
+    Console::write("elf: PT_LOAD ");
+    Console::writeHex(address);
+    Console::write(" file ");
+    Console::writeDecimal(fileSize);
+    Console::write(" mem ");
+    Console::writeDecimal(memorySize);
+    Console::write(" ");
+    Console::write("r");
+    Console::write((flags & FLAG_WRITE) != 0 ? "w" : "-");
+    Console::writeLine((flags & FLAG_EXECUTE) != 0 ? "x" : "-");
+
+    return OK;
+  }
+
+  /// The entry point must sit in a mapped, user accessible, executable page.
+  function checkEntry(root: u64, entry: u64): u64 {
+    if (!AddressSpace::isUserRange(entry, 1)) {
+      return ERR_ENTRY;
+    }
+
+    let leaf: u64 = Vmm::leafEntryIn(root, entry);
+
+    if ((leaf & Vmm::PRESENT) == 0 || (leaf & Vmm::USER) == 0 || (leaf & Vmm::NO_EXECUTE) != 0) {
+      return ERR_ENTRY;
+    }
+
+    return OK;
+  }
+}

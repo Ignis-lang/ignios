@@ -1,0 +1,49 @@
+//! Running the programs the bootloader loaded: look a module up by name,
+//! start it as a process and wait for it.
+
+import Console from "./console";
+import Modules from "./modules";
+import Process from "./process";
+
+export namespace Programs {
+  /// Runs the module whose configuration string is the `length` bytes at
+  /// `name`, waits for the process and returns its exit status. Returns
+  /// `Process::NO_PROCESS` after printing why when no process ran.
+  function run(name: *u8, length: u64): u64 {
+    let index: u64 = Modules::find(name, length);
+
+    if (index == Modules::NOT_FOUND) {
+      Console::write("run: no program named ");
+
+      let mut position: u64 = 0;
+
+      while (position < length) {
+        Console::writeChar(*(name + position));
+        position += 1;
+      }
+
+      Console::writeLine("");
+
+      return Process::NO_PROCESS;
+    }
+
+    let id: u64 = Process::startElf(Modules::address(index), Modules::size(index));
+
+    if (id == Process::NO_PROCESS) {
+      return Process::NO_PROCESS;
+    }
+
+    return Process::wait(id);
+  }
+
+  /// `run` for a name known at compile time.
+  function runNamed(name: str): u64 {
+    let mut length: u64 = 0;
+
+    while (*(name as *u8 + length) != 0) {
+      length += 1;
+    }
+
+    return run(name as *u8, length);
+  }
+}

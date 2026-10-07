@@ -121,6 +121,31 @@ export namespace Limine {
     public response: *mut RsdpResponse;
   }
 
+  /// The start of `struct limine_file`, which is all the kernel reads. The
+  /// rest (media type, TFTP and partition identifiers) follows in memory.
+  @cLayout
+  record File {
+    public revision: u64;
+    public address: *mut u8;
+    public size: u64;
+    public path: *mut u8;
+    public string: *mut u8;
+  }
+
+  @cLayout
+  record ModuleResponse {
+    public revision: u64;
+    public moduleCount: u64;
+    public modules: *mut *mut File;
+  }
+
+  @cLayout
+  record ModuleRequest {
+    public id: u64[4];
+    public revision: u64;
+    public response: *mut ModuleResponse;
+  }
+
   record Requests {
     static mut baseRevision: BaseRevision = BaseRevision {
       magic: [0xf9562b2d5c95a6c8, 0x6a7b384944536bdc],
@@ -147,6 +172,12 @@ export namespace Limine {
 
     static mut executableAddress: ExecutableAddressRequest = ExecutableAddressRequest {
       id: [COMMON_MAGIC_0, COMMON_MAGIC_1, 0x71ba76863cc55f63, 0xb2644a48c516a487],
+      revision: 0,
+      response: null,
+    };
+
+    static mut modules: ModuleRequest = ModuleRequest {
+      id: [COMMON_MAGIC_0, COMMON_MAGIC_1, 0x3e7e279702be32af, 0xca1c4f3bd1280cee],
       revision: 0,
       response: null,
     };
@@ -203,6 +234,18 @@ export namespace Limine {
     return readResponse<ExecutableAddressResponse>(
       &mut Requests::executableAddress.response as *mut *mut ExecutableAddressResponse,
     );
+  }
+
+  /// The modules the configuration lists, or null when there are none: the
+  /// bootloader gives no response then.
+  function modules(): *mut ModuleResponse {
+    return readResponse<ModuleResponse>(&mut Requests::modules.response as *mut *mut ModuleResponse);
+  }
+
+  /// Module `index` of a module response. The array comes in the order of
+  /// the configuration file.
+  function moduleFile(response: *mut ModuleResponse, index: u64): *mut File {
+    return *((*response).modules + index);
   }
 
   /// The ACPI RSDP, or null when the bootloader found no ACPI tables. For

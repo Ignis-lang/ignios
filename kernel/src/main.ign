@@ -15,8 +15,10 @@ import UserMode from "./arch/x86_64/usermode";
 import Interrupts from "./interrupts";
 import Keyboard from "./keyboard";
 import Limine from "./limine";
+import Modules from "./modules";
 import Pmm from "./pmm";
 import Process from "./process";
+import Programs from "./programs";
 import Ps2 from "./ps2";
 import ScancodeQueue from "./scancode_queue";
 import Scheduler from "./scheduler";
@@ -49,6 +51,10 @@ const PS_COMMAND: str = "ps";
 
 /// Starts the demo threads.
 const THREADS_COMMAND: str = "threads";
+
+/// Runs a program the bootloader loaded: `run hello`.
+const RUN_COMMAND: str = "run ";
+const RUN_COMMAND_LENGTH: u64 = 4;
 
 /// Bytes one input line can hold. It must equal the array size in
 /// `runTerminal`, which has to be an integer literal.
@@ -190,6 +196,8 @@ function initializeMemory(framebuffer: *mut Limine::Framebuffer): void {
   Vmm::selfTest();
   Console::writeLine("vmm: self-test ok");
 
+  Modules::initialize();
+
   Heap::initialize();
   Heap::selfTest();
 
@@ -311,6 +319,23 @@ function lineIs(line: *mut u8, length: u64, text: str): boolean {
   return index == length;
 }
 
+/// True when the line begins with `prefix`.
+function lineStartsWith(line: *mut u8, length: u64, prefix: str): boolean {
+  let mut cursor: *u8 = prefix as *u8;
+  let mut index: u64 = 0;
+
+  while (*cursor != 0) {
+    if (index == length || *(line + index) != *cursor) {
+      return false;
+    }
+
+    index += 1;
+    cursor = cursor + 1;
+  }
+
+  return true;
+}
+
 /// Runs the command on the line. A line that names no command does nothing.
 function runCommand(line: *mut u8, length: u64): void {
   if (lineIs(line, length, UPTIME_COMMAND)) {
@@ -321,6 +346,8 @@ function runCommand(line: *mut u8, length: u64): void {
     if (!ThreadCommands::startDemo()) {
       Console::writeLine("threads: the thread table is full");
     }
+  } else if (lineStartsWith(line, length, RUN_COMMAND)) {
+    Programs::run((line + RUN_COMMAND_LENGTH) as *u8, length - RUN_COMMAND_LENGTH);
   }
 }
 

@@ -1,0 +1,10 @@
+# The user standard library of IgniOS: what a program needs to talk to the
+# kernel and nothing else. A program names it with `std_path` in its
+# ignis.toml and imports `std::sys` and `std::io`.
+
+[modules]
+sys = "sys.ign"
+io = "io.ign"
+
+[auto_load]
+modules = []

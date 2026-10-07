@@ -1,0 +1,76 @@
+//! The first user program of IgniOS. It says hello with its pid, shows that
+//! initialized data and zeroed data were loaded, and tries the error paths of
+//! the kernel's system call interface before it exits.
+
+import Io from "std::io";
+import Sys from "std::sys";
+
+record Hello {
+  static mut counter: u64;
+  static mut seed: u64 = 41;
+}
+
+/// Reports a failed expectation and ends with a status that names it.
+function expect(label: str, got: i64, wanted: i64, status: u64): void {
+  Io::print(label);
+  Io::print(" = ");
+  Io::printNumber(got);
+
+  if (got != wanted) {
+    Io::print(", expected ");
+    Io::printNumber(wanted);
+    Io::print("\n");
+    Sys::exit(status);
+  }
+
+  Io::print("\n");
+}
+
+function run(): u64 {
+  Io::print("hello from user mode, pid ");
+  Io::printNumber(Sys::getPid());
+  Io::print("\n");
+
+  let bss: u64 = @readVolatile<u64>(&mut Hello::counter as *mut u64);
+
+  Hello::seed += 1;
+  Hello::counter += 1;
+
+  Io::print("data ");
+  Io::printNumber(Hello::seed as i64);
+  Io::print(", bss ");
+  Io::printNumber(bss as i64);
+  Io::print(" then ");
+  Io::printNumber(Hello::counter as i64);
+  Io::print("\n");
+
+  if (Hello::seed != 42 || bss != 0 || Hello::counter != 1) {
+    return 2;
+  }
+
+  expect("write(1, 0x1, 5)", Sys::write(Sys::STDOUT, @pointerFromInteger<*u8>(1), 5), 0 - Sys::EFAULT, 3);
+  expect("write(7, ...)", Sys::write(7, "x" as *u8, 1), 0 - Sys::EBADF, 4);
+  expect("syscall 9999", Sys::unknown(9999), 0 - Sys::ENOSYS, 5);
+  expect("sleep(0.05 s)", Sys::sleep(0, 50000000), 0, 6);
+  expect("yield()", Sys::yield(), 0, 7);
+
+  Io::print("goodbye from user mode\n");
+
+  return 0;
+}
+
+/// The entry point the linker script names. The kernel starts the program
+/// here with the stack pointer as if a `call` had just pushed a return
+/// address.
+@externName("_start")
+function start(): never {
+  Sys::exit(run());
+}
+
+@panicHandler
+function onPanic(message: str, file: str, line: u32): never {
+  Io::print("panic: ");
+  Io::print(message);
+  Io::print("\n");
+  Sys::exit(101);
+}

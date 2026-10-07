@@ -1,0 +1,119 @@
+//! Files the bootloader loaded next to the kernel, the Limine modules named
+//! in `boot/limine.conf`.
+//!
+//! The protocol reports each module's address and size in the higher half
+//! direct map. Modules live in memory of type "executable and modules", which
+//! the kernel's own direct map leaves out so that the kernel image cannot be
+//! written through it. `initialize` therefore maps the pages of every module,
+//! read only and no-execute, before anything reads a module. A module is
+//! found by the string the configuration associates with it.
+
+import Console from "./console";
+import Hhdm from "./hhdm";
+import Limine from "./limine";
+import Vmm from "./vmm";
+
+export namespace Modules {
+  const PAGE_SIZE: u64 = 4096;
+
+  /// Returned by `find` when no module has the name.
+  const NOT_FOUND: u64 = 0xFFFFFFFFFFFFFFFF;
+
+  /// Maps every module read only and lists them on the console.
+  function initialize(): void {
+    let response: *mut Limine::ModuleResponse = Limine::modules();
+
+    if (response == null) {
+      Console::writeLine("modules: none");
+      return;
+    }
+
+    let mut index: u64 = 0;
+
+    while (index < (*response).moduleCount) {
+      let file: *mut Limine::File = Limine::moduleFile(response, index);
+
+      let start: u64 = @integerFromPointer((*file).address) / PAGE_SIZE * PAGE_SIZE;
+      let end: u64 = (@integerFromPointer((*file).address) + (*file).size + PAGE_SIZE - 1) / PAGE_SIZE * PAGE_SIZE;
+
+      Vmm::mapRange(start, start - Hhdm::offset(), end - start, Vmm::NO_EXECUTE);
+
+      Console::write("modules: ");
+      writeText((*file).string);
+      Console::write(" is ");
+      writeText((*file).path);
+      Console::write(", ");
+      Console::writeDecimal((*file).size);
+      Console::write(" bytes at ");
+      Console::writeHex(@integerFromPointer((*file).address));
+      Console::writeLine("");
+
+      index += 1;
+    }
+  }
+
+  function count(): u64 {
+    let response: *mut Limine::ModuleResponse = Limine::modules();
+
+    if (response == null) {
+      return 0;
+    }
+
+    return (*response).moduleCount;
+  }
+
+  /// The index of the module whose configuration string is the `length`
+  /// bytes at `name`, or `NOT_FOUND`.
+  function find(name: *u8, length: u64): u64 {
+    let mut index: u64 = 0;
+
+    while (index < count()) {
+      if (stringIs((*moduleAt(index)).string, name, length)) {
+        return index;
+      }
+
+      index += 1;
+    }
+
+    return NOT_FOUND;
+  }
+
+  /// The first byte of module `index`.
+  function address(index: u64): *u8 {
+    return (*moduleAt(index)).address as *u8;
+  }
+
+  function size(index: u64): u64 {
+    return (*moduleAt(index)).size;
+  }
+
+  function moduleAt(index: u64): *mut Limine::File {
+    return Limine::moduleFile(Limine::modules(), index);
+  }
+
+  /// Writes a NUL-terminated string the bootloader owns.
+  function writeText(text: *mut u8): void {
+    let mut index: u64 = 0;
+
+    while (*(text + index) != 0) {
+      Console::writeChar(*(text + index));
+      index += 1;
+    }
+  }
+
+  /// True when the NUL-terminated `text` is exactly the `length` bytes at
+  /// `name`.
+  function stringIs(text: *mut u8, name: *u8, length: u64): boolean {
+    let mut index: u64 = 0;
+
+    while (index < length) {
+      if (*(text + index) == 0 || *(text + index) != *(name + index)) {
+        return false;
+      }
+
+      index += 1;
+    }
+
+    return *(text + length) == 0;
+  }
+}

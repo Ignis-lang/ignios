@@ -229,6 +229,33 @@ export namespace AddressSpace {
     return true;
   }
 
+  /// Writes `length` bytes from the kernel buffer `source` to the user
+  /// address `destination` whatever the permissions of the pages are, for the
+  /// loader to fill pages that stay read only for the process. Returns false
+  /// when a page of the range is not mapped.
+  function loadBytes(root: u64, destination: u64, source: *u8, length: u64): boolean {
+    if (!isUserRange(destination, length)) {
+      return false;
+    }
+
+    let mut done: u64 = 0;
+
+    while (done < length) {
+      let physical: u64 = Vmm::translateIn(root, destination + done);
+
+      if (physical == Vmm::NOT_MAPPED) {
+        return false;
+      }
+
+      let chunk: u64 = bytesToPageEnd(destination + done, length - done);
+
+      Mem::copy(Hhdm::toVirtual(physical), source + done, chunk);
+      done += chunk;
+    }
+
+    return true;
+  }
+
   /// Checks the guarantees of an address space: the lower half is private,
   /// the upper half is shared, including mappings made after the space was
   /// created, pages carry the U/S bit, and `destroy` gives back every frame.

@@ -1,0 +1,50 @@
+//! Text output on top of `write`.
+
+import Sys from "std::sys";
+
+export namespace Io {
+  /// Writes a NUL-terminated string to standard output.
+  function print(text: str): void {
+    let mut length: u64 = 0;
+
+    while (*(text as *u8 + length) != 0) {
+      length += 1;
+    }
+
+    Sys::write(Sys::STDOUT, text as *u8, length);
+  }
+
+  function printLine(text: str): void {
+    print(text);
+    print("\n");
+  }
+
+  /// Writes a signed number in decimal.
+  function printNumber(value: i64): void {
+    let mut digits: u8[24];
+    let mut length: u64 = 0;
+    let negative: boolean = value < 0;
+
+    let mut magnitude: u64 = negative ? (0 - value) as u64 : value as u64;
+
+    if (magnitude == 0) {
+      digits[0] = 0x30;
+      length = 1;
+    }
+
+    while (magnitude > 0) {
+      digits[length] = ((magnitude % 10) as u8) + 0x30;
+      magnitude /= 10;
+      length += 1;
+    }
+
+    if (negative) {
+      Sys::write(Sys::STDOUT, "-" as *u8, 1);
+    }
+
+    while (length > 0) {
+      length -= 1;
+      Sys::write(Sys::STDOUT, &digits[length] as *u8, 1);
+    }
+  }
+}

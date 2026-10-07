@@ -18,6 +18,7 @@ import ContextAsm from "./arch/x86_64/context";
 import Cpu from "./arch/x86_64/cpu";
 import UserMode from "./arch/x86_64/usermode";
 import Console from "./console";
+import Elf, LoadedImage from "./elf";
 import Hhdm from "./hhdm";
 import Mem from "./lib/mem";
 import Pmm from "./pmm";
@@ -94,6 +95,45 @@ export namespace Process {
     Mem::copy(Hhdm::toVirtual(frame), code, length);
 
     return launch(root, CODE_BASE);
+  }
+
+  /// Starts a process from the ELF executable in the `size` bytes at `image`
+  /// and a fresh stack. Prints what the loader mapped, or why it refused the
+  /// file. Returns the process id, or `NO_PROCESS`.
+  function startElf(image: *u8, size: u64): u64 {
+    let root: u64 = AddressSpace::create();
+
+    if (root == Pmm::NO_FRAME) {
+      return NO_PROCESS;
+    }
+
+    let mut loaded: LoadedImage = LoadedImage { entry: 0, segments: 0, pages: 0 };
+    let error: u64 = Elf::load(image, size, root, &mut loaded as *mut LoadedImage);
+
+    if (error != Elf::OK) {
+      Console::write("elf: ");
+      Console::writeLine(Elf::describe(error));
+      AddressSpace::destroy(root);
+      return NO_PROCESS;
+    }
+
+    if (!mapStack(root)) {
+      Console::writeLine("elf: out of memory for the stack");
+      AddressSpace::destroy(root);
+      return NO_PROCESS;
+    }
+
+    Console::write("elf: ");
+    Console::writeDecimal(loaded.segments);
+    Console::write(" segments, ");
+    Console::writeDecimal(loaded.pages);
+    Console::write(" pages, entry ");
+    Console::writeHex(loaded.entry);
+    Console::write(", stack top ");
+    Console::writeHex(STACK_TOP);
+    Console::writeLine("");
+
+    return launch(root, loaded.entry);
   }
 
   /// Maps the user stack, zeroed and no-execute. Returns false when memory
