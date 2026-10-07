@@ -1,7 +1,7 @@
 # IgniOS build. Run inside `nix develop`, which provides the toolchain and
 # exports LIMINE_DIR, OVMF_CODE and OVMF_VARS.
 
-IGNIS ?= ../ignisc.rs/build/bootstrap/stage1/ignis
+IGNIS ?= ignis
 LD := ld.lld
 QEMU := qemu-system-x86_64
 

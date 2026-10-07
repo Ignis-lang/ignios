@@ -33,7 +33,7 @@ make run
 
 QEMU opens a window. Click it to give it the keyboard and type at the prompt. The terminal shows the serial log.
 
-The build also needs an Ignis compiler with freestanding support (Ignis `main` from October 2026 or later). The Makefile looks for it at `../ignisc.rs/build/bootstrap/stage1/ignis`; point elsewhere with `make IGNIS=/path/to/ignis`.
+The build also needs an Ignis compiler with freestanding support (Ignis `main` from October 2026 or later). The Makefile uses the `ignis` on your `PATH`; point elsewhere with `make IGNIS=/path/to/ignis`.
 
 ## Make targets
 
