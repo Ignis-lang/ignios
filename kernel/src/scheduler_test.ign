@@ -1,8 +1,20 @@
+//!
+//! # Scheduler Self-Tests
+//!
 //! Boot-time checks of the scheduler. They run with the timer ticking and
 //! report by panicking on the first violation.
 //!
+//! ## Tests
+//!
+//! | Function            | What it proves                                           |
+//! |---------------------|----------------------------------------------------------|
+//! | `runCooperative`    | round-robin order, exit and slot reuse, sleep timing, a full table |
+//! | `runAddressSpaces`  | two threads read the same user address and each sees its own page, so a switch loads the right CR3, and no frame leaks |
+//! | `runPreemptive`     | two threads that never yield both get the processor, taken by the timer |
+//!
 //! A thread function can only be turned into the address `Scheduler::spawn`
 //! takes where it is named, so every `spawn` here names its function.
+//! `main.ign` runs them in the order above and prints a line after each.
 
 import AddressSpace from "./address_space";
 import ContextAsm from "./arch/x86_64/context";
@@ -13,25 +25,51 @@ import Scheduler from "./scheduler";
 import Timer from "./timer";
 import Vmm from "./vmm";
 
+/// Results the test threads report back to the boot thread.
 record SchedulerTestState {
+  /// Shared sum the round-robin workers add their weight to.
   static mut counter: u64;
+
+  /// The order in which the workers ran: each step stores the worker index.
   static mut trace: u8[16];
+
+  /// Entries stored in `trace`.
   static mut traceLength: u64;
+
+  /// How many ticks the sleeping worker measured.
   static mut sleptTicks: u64;
+
+  /// Set to 1 by the boot thread to tell the spinners to finish.
   static mut stop: u64;
+
+  /// Loop iterations each spinner completed.
   static mut spins: u64[2];
+
+  /// Reads that found the expected marker, for each address-space thread.
   static mut spaceReads: u64[2];
 }
 
+/// The scheduler tests. Each function checks one property and panics when it
+/// fails.
 export namespace SchedulerTest {
+  /// Round-robin workers started by `testRoundRobin`.
   const WORKERS: u64 = 3;
+
+  /// Steps (and yields) each worker performs.
   const STEPS: u64 = 3;
+
+  /// Ticks the sleeping worker asks for.
   const SLEEP_TICKS: u64 = 5;
 
-  /// The user address both address-space threads read, and the marker that
-  /// thread `index` finds there: `SPACE_MARKER + index`.
+  /// The user address both address-space threads read: `0x400000`, where
+  /// programs are loaded.
   const SPACE_ADDRESS: u64 = 0x400000;
+
+  /// Base of the marker thread `index` finds at `SPACE_ADDRESS`: the value
+  /// there is `SPACE_MARKER + index`, so each thread can tell its own page.
   const SPACE_MARKER: u64 = 0x5100;
+
+  /// Reads each address-space thread performs.
   const SPACE_ROUNDS: u64 = 4;
 
   /// Ticks the preemption check lets two threads that never yield compete.

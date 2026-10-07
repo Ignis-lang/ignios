@@ -1,6 +1,30 @@
-//! The terminal commands that show and exercise threads: `ps` lists the
-//! thread table, and `threads` starts three demo threads that print their id
-//! and the tick count. Nothing here runs unless a command asks for it.
+//!
+//! # Thread Terminal Commands
+//!
+//! The `ps` and `threads` commands of the terminal.
+//!
+//! ## Overview
+//!
+//! `ps` lists the thread table, and `threads` starts three demo threads that
+//! print their id and the tick count. Nothing here runs unless a command asks
+//! for it.
+//!
+//! ```text
+//!   > ps
+//!     id  state     ticks   wake            one row per thread in the table:
+//!     0   running   ...                     the boot thread (this terminal)
+//!     1   ready     ...                     the idle thread
+//!     ... ...       ...     ...             threads started by `threads`;
+//!                                           `wake` is shown for sleepers only
+//!
+//!   > threads      two printers (every 0.5 s and 0.7 s) and one busy thread that
+//!                  spins for 250 ticks (2.5 s) without yielding. The printers
+//!                  keep their schedule because the timer interrupt takes the
+//!                  processor from the busy thread.
+//! ```
+//!
+//! Thread ids keep counting up from the boot self-tests, so the demo threads
+//! do not start at 2.
 
 import ContextAsm from "./arch/x86_64/context";
 import Cpu from "./arch/x86_64/cpu";
@@ -8,6 +32,7 @@ import Console from "./console";
 import Scheduler from "./scheduler";
 import Timer from "./timer";
 
+/// The commands.
 export namespace ThreadCommands {
   /// Lines each demo thread prints before it exits.
   const DEMO_LINES: u64 = 4;
@@ -15,8 +40,13 @@ export namespace ThreadCommands {
   /// Ticks the busy demo thread spins for without yielding.
   const BUSY_TICKS: u64 = 250;
 
+  /// Column width of the id in the `ps` table.
   const ID_WIDTH: u64 = 4;
+
+  /// Column width of the state name in the `ps` table.
   const STATE_WIDTH: u64 = 10;
+
+  /// Column width of the tick count in the `ps` table.
   const TICKS_WIDTH: u64 = 8;
 
   /// Prints one row per thread in the table: id, state, the ticks it was
@@ -110,6 +140,7 @@ export namespace ThreadCommands {
     pad(digits(value), width);
   }
 
+  /// Writes `text`, then spaces up to `width` columns.
   function writeText(text: str, width: u64): void {
     let mut length: u64 = 0;
     let mut cursor: *u8 = text as *u8;
@@ -123,6 +154,7 @@ export namespace ThreadCommands {
     pad(length, width);
   }
 
+  /// Writes spaces until `used` characters reach `width`.
   function pad(used: u64, width: u64): void {
     let mut count: u64 = used;
 
@@ -132,6 +164,7 @@ export namespace ThreadCommands {
     }
   }
 
+  /// The number of decimal digits of `value`.
   function digits(value: u64): u64 {
     let mut count: u64 = 1;
     let mut rest: u64 = value;

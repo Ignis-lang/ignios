@@ -28,15 +28,36 @@
  * RSP == T. The trampoline is reached by "ret", not by "call", so it is not
  * a function entry: its "call r12" is the call that matters. That call pushes
  * the return address, so the thread function starts with RSP == T-8 and
- * RSP+8 is 16-byte aligned, as the ABI requires at function entry. */
+ * RSP+8 is 16-byte aligned, as the ABI requires at function entry.
+ *
+ * Stack of a thread that is switched out, the same six registers in the order
+ * ignis_switch_context pushes them (the pushes run from rbp down to r15, so
+ * r15 ends up at the lowest address, which is the saved RSP):
+ *
+ *   saved RSP ->  r15
+ *                 r14
+ *                 r13
+ *                 r12
+ *                 rbx
+ *                 rbp
+ *                 return address: the instruction after the "call" to
+ *                                 ignis_switch_context in Context::switchTo
+ *
+ * Both shapes are the same, which is why a new thread can be resumed by the
+ * same code that resumes a thread that was switched out. See concept doc 13. */
 
 .intel_syntax noprefix
 
 .section .text
 
-/* void ignis_switch_context(u64 *save_rsp, u64 next_rsp) */
+/* void ignis_switch_context(u64 *save_rsp, u64 next_rsp)
+ *
+ * rdi = address where the outgoing RSP is stored, rsi = RSP of the incoming
+ * context. Returns, on the incoming stack, to whoever switched that context
+ * out (or into the trampoline for a new thread). */
 .global ignis_switch_context
 ignis_switch_context:
+    /* Save the callee-saved registers on the outgoing stack. */
     push rbp
     push rbx
     push r12
@@ -44,9 +65,13 @@ ignis_switch_context:
     push r14
     push r15
 
+    /* The switch itself: record where the outgoing stack ends, then adopt the
+     * incoming one. From the next instruction on this code runs on the
+     * incoming thread's stack. */
     mov [rdi], rsp
     mov rsp, rsi
 
+    /* Restore the incoming context's registers and resume it. */
     pop r15
     pop r14
     pop r13
@@ -59,10 +84,19 @@ ignis_switch_context:
  * function and r13 its argument. Interrupts are off until the "sti": the
  * switch that got here ran with them disabled. */
 ignis_thread_trampoline:
+    /* Scheduler::threadBegin: frees the stack of the thread that died just
+     * before this one was switched in, if any. Needs interrupts off. */
     call ignis_thread_begin
+
+    /* From here the thread is an ordinary one. */
     sti
+
+    /* First argument of the thread function: the value prepareStack stored. */
     mov rdi, r13
     call r12
+
+    /* The thread function returned: end the thread. It never returns, and
+     * ud2 makes sure a bug there faults loudly. */
     call ignis_thread_exit
     ud2
 

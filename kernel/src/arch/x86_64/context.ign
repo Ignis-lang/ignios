@@ -1,4 +1,9 @@
-//! Kernel stack switching, the part of a thread that is machine specific.
+//!
+//! # Context Switching
+//!
+//! The machine-specific part of a kernel thread: a stack switch.
+//!
+//! ## Overview
 //!
 //! A thread that is not running is a stack pointer. `Context::switchTo`
 //! stores the callee-saved registers and RSP of the running code and resumes
@@ -11,24 +16,85 @@
 //! they are not. Interrupt-disabled sections are also the only mutual
 //! exclusion the kernel has: it runs on one processor, so nothing else can
 //! touch the data while interrupts are off.
+//!
+//! ## What a Switch Does
+//!
+//! ```text
+//!   thread A calls Context::switchTo(&A.savedRsp, B.savedRsp)
+//!
+//!   A's stack                              B's stack
+//!   ┌────────────────┐                     ┌────────────────┐
+//!   │ ... A's frames │                     │ ... B's frames │
+//!   │ return address │                     │ return address │ <- B's resume point
+//!   │ rbp rbx r12-r15│ <- saved here       │ rbp rbx r12-r15│ <- loaded from here
+//!   └───────▲────────┘                     └───────▲────────┘
+//!           │ A.savedRsp := rsp                    │ rsp := B.savedRsp
+//!
+//!   then: pop r15..rbp, ret   ->   B continues where it called switchTo
+//! ```
+//!
+//! A switch is an ordinary function call as far as the compiler is concerned,
+//! so only the registers the ABI says a callee must preserve need saving.
+//!
+//! ## A New Thread
+//!
+//! `prepareStack` writes seven words at the top of the stack. T is the 16-byte
+//! aligned end of the stack and `entry` the thread function:
+//!
+//! ```text
+//!   address   value                        popped into / used as
+//!   T - 56    0                            r15
+//!   T - 48    0                            r14
+//!   T - 40    argument                     r13  -> rdi when the function is called
+//!   T - 32    entry                        r12  -> "call r12" in the trampoline
+//!   T - 24    0                            rbx
+//!   T - 16    0                            rbp  (ends frame-pointer walks)
+//!   T -  8    ignis_thread_trampoline      return address of the first switch
+//!   T         <- RSP while the trampoline runs
+//! ```
+//!
+//! The trampoline calls `Scheduler::threadBegin`, enables interrupts, calls
+//! `entry(argument)` and, when it returns, calls `Scheduler::exitCurrent`.
+//! See concept doc 13.
 
 import Cpu from "./cpu";
 
 /// Storage for the self-test: a stack, the two saved stack pointers and what
-/// the test thread reports back.
+/// the test thread reports back. `STACK` is the stack of the test thread, 8192
+/// bytes aligned to 16 so its end is a valid stack top. It has no comment of
+/// its own because `ignis fmt` rejects a comment in front of an attribute on
+/// a record field.
 record ContextTestState {
   @aligned(16)
   static mut STACK: u8[8192];
+
+  /// RSP of the boot thread while the test thread runs.
   static mut mainRsp: u64 = 0;
+
+  /// RSP of the test thread while the boot thread runs.
   static mut threadRsp: u64 = 0;
+
+  /// Times the test thread ran, one per switch into it.
   static mut rounds: u64 = 0;
+
+  /// The argument the test thread received.
   static mut argument: u64 = 0;
+
+  /// RBP the test thread saw at its start, used to check stack alignment.
   static mut framePointer: u64 = 0;
+
+  /// Whether interrupts were enabled when the test thread started.
   static mut interruptsOnEntry: boolean = false;
 }
 
+/// Functions implemented in `context_asm.S`.
 export extern ContextAsm {
+  /// Saves the callee-saved registers on the current stack, stores RSP in
+  /// `*saveRsp`, loads `nextRsp` and resumes that context. Interrupts must be
+  /// off.
   function ignis_switch_context(saveRsp: *mut u64, nextRsp: u64): void;
+
+  /// The address of the code every new thread starts in.
   function ignis_thread_trampoline_address(): u64;
 
   /// The address of a thread function. It has to be called with the function
@@ -37,12 +103,18 @@ export extern ContextAsm {
   function ignis_function_address(entry: (u64) -> void): u64;
 }
 
+/// The context switching API.
 export namespace Context {
   /// Registers the first switch pops, plus the return address it jumps to.
   const INITIAL_SLOTS: u64 = 7;
 
+  /// Index of the slot (from the lowest address) that holds r13, the argument.
   const ARGUMENT_SLOT: u64 = 2;
+
+  /// Index of the slot that holds r12, the thread function.
   const FUNCTION_SLOT: u64 = 3;
+
+  /// Index of the slot that holds the return address, the trampoline.
   const RETURN_SLOT: u64 = 6;
 
   /// Stores the running context in `*saveRsp` and continues the one saved as

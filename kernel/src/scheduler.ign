@@ -1,4 +1,9 @@
+//!
+//! # Scheduler
+//!
 //! Kernel threads on one processor, switched cooperatively and by the timer.
+//!
+//! ## Overview
 //!
 //! A thread is a slot in a fixed table: an id, a state, the stack pointer it
 //! was switched out with, and a kernel stack of its own. Slot 0 is the boot
@@ -9,11 +14,12 @@
 //! Ready threads wait in a FIFO run queue and run in the order they entered
 //! it. Once `enablePreemption` is called, the timer interrupt also takes the
 //! processor from a thread that has used `TIME_SLICE_TICKS` ticks, so a
-//! thread that never yields cannot starve the others. A thread leaves the processor by calling `yield` (back to the end of
-//! the queue), `sleep` (blocked until a tick count) or by returning from its
-//! function, which ends in `exitCurrent`. The stack of a dead thread cannot
-//! be freed while it is still running on it, so the dead thread is recorded
-//! and the next thread to run frees it right after the switch.
+//! thread that never yields cannot starve the others. A thread leaves the
+//! processor by calling `yield` (back to the end of the queue), `sleep`
+//! (blocked until a tick count) or by returning from its function, which ends
+//! in `exitCurrent`. The stack of a dead thread cannot be freed while it is
+//! still running on it, so the dead thread is recorded and the next thread to
+//! run frees it right after the switch.
 //!
 //! Mutual exclusion is "interrupts off": every public operation runs inside
 //! `Cpu::saveAndDisableInterrupts` and `Cpu::restoreInterrupts`. That is
@@ -33,6 +39,63 @@
 //! Stacks are `STACK_PAGES` pages of PMM frames mapped in a region of their
 //! own, below an unmapped guard page: a thread that overflows its stack
 //! takes a page fault instead of writing over another thread's stack.
+//!
+//! ## Thread States
+//!
+//! ```text
+//!                     spawn
+//!           UNUSED ───────────► READY ◄──────────────────────┐
+//!              ▲                  │  ▲                       │ wakeSleepers:
+//!              │ reapZombie       │  │ yield, or the time    │ now >= wakeTick
+//!              │ (next thread)    │  │ slice ran out         │
+//!            DEAD                 ▼  │                       │
+//!              ▲              RUNNING ──── sleep(ticks) ──► BLOCKED
+//!              │                  │
+//!              └──── exitCurrent ─┘
+//! ```
+//!
+//! Exactly one thread is RUNNING. The idle thread is never in the run queue:
+//! it runs when the queue is empty.
+//!
+//! ## Thread Stacks
+//!
+//! Each slot has `STACK_SPAN` bytes (5 pages) of virtual address space at
+//! `STACK_REGION + slot * STACK_SPAN`:
+//!
+//! ```text
+//!   high   base + 0x5000  ┌──────────────────────┐ <- stack top (RSP0 for user threads)
+//!                         │ stack page 4         │
+//!                         │ stack page 3         │    16 KiB of frames from the PMM,
+//!                         │ stack page 2         │    grows downward
+//!                         │ stack page 1         │
+//!   low    base + 0x1000  ├──────────────────────┤
+//!                         │ guard page (unmapped)│ <- overflow faults here
+//!          base + 0x0000  └──────────────────────┘
+//!
+//!   STACK_REGION = 0xFFFFB00000000000
+//! ```
+//!
+//! The boot thread (slot 0) keeps running on Limine's stack and has no such
+//! region.
+//!
+//! ## Preemption
+//!
+//! ```text
+//!   LAPIC timer ──► vector 0x30 ──► Interrupts::dispatch
+//!                                     ├─ Timer::handleTick       ticks += 1
+//!                                     ├─ Lapic::endOfInterrupt
+//!                                     └─ Scheduler::onTick       (interrupts still off)
+//!                                           ├─ count the tick against the thread
+//!                                           ├─ wake sleepers
+//!                                           └─ slice over and others ready?
+//!                                                  makeReady(current); switchToNext()
+//!
+//!   switchToNext() leaves the interrupted thread's whole call chain on its own
+//!   kernel stack (interrupt frame, dispatch, onTick, switchToNext). The
+//!   thread resumes there later and finishes its own interrupt return.
+//! ```
+//!
+//! See concept doc 13.
 
 import AddressSpace from "./address_space";
 import Context, ContextAsm from "./arch/x86_64/context";
@@ -45,36 +108,81 @@ import Vmm from "./vmm";
 /// One entry of the thread table.
 @cLayout
 record Thread {
+  /// Unique thread id, assigned from a counter that never goes back. Slot
+  /// numbers are reused, ids are not.
   public id: u64;
+
+  /// One of `UNUSED`, `READY`, `RUNNING`, `BLOCKED` or `DEAD`.
   public state: u64;
+
+  /// The stack pointer the thread was switched out with. Meaningful when the
+  /// thread is not running.
   public savedRsp: u64;
+
+  /// Lowest address of the slot's stack region: the guard page. 0 for the boot
+  /// thread, which does not run on a region stack.
   public stackBase: u64;
+
+  /// Tick count at which a `BLOCKED` thread becomes ready.
   public wakeTick: u64;
+
+  /// Timer ticks that arrived while this thread was running.
   public runTicks: u64;
+
+  /// Physical address of the PML4 the thread owns, or 0 for the kernel's.
   public root: u64;
 }
 
 /// The scheduler state. The array sizes must equal `Scheduler::MAX_THREADS`,
 /// and have to be integer literals.
 record SchedulerState {
+  /// The thread table, indexed by slot.
   static mut threads: Thread[16];
+
+  /// The run queue: a ring buffer of slot numbers.
   static mut queue: u64[16];
+
+  /// Index in `queue` of the next thread to run.
   static mut queueHead: u64;
+
+  /// Threads in the run queue.
   static mut queueLength: u64;
+
+  /// Slot of the running thread.
   static mut current: u64;
+
+  /// Slot of the thread that just died plus 1, or 0 for none. The next thread to
+  /// run frees its stack (`reapZombie`).
   static mut zombie: u64;
+
+  /// The id the next created thread gets.
   static mut nextId: u64;
+
+  /// Context switches since boot.
   static mut switches: u64;
+
+  /// Times the timer took the processor from a thread that used its slice.
   static mut preemptions: u64;
+
+  /// Ticks left in the running thread's time slice.
   static mut sliceLeft: u64;
+
+  /// True once `initialize` has built the table, so `onTick` may run.
   static mut started: boolean;
+
+  /// True once `enablePreemption` has been called.
   static mut preemptive: boolean;
 }
 
+/// The scheduler API.
 export namespace Scheduler {
+  /// Size of the thread table, the boot and idle threads included.
   const MAX_THREADS: u64 = 16;
 
+  /// Slot of the boot thread.
   const BOOT_SLOT: u64 = 0;
+
+  /// Slot of the idle thread.
   const IDLE_SLOT: u64 = 1;
 
   /// Returned by `spawn` when the table is full or the stack cannot be
@@ -100,7 +208,10 @@ export namespace Scheduler {
   /// processor to the next ready thread: 10 ticks at 100 Hz is 100 ms.
   const TIME_SLICE_TICKS: u64 = 10;
 
+  /// 4 KiB.
   const PAGE_SIZE: u64 = 4096;
+
+  /// Stack pages per thread: 16 KiB.
   const STACK_PAGES: u64 = 4;
 
   /// A stack plus the guard page below it.
@@ -546,6 +657,9 @@ export namespace Scheduler {
     }
   }
 
+  /// Appends `slot` to the run queue. The queue is a ring buffer of
+  /// `MAX_THREADS` entries, so it can never overflow: a thread is queued at most
+  /// once.
   function enqueue(slot: u64): void {
     let tail: u64 = (SchedulerState::queueHead + SchedulerState::queueLength) % MAX_THREADS;
 
@@ -553,6 +667,7 @@ export namespace Scheduler {
     SchedulerState::queueLength += 1;
   }
 
+  /// Removes and returns the slot at the head of the run queue.
   function dequeue(): u64 {
     let slot: u64 = *(queueBase() + SchedulerState::queueHead);
 
@@ -577,14 +692,17 @@ export namespace Scheduler {
     return NO_THREAD;
   }
 
+  /// A pointer to the table entry of `slot`.
   function slotPointer(slot: u64): *mut Thread {
     return tableBase() + slot;
   }
 
+  /// A pointer to the first entry of the thread table.
   function tableBase(): *mut Thread {
     return &mut SchedulerState::threads as *mut Thread;
   }
 
+  /// A pointer to the first entry of the run queue.
   function queueBase(): *mut u64 {
     return &mut SchedulerState::queue as *mut u64;
   }
