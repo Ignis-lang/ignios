@@ -1,0 +1,109 @@
+//!
+//! # Interrupt and Exception Dispatch
+//!
+//! The Ignis side of interrupt handling: one dispatcher for every vector.
+//!
+//! ## Overview
+//!
+//! `interrupt_asm.S` saves the registers of the interrupted code and calls
+//! `dispatch` with a pointer to the saved frame. From there:
+//!
+//! ```text
+//!   Trap::dispatch(frame)
+//!   │
+//!   ├─ vector 0xFF  local APIC spurious ......... return, no EOI
+//!   ├─ vector 0x21  keyboard (IOAPIC) ........... Drivers::Ps2::handleInterrupt, Apic EOI
+//!   ├─ vector 0x30  local APIC timer ............ Time::Timer::handleTick, Apic EOI,
+//!   │                                             Sched::Scheduler::onTick (may switch threads)
+//!   ├─ vectors 0x20-0x2F (the rest)  8259 ....... acknowledge or absorb a spurious one
+//!   ├─ exception from ring 3 (cs & 3 == 3) ..... report, kill the process
+//!   └─ any other exception ...................... report on COM1 and the
+//!                                                 console, halt the machine
+//! ```
+//!
+//! A CPU exception in the kernel is fatal, and one taken in ring 3 kills only
+//! the process. `Trap::Exception` (`exception.ign`) holds the rule and the
+//! report.
+//!
+//! Device interrupts come from the IOAPIC and are acknowledged at the local
+//! APIC with `Apic::Lapic::endOfInterrupt`. The 8259 is fully masked, but its
+//! vectors `0x20-0x2F` stay mapped to thunks so a spurious 8259 interrupt is
+//! absorbed. The local APIC's spurious vector is ignored without any
+//! acknowledgement.
+//!
+//! See concept doc 04 and Intel SDM Vol. 3A, "Interrupt and Exception
+//! Handling".
+
+import Apic from "@apic";
+import Arch from "@arch";
+import Drivers from "@drivers";
+import Sched from "@sched";
+import Time from "@time";
+import _ from "./exception";
+
+/// Interrupt vector numbers and the dispatcher.
+namespace Trap {
+  /// First vector of the remapped 8259 range, `0x20`.
+  const FIRST_IRQ_VECTOR: u64 = 32;
+
+  /// Number of vectors in the 8259 range: 16 lines.
+  const IRQ_VECTOR_COUNT: u64 = 16;
+
+  /// The vector the IOAPIC raises for the keyboard. It equals the vector of
+  /// 8259 line 1, which is harmless because that line is masked.
+  const KEYBOARD_VECTOR: u64 = 0x21;
+
+  /// The vector of the local APIC timer tick. It is just above the 8259
+  /// vectors so nothing legacy shares it.
+  const TIMER_VECTOR: u64 = 0x30;
+
+  /// Called by the common stub for every vector, on the interrupted stack,
+  /// with interrupts disabled. `frame` points at the saved registers and can be
+  /// modified. See the module header for the routing.
+  @externName("ignis_interrupt_dispatch")
+  function dispatch(frame: *mut Arch::InterruptFrame): void {
+    let vector: u64 = (*frame).vector;
+
+    if (vector == Apic::Lapic::spuriousVector()) {
+      return;
+    }
+
+    if (vector == KEYBOARD_VECTOR) {
+      Drivers::Ps2::handleInterrupt();
+      Apic::Lapic::endOfInterrupt();
+      return;
+    }
+
+    if (vector == TIMER_VECTOR) {
+      Time::Timer::handleTick();
+      Apic::Lapic::endOfInterrupt();
+      Sched::Scheduler::onTick();
+      return;
+    }
+
+    if (vector >= FIRST_IRQ_VECTOR && vector < FIRST_IRQ_VECTOR + IRQ_VECTOR_COUNT) {
+      handleLegacyInterrupt((vector - FIRST_IRQ_VECTOR) as u8);
+      return;
+    }
+
+    if (Exception::isUserFault(frame)) {
+      Exception::killUserProcess(frame);
+    }
+
+    Exception::report(frame);
+
+    Arch::Cpu::haltForever();
+  }
+
+  /// Absorbs an interrupt that came from the 8259, which is fully masked.
+  /// A spurious one skips the acknowledgement of its own controller; any
+  /// other is acknowledged and dropped.
+  function handleLegacyInterrupt(line: u8): void {
+    if (Arch::Pic::isSpurious(line)) {
+      Arch::Pic::endSpurious(line);
+      return;
+    }
+
+    Arch::Pic::endOfInterrupt(line);
+  }
+}

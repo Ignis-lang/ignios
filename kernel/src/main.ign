@@ -82,7 +82,7 @@ import Mm from "@mm";
 import Proc from "@proc";
 import Sched from "@sched";
 import Time from "@time";
-import Interrupts from "./interrupts";
+import Trap from "@trap";
 import SchedulerTest from "./scheduler_test";
 import Syscall from "@syscall";
 import ThreadCommands from "./thread_commands";
@@ -351,7 +351,7 @@ function reportIoapic(keyboardGsi: u32): void {
   Drivers::Console::write(" -> GSI ");
   Drivers::Console::writeDecimal(keyboardGsi as u64);
   Drivers::Console::write(", vector ");
-  Drivers::Console::writeHex(Interrupts::KEYBOARD_VECTOR);
+  Drivers::Console::writeHex(Trap::KEYBOARD_VECTOR);
   Drivers::Console::write(", entry ");
   Drivers::Console::writeHex(Apic::Ioapic::redirection(keyboardGsi));
   Drivers::Console::writeLine("");
@@ -364,7 +364,7 @@ function reportIoapic(keyboardGsi: u32): void {
 /// Calibrates the APIC timer against the PIT, starts it, checks that ticks
 /// arrive and reports the numbers. See `timer.ign`.
 function initializeTimer(): void {
-  Time::Timer::initialize(Interrupts::TIMER_VECTOR as u8);
+  Time::Timer::initialize(Trap::TIMER_VECTOR as u8);
 
   Drivers::Console::write("timer: calibrated on PIT channel 2: ");
   Drivers::Console::writeDecimal(Time::Timer::countRate());
@@ -373,7 +373,7 @@ function initializeTimer(): void {
   Drivers::Console::write(", ");
   Drivers::Console::writeDecimal(Time::Timer::FREQUENCY);
   Drivers::Console::write(" Hz periodic, vector ");
-  Drivers::Console::writeHex(Interrupts::TIMER_VECTOR);
+  Drivers::Console::writeHex(Trap::TIMER_VECTOR);
   Drivers::Console::writeLine("");
 
   Time::Timer::selfTest();
@@ -547,7 +547,7 @@ function kmain(): void {
   Arch::Gdt::initialize();
   reportGdt();
 
-  // From here every CPU exception reaches `Interrupts::dispatch`. The IDT state
+  // From here every CPU exception reaches `Trap::dispatch`. The IDT state
   // Limine leaves is not specified by the protocol, so the kernel installs its
   // own before it does anything that can fault.
   Arch::Idt::initialize(Apic::Lapic::spuriousVector());
@@ -594,7 +594,7 @@ function kmain(): void {
 
   Apic::Ioapic::initialize();
 
-  let keyboardGsi: u32 = Apic::Ioapic::routeIsa(KEYBOARD_IRQ, Interrupts::KEYBOARD_VECTOR as u8);
+  let keyboardGsi: u32 = Apic::Ioapic::routeIsa(KEYBOARD_IRQ, Trap::KEYBOARD_VECTOR as u8);
 
   if (keyboardGsi == Apic::Ioapic::NO_GSI) {
     @panic("no IOAPIC serves the keyboard interrupt");

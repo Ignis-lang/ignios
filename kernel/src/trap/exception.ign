@@ -1,39 +1,18 @@
 //!
-//! # Interrupt and Exception Dispatch
+//! # CPU Exceptions
 //!
-//! The Ignis side of interrupt handling: one dispatcher for every vector, the
-//! exception reports and the rule for faults in ring 3.
+//! The names of the exception vectors, the report printed for a fatal one and
+//! the rule for faults in ring 3.
 //!
 //! ## Overview
-//!
-//! `interrupt_asm.S` saves the registers of the interrupted code and calls
-//! `dispatch` with a pointer to the saved frame. From there:
-//!
-//! ```text
-//!   Interrupts::dispatch(frame)
-//!   │
-//!   ├─ vector 0xFF  local APIC spurious ......... return, no EOI
-//!   ├─ vector 0x21  keyboard (IOAPIC) ........... Drivers::Ps2::handleInterrupt, Lapic EOI
-//!   ├─ vector 0x30  local APIC timer ............ Time::Timer::handleTick, Lapic EOI,
-//!   │                                             Sched::Scheduler::onTick (may switch threads)
-//!   ├─ vectors 0x20-0x2F (the rest)  8259 ....... acknowledge or absorb a spurious one
-//!   ├─ exception from ring 3 (cs & 3 == 3) ..... report, kill the process
-//!   └─ any other exception ...................... report on COM1 and the
-//!                                                 console, halt the machine
-//! ```
 //!
 //! A CPU exception in the kernel is fatal: it is reported on COM1 and on the
 //! console, then the processor halts. An exception taken in ring 3 (the saved
 //! code selector has RPL 3) is the process's own fault: it is reported and the
 //! process is killed while the kernel keeps running. NMI and machine check
 //! stay fatal even from ring 3, because they report the machine and not the
-//! process.
-//!
-//! Device interrupts come from the IOAPIC and are acknowledged at the local
-//! APIC with `Apic::Lapic::endOfInterrupt`. The 8259 is fully masked, but its
-//! vectors `0x20-0x2F` stay mapped to thunks so a spurious 8259 interrupt is
-//! absorbed. The local APIC's spurious vector is ignored without any
-//! acknowledgement.
+//! process. `killUserProcess` maps each exception to the signal Linux would
+//! send for it and ends the process with status 128 plus the signal.
 //!
 //! ## Exceptions
 //!
@@ -84,28 +63,14 @@
 //! See concept doc 04 and Intel SDM Vol. 3A, "Interrupt and Exception
 //! Handling".
 
-import Apic from "@apic";
 import Arch from "@arch";
 import Drivers from "@drivers";
 import Proc from "@proc";
-import Sched from "@sched";
-import Time from "@time";
 
-/// Interrupt vector numbers and the dispatcher.
-export namespace Interrupts {
-  /// First vector of the remapped 8259 range, `0x20`.
-  const FIRST_IRQ_VECTOR: u64 = 32;
-
-  /// Number of vectors in the 8259 range: 16 lines.
-  const IRQ_VECTOR_COUNT: u64 = 16;
-
-  /// The vector the IOAPIC raises for the keyboard. It equals the vector of
-  /// 8259 line 1, which is harmless because that line is masked.
-  const KEYBOARD_VECTOR: u64 = 0x21;
-
-  /// The vector of the local APIC timer tick. It is just above the 8259
-  /// vectors so nothing legacy shares it.
-  const TIMER_VECTOR: u64 = 0x30;
+/// Exception vector numbers, names and reports.
+namespace Trap::Exception {
+  /// Vectors 0 to 31 are processor exceptions. Vector 32 and up are interrupts.
+  const VECTOR_COUNT: u64 = 32;
 
   /// Vector 14.
   const PAGE_FAULT: u64 = 14;
@@ -164,44 +129,6 @@ export namespace Interrupts {
   /// as a shell does: 128 + 11 = 139 for a segmentation fault.
   const EXIT_STATUS_SIGNAL_BASE: u64 = 128;
 
-  /// Called by the common stub for every vector, on the interrupted stack,
-  /// with interrupts disabled. `frame` points at the saved registers and can be
-  /// modified. See the module header for the routing.
-  @externName("ignis_interrupt_dispatch")
-  function dispatch(frame: *mut Arch::InterruptFrame): void {
-    let vector: u64 = (*frame).vector;
-
-    if (vector == Apic::Lapic::spuriousVector()) {
-      return;
-    }
-
-    if (vector == KEYBOARD_VECTOR) {
-      Drivers::Ps2::handleInterrupt();
-      Apic::Lapic::endOfInterrupt();
-      return;
-    }
-
-    if (vector == TIMER_VECTOR) {
-      Time::Timer::handleTick();
-      Apic::Lapic::endOfInterrupt();
-      Sched::Scheduler::onTick();
-      return;
-    }
-
-    if (vector >= FIRST_IRQ_VECTOR && vector < FIRST_IRQ_VECTOR + IRQ_VECTOR_COUNT) {
-      handleLegacyInterrupt((vector - FIRST_IRQ_VECTOR) as u8);
-      return;
-    }
-
-    if (isUserFault(frame)) {
-      killUserProcess(frame);
-    }
-
-    reportException(frame);
-
-    Arch::Cpu::haltForever();
-  }
-
   /// True for a processor exception that interrupted ring 3 and that a
   /// process can cause on its own. NMI and machine check are the machine's
   /// business, not the process's, and stay fatal. A double fault is always
@@ -209,7 +136,7 @@ export namespace Interrupts {
   function isUserFault(frame: *mut Arch::InterruptFrame): boolean {
     let vector: u64 = (*frame).vector;
 
-    return ((*frame).cs & 3) == 3 && vector < FIRST_IRQ_VECTOR && vector != NMI && vector != DOUBLE_FAULT && vector != MACHINE_CHECK;
+    return ((*frame).cs & 3) == 3 && vector < VECTOR_COUNT && vector != NMI && vector != DOUBLE_FAULT && vector != MACHINE_CHECK;
   }
 
   /// Reports what the process did and ends it. Never returns: the thread
@@ -264,20 +191,8 @@ export namespace Interrupts {
     return SIGSEGV;
   }
 
-  /// Absorbs an interrupt that came from the 8259, which is fully masked.
-  /// A spurious one skips the acknowledgement of its own controller; any
-  /// other is acknowledged and dropped.
-  function handleLegacyInterrupt(line: u8): void {
-    if (Arch::Pic::isSpurious(line)) {
-      Arch::Pic::endSpurious(line);
-      return;
-    }
-
-    Arch::Pic::endOfInterrupt(line);
-  }
-
   /// Writes the exception to COM1 and to the console when it is up.
-  function reportException(frame: *mut Arch::InterruptFrame): void {
+  function report(frame: *mut Arch::InterruptFrame): void {
     let vector: u64 = (*frame).vector;
 
     if (Drivers::Console::isInitialized()) {
