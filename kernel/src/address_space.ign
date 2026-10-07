@@ -153,6 +153,26 @@ export namespace AddressSpace {
     return (entry & Vmm::ADDRESS_MASK) | (virtualAddress & (PAGE_SIZE - 1));
   }
 
+  /// True when every page of the byte range is user accessible, and
+  /// writable when `forWrite`, and the range stays in the user half.
+  function isAccessible(root: u64, address: u64, length: u64, forWrite: boolean): boolean {
+    if (!isUserRange(address, length)) {
+      return false;
+    }
+
+    let mut done: u64 = 0;
+
+    while (done < length) {
+      if (translateUser(root, address + done, forWrite) == NOT_MAPPED) {
+        return false;
+      }
+
+      done += bytesToPageEnd(address + done, length - done);
+    }
+
+    return true;
+  }
+
   /// Copies `length` bytes from the user address `source` to the kernel
   /// buffer `destination`. Returns false, with the buffer partly written,
   /// when any byte of the range is outside the user half or on a page the

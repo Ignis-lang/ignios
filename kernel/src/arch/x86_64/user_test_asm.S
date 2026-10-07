@@ -104,10 +104,133 @@ user_test_spin_start:
     ud2
 user_test_spin_end:
 
+/* Index 3: the implemented system calls and their errors. The program exits
+ * with status 0 when every call returned what Linux returns, and with the
+ * code of the first one that did not. Output goes to the console through
+ * write. */
+.macro EXPECT value, code
+    mov rcx, \value
+    cmp rax, rcx
+    je 9f
+    mov edi, \code
+    mov eax, 60
+    syscall
+9:
+.endm
+
+/* The length of user_test_syscalls_message. */
+.set MESSAGE_LENGTH, 33
+
+user_test_syscalls_start:
+    mov eax, 1
+    mov edi, 1
+    lea rsi, [rip + user_test_syscalls_message]
+    mov edx, MESSAGE_LENGTH
+    syscall
+    EXPECT MESSAGE_LENGTH, 10
+
+    /* A bad pointer: page zero, then an address in the kernel half. */
+    mov eax, 1
+    mov edi, 1
+    mov esi, 1
+    mov edx, 5
+    syscall
+    EXPECT -14, 11
+
+    mov eax, 1
+    mov edi, 1
+    mov rsi, 0xFFFF800000000000
+    mov edx, 8
+    syscall
+    EXPECT -14, 12
+
+    /* A range that starts mapped and runs off the end of the stack fails as a
+     * whole and prints nothing. */
+    mov rbx, 0x7FFFFFFFEFFC
+    mov dword ptr [rbx], 0x0A646E65
+    mov eax, 1
+    mov edi, 1
+    mov rsi, rbx
+    mov edx, 8
+    syscall
+    EXPECT -14, 13
+
+    /* A descriptor that is not open, and an empty write. */
+    mov eax, 1
+    mov edi, 7
+    lea rsi, [rip + user_test_syscalls_message]
+    mov edx, 1
+    syscall
+    EXPECT -9, 14
+
+    mov eax, 1
+    mov edi, 1
+    lea rsi, [rip + user_test_syscalls_message]
+    xor edx, edx
+    syscall
+    EXPECT 0, 15
+
+    mov eax, 39
+    syscall
+    test rax, rax
+    jg 1f
+    mov edi, 16
+    mov eax, 60
+    syscall
+1:
+    mov eax, 24
+    syscall
+    EXPECT 0, 17
+
+    /* nanosleep: 20 ms, an invalid time, a bad pointer. */
+    sub rsp, 16
+    mov qword ptr [rsp], 0
+    mov qword ptr [rsp + 8], 20000000
+    mov eax, 35
+    mov rdi, rsp
+    xor esi, esi
+    syscall
+    EXPECT 0, 18
+
+    mov qword ptr [rsp + 8], 2000000000
+    mov eax, 35
+    mov rdi, rsp
+    xor esi, esi
+    syscall
+    EXPECT -22, 19
+
+    mov eax, 35
+    mov edi, 1
+    xor esi, esi
+    syscall
+    EXPECT -14, 20
+
+    /* A call that does not exist, and write to standard error. */
+    mov eax, 9999
+    syscall
+    EXPECT -38, 21
+
+    mov eax, 1
+    mov edi, 2
+    lea rsi, [rip + user_test_syscalls_message]
+    mov edx, MESSAGE_LENGTH
+    syscall
+    EXPECT MESSAGE_LENGTH, 22
+
+    xor edi, edi
+    mov eax, 60
+    syscall
+    ud2
+user_test_syscalls_message:
+    .ascii "hello from a ring 3 test program\n"
+user_test_syscalls_message_end:
+user_test_syscalls_end:
+
 .balign 8
 ignis_user_test_table:
     .quad user_test_exit_start, user_test_exit_end
     .quad user_test_registers_start, user_test_registers_end
     .quad user_test_spin_start, user_test_spin_end
+    .quad user_test_syscalls_start, user_test_syscalls_end
 
 .section .note.GNU-stack,"",@progbits
