@@ -1,0 +1,436 @@
+//! The kernel heap: a region in the higher half that grows on demand with
+//! frames from the PMM, and a first-fit allocator over it.
+//!
+//! Every block starts with a 16-byte header, a size and a state tag, and the
+//! payload follows, so payloads are 16-byte aligned. Free blocks are chained
+//! in address order through a pointer stored in their payload, which lets
+//! `free` merge a block with both neighbours. A request for a larger
+//! alignment splits the space in front of the aligned payload off as a free
+//! block of its own. The heap is not synchronized: the kernel has one
+//! processor and nothing allocates in an interrupt handler.
+//!
+//! The compiler's allocation handlers sit on top of it, so escaping capturing
+//! closures allocate here.
+
+import Pmm from "./pmm";
+import Vmm from "./vmm";
+
+record HeapState {
+  static mut mappedEnd: u64 = 0;
+  static mut firstFree: u64 = 0;
+  static mut allocatedBytes: u64 = 0;
+}
+
+export namespace Heap {
+  /// Start of the heap, in its own top-level slot away from the direct map.
+  const BASE: u64 = 0xFFFFC00000000000;
+
+  /// The most address space the heap may use.
+  const LIMIT_SIZE: u64 = 0x10000000;
+
+  const PAGE_SIZE: u64 = 4096;
+
+  /// Pages mapped at once when the heap grows.
+  const GROW_PAGES: u64 = 16;
+
+  const HEADER_SIZE: u64 = 16;
+  const MIN_ALIGNMENT: u64 = 16;
+
+  /// A free block holds its header and the pointer to the next free block.
+  const MIN_BLOCK_SIZE: u64 = 32;
+
+  const FREE_TAG: u64 = 0x46524545;
+  const USED_TAG: u64 = 0x55534544;
+
+  /// Prepares an empty heap. Nothing is mapped until the first allocation.
+  function initialize(): void {
+    if (Vmm::translate(BASE) != Vmm::NOT_MAPPED) {
+      @panic("heap: the heap base is already mapped");
+    }
+
+    HeapState::mappedEnd = BASE;
+    HeapState::firstFree = 0;
+    HeapState::allocatedBytes = 0;
+  }
+
+  /// Allocates `size` bytes aligned to `align`, which must be a power of
+  /// two. Returns null when the alignment is invalid or the heap cannot grow
+  /// any further.
+  function allocate(size: u64, align: u64): *mut u8 {
+    if (align == 0 || (align & (align - 1)) != 0) {
+      return null;
+    }
+
+    let alignment: u64 = align < MIN_ALIGNMENT ? MIN_ALIGNMENT : align;
+    let payloadSize: u64 = alignUp(size == 0 ? 1 : size, MIN_ALIGNMENT);
+
+    let mut payload: u64 = takeFirstFit(payloadSize, alignment);
+
+    while (payload == 0) {
+      if (!grow(payloadSize + alignment + HEADER_SIZE)) {
+        return null;
+      }
+
+      payload = takeFirstFit(payloadSize, alignment);
+    }
+
+    return @pointerFromInteger<*mut u8>(payload);
+  }
+
+  /// Returns a block to the heap. Freeing null does nothing. A pointer that
+  /// is not a live block is a kernel bug and panics.
+  function free(pointer: *mut u8): void {
+    if (pointer == null) {
+      return;
+    }
+
+    let payload: u64 = @integerFromPointer(pointer);
+    let block: u64 = payload - HEADER_SIZE;
+
+    if (payload % MIN_ALIGNMENT != 0 || block < BASE || payload >= HeapState::mappedEnd || readTag(block) != USED_TAG) {
+      @panic("heap: free of a pointer that is not allocated");
+    }
+
+    HeapState::allocatedBytes -= readSize(block);
+    insertFree(block, readSize(block));
+  }
+
+  /// Bytes in live blocks, headers included.
+  function allocatedBytes(): u64 {
+    return HeapState::allocatedBytes;
+  }
+
+  /// Bytes of heap address space that are backed by frames.
+  function mappedBytes(): u64 {
+    return HeapState::mappedEnd - BASE;
+  }
+
+  /// Exercises the allocator and checks its promises: alignment, blocks that
+  /// do not overlap, reuse of freed blocks, merging of neighbours, growth,
+  /// and the compiler handlers. Panics on the first violation.
+  function selfTest(): void {
+    let baseline: u64 = HeapState::allocatedBytes;
+
+    let small: *mut u8 = allocate(1, 1);
+    let aligned64: *mut u8 = allocate(100, 64);
+    let page: *mut u8 = allocate(5000, 4096);
+    let odd: *mut u8 = allocate(33, 16);
+
+    checkAligned(small, 16);
+    checkAligned(aligned64, 64);
+    checkAligned(page, 4096);
+    checkAligned(odd, 16);
+
+    fillBlock(small, 1, 0x11);
+    fillBlock(aligned64, 100, 0x22);
+    fillBlock(page, 5000, 0x33);
+    fillBlock(odd, 33, 0x44);
+
+    expectBlock(small, 1, 0x11);
+    expectBlock(aligned64, 100, 0x22);
+    expectBlock(page, 5000, 0x33);
+    expectBlock(odd, 33, 0x44);
+
+    free(aligned64);
+
+    if (allocate(100, 64) != aligned64) {
+      @panic("heap self-test: freed block was not reused");
+    }
+
+    testMerging();
+    testGrowth();
+
+    free(small);
+    free(aligned64);
+    free(page);
+    free(odd);
+
+    if (HeapState::allocatedBytes != baseline) {
+      @panic("heap self-test: bytes leaked");
+    }
+
+    if (allocate(8, 3) != null) {
+      @panic("heap self-test: accepted an alignment that is not a power of two");
+    }
+
+    testHandlers();
+  }
+
+  /// Three neighbours freed middle last must merge back into one block that
+  /// a larger request then reuses from the first neighbour's address.
+  function testMerging(): void {
+    let first: *mut u8 = allocate(200, 16);
+    let second: *mut u8 = allocate(200, 16);
+    let third: *mut u8 = allocate(200, 16);
+
+    free(first);
+    free(third);
+    free(second);
+
+    let merged: *mut u8 = allocate(600, 16);
+
+    if (merged != first) {
+      @panic("heap self-test: neighbours did not merge");
+    }
+
+    free(merged);
+  }
+
+  /// A block bigger than what is mapped must grow the heap.
+  function testGrowth(): void {
+    let before: u64 = mappedBytes();
+    let size: u64 = 1048576;
+
+    let big: *mut u8 = allocate(size, 16);
+
+    if (big == null || mappedBytes() <= before) {
+      @panic("heap self-test: the heap did not grow");
+    }
+
+    fillBlock(big, size, 0x5A);
+    expectBlock(big, size, 0x5A);
+    free(big);
+  }
+
+  /// The handlers must reach the heap, both when called directly and when
+  /// the compiler calls them: a returned closure that captures a value gets
+  /// a heap environment from `onAllocate`. When the closure is defined outside
+  /// the entry module the compiler gives it no drop function, so nothing
+  /// frees that environment and it stays in use after this test.
+  function testHandlers(): void {
+    let before: u64 = HeapState::allocatedBytes;
+    let direct: *mut u8 = onAllocate(64, 16);
+
+    if (HeapState::allocatedBytes <= before) {
+      @panic("heap self-test: the allocation handler did not reach the heap");
+    }
+
+    onFree(direct);
+
+    if (HeapState::allocatedBytes != before) {
+      @panic("heap self-test: the free handler did not reach the heap");
+    }
+
+    let adder: (u64) -> u64 = makeAdder(40);
+
+    if (HeapState::allocatedBytes <= before) {
+      @panic("heap self-test: the closure did not allocate from the heap");
+    }
+
+    if (adder(2) != 42) {
+      @panic("heap self-test: the closure lost its capture");
+    }
+  }
+
+  function makeAdder(base: u64): (u64) -> u64 {
+    return (value: u64): u64 -> value + base;
+  }
+
+  /// Takes the first free block that can hold an aligned payload of
+  /// `payloadSize` bytes, splits it, and returns the payload address, or 0.
+  function takeFirstFit(payloadSize: u64, alignment: u64): u64 {
+    let mut previous: u64 = 0;
+    let mut block: u64 = HeapState::firstFree;
+
+    while (block != 0) {
+      let blockEnd: u64 = block + readSize(block);
+      let mut payload: u64 = alignUp(block + HEADER_SIZE, alignment);
+
+      if (payload - HEADER_SIZE != block && payload - HEADER_SIZE - block < MIN_BLOCK_SIZE) {
+        payload += alignment;
+      }
+
+      if (payload + payloadSize <= blockEnd) {
+        return carve(previous, block, payload, payloadSize);
+      }
+
+      previous = block;
+      block = readNext(block);
+    }
+
+    return 0;
+  }
+
+  /// Cuts a used block with payload `payload` out of free block `block`.
+  /// Space in front of it stays a free block in the list, space behind it
+  /// becomes a new free block unless it is too small to be one, in which
+  /// case it joins the used block.
+  function carve(previous: u64, block: u64, payload: u64, payloadSize: u64): u64 {
+    let blockEnd: u64 = block + readSize(block);
+    let used: u64 = payload - HEADER_SIZE;
+    let mut usedEnd: u64 = payload + payloadSize;
+    let next: u64 = readNext(block);
+
+    let mut following: u64 = next;
+
+    if (blockEnd - usedEnd >= MIN_BLOCK_SIZE) {
+      writeBlock(usedEnd, blockEnd - usedEnd, FREE_TAG);
+      writeNext(usedEnd, next);
+      following = usedEnd;
+    } else {
+      usedEnd = blockEnd;
+    }
+
+    if (used > block) {
+      writeSize(block, used - block);
+      writeNext(block, following);
+    } else {
+      relink(previous, following);
+    }
+
+    writeBlock(used, usedEnd - used, USED_TAG);
+    HeapState::allocatedBytes += usedEnd - used;
+
+    return payload;
+  }
+
+  /// Points `previous`, or the list head when it is 0, at `target`.
+  function relink(previous: u64, target: u64): void {
+    if (previous == 0) {
+      HeapState::firstFree = target;
+    } else {
+      writeNext(previous, target);
+    }
+  }
+
+  /// Adds a block to the address-ordered free list, merging it with the
+  /// blocks right before and after it when they touch.
+  function insertFree(block: u64, size: u64): void {
+    let mut previous: u64 = 0;
+    let mut next: u64 = HeapState::firstFree;
+
+    while (next != 0 && next < block) {
+      previous = next;
+      next = readNext(next);
+    }
+
+    let mut start: u64 = block;
+    let mut length: u64 = size;
+
+    if (next != 0 && block + size == next) {
+      length += readSize(next);
+      next = readNext(next);
+    }
+
+    if (previous != 0 && previous + readSize(previous) == block) {
+      length += readSize(previous);
+      start = previous;
+    } else {
+      relink(previous, block);
+    }
+
+    writeBlock(start, length, FREE_TAG);
+    writeNext(start, next);
+  }
+
+  /// Maps at least `minBytes` more heap, as one free block. Returns false
+  /// when the limit is reached or the PMM has no frame left.
+  function grow(minBytes: u64): boolean {
+    let wanted: u64 = alignUp(minBytes, PAGE_SIZE) / PAGE_SIZE;
+    let pages: u64 = wanted < GROW_PAGES ? GROW_PAGES : wanted;
+    let start: u64 = HeapState::mappedEnd;
+
+    if (start + pages * PAGE_SIZE > BASE + LIMIT_SIZE) {
+      return false;
+    }
+
+    let mut mapped: u64 = 0;
+
+    while (mapped < pages) {
+      let frame: u64 = Pmm::allocateFrame();
+
+      if (frame == Pmm::NO_FRAME) {
+        break;
+      }
+
+      if (!Vmm::map(HeapState::mappedEnd, frame, Vmm::WRITABLE | Vmm::NO_EXECUTE)) {
+        @panic("heap: a heap page was already mapped");
+      }
+
+      HeapState::mappedEnd += PAGE_SIZE;
+      mapped += 1;
+    }
+
+    if (mapped == 0) {
+      return false;
+    }
+
+    insertFree(start, mapped * PAGE_SIZE);
+
+    return true;
+  }
+
+  function alignUp(value: u64, alignment: u64): u64 {
+    return (value + alignment - 1) & ~(alignment - 1);
+  }
+
+  function readSize(block: u64): u64 {
+    return *(@pointerFromInteger<*mut u64>(block));
+  }
+
+  function readTag(block: u64): u64 {
+    return *(@pointerFromInteger<*mut u64>(block) + 1);
+  }
+
+  function readNext(block: u64): u64 {
+    return *(@pointerFromInteger<*mut u64>(block) + 2);
+  }
+
+  function writeSize(block: u64, size: u64): void {
+    *(@pointerFromInteger<*mut u64>(block)) = size;
+  }
+
+  function writeNext(block: u64, next: u64): void {
+    *(@pointerFromInteger<*mut u64>(block) + 2) = next;
+  }
+
+  function writeBlock(block: u64, size: u64, tag: u64): void {
+    let header: *mut u64 = @pointerFromInteger<*mut u64>(block);
+
+    *header = size;
+    *(header + 1) = tag;
+  }
+
+  function checkAligned(pointer: *mut u8, alignment: u64): void {
+    if (pointer == null || @integerFromPointer(pointer) % alignment != 0) {
+      @panic("heap self-test: bad allocation or alignment");
+    }
+  }
+
+  function fillBlock(pointer: *mut u8, length: u64, value: u8): void {
+    let mut index: u64 = 0;
+
+    while (index < length) {
+      *(pointer + index) = value;
+      index += 1;
+    }
+  }
+
+  function expectBlock(pointer: *mut u8, length: u64, value: u8): void {
+    let mut index: u64 = 0;
+
+    while (index < length) {
+      if (*(pointer + index) != value) {
+        @panic("heap self-test: a block was overwritten");
+      }
+
+      index += 1;
+    }
+  }
+}
+
+@allocHandler
+function onAllocate(size: u64, align: u64): *mut u8 {
+  let pointer: *mut u8 = Heap::allocate(size, align);
+
+  if (pointer == null) {
+    @panic("heap: out of memory");
+  }
+
+  return pointer;
+}
+
+@freeHandler
+function onFree(pointer: *mut u8): void {
+  Heap::free(pointer);
+}

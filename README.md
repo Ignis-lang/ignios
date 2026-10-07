@@ -17,8 +17,8 @@ Early, and only tested in QEMU with OVMF.
 | CPU | Own GDT and TSS (IST stack for double faults), IDT with exception reports |
 | Interrupts | 8259 PIC remapped to 0x20-0x2F; keyboard on IRQ1, idle loop sleeps with `sti; hlt` |
 | Input | PS/2 keyboard, scancode set 1, US layout, Shift and Caps Lock, line editing at a `>` prompt |
-| Memory | Bitmap frame allocator over the Limine memory map; own 4-level page tables (kernel image per segment with W^X, direct map with 2 MiB pages, write-combining framebuffer, NX and write protection on) |
-| Next | Kernel heap, APIC/IOAPIC, scheduler, syscalls, userland |
+| Memory | Bitmap frame allocator over the Limine memory map; own 4-level page tables (kernel image per segment with W^X, direct map with 2 MiB pages, write-combining framebuffer, NX and write protection on); kernel heap in the higher half behind the compiler's allocation handlers |
+| Next | APIC/IOAPIC, scheduler, syscalls, userland |
 
 ## Quick start
 
@@ -61,6 +61,7 @@ kernel/src/ps2.ign             PS/2 controller
 kernel/src/interrupts.ign      exception reports and IRQ dispatch
 kernel/src/pmm.ign             physical frame allocator
 kernel/src/vmm.ign             kernel page tables: map, unmap, translate, flush
+kernel/src/heap.ign            kernel heap: first-fit allocator over PMM-backed pages
 kernel/src/hhdm.ign            physical memory through the higher half direct map
 kernel/src/arch/x86_64/        GDT, IDT, PIC, port I/O and CPU helpers, .S stubs
 kernel/linker.ld               higher-half layout

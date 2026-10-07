@@ -6,6 +6,7 @@ import Idt from "./arch/x86_64/idt";
 import Lapic from "./arch/x86_64/lapic";
 import Pic from "./arch/x86_64/pic";
 import Color, Console from "./console";
+import Heap from "./heap";
 import _ from "./interrupts";
 import Keyboard from "./keyboard";
 import Limine from "./limine";
@@ -138,8 +139,8 @@ function reportGdt(): void {
   Serial::write("\n");
 }
 
-/// Builds the frame allocator and the kernel page tables, reports on them and
-/// runs their self-tests.
+/// Builds the frame allocator, the kernel page tables and the heap, reports on
+/// them and runs their self-tests.
 function initializeMemory(framebuffer: *mut Limine::Framebuffer): void {
   Pmm::initialize();
 
@@ -164,6 +165,15 @@ function initializeMemory(framebuffer: *mut Limine::Framebuffer): void {
 
   Vmm::selfTest();
   Console::writeLine("vmm: self-test ok");
+
+  Heap::initialize();
+  Heap::selfTest();
+
+  Console::write("heap: self-test ok, ");
+  Console::writeDecimal(Heap::mappedBytes() / 1024);
+  Console::write(" KiB mapped, ");
+  Console::writeDecimal(Heap::allocatedBytes());
+  Console::writeLine(" bytes in use");
 }
 
 function printPrompt(): void {
