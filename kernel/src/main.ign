@@ -19,6 +19,7 @@ import ScancodeQueue from "./scancode_queue";
 import Scheduler from "./scheduler";
 import SchedulerTest from "./scheduler_test";
 import Serial from "./serial";
+import ThreadCommands from "./thread_commands";
 import Timer from "./timer";
 import Vmm from "./vmm";
 import _ from "./lib/mem";
@@ -35,9 +36,14 @@ const LAST_PRINTABLE: u8 = 0x7E;
 /// The ISA interrupt line of the PS/2 keyboard.
 const KEYBOARD_IRQ: u8 = 1;
 
-/// The one command the terminal knows. It prints the time since the timer
-/// started.
+/// Prints the time since the timer started.
 const UPTIME_COMMAND: str = "uptime";
+
+/// Lists the kernel threads.
+const PS_COMMAND: str = "ps";
+
+/// Starts the demo threads.
+const THREADS_COMMAND: str = "threads";
 
 /// Bytes one input line can hold. It must equal the array size in
 /// `runTerminal`, which has to be an integer literal.
@@ -297,6 +303,19 @@ function lineIs(line: *mut u8, length: u64, text: str): boolean {
   return index == length;
 }
 
+/// Runs the command on the line. A line that names no command does nothing.
+function runCommand(line: *mut u8, length: u64): void {
+  if (lineIs(line, length, UPTIME_COMMAND)) {
+    printUptime();
+  } else if (lineIs(line, length, PS_COMMAND)) {
+    ThreadCommands::printThreads();
+  } else if (lineIs(line, length, THREADS_COMMAND)) {
+    if (!ThreadCommands::startDemo()) {
+      Console::writeLine("threads: the thread table is full");
+    }
+  }
+}
+
 function printPrompt(): void {
   Console::setColors(Color::BRIGHT_GREEN, Color::BLACK);
   Console::write("> ");
@@ -305,8 +324,9 @@ function printPrompt(): void {
 
 /// Drains the scancode queue forever and edits one line at a time: printable
 /// characters are echoed and stored, Backspace erases the last stored
-/// character but never the prompt, and Enter runs the line when it is
-/// `uptime` and starts a new prompt. Input past
+/// character but never the prompt, and Enter runs the line as a command and
+/// starts a new prompt. The terminal runs in the boot thread, so the keyboard
+/// keeps working while other threads run. Input past
 /// LINE_CAPACITY and Tab are ignored. The queue is checked with interrupts
 /// off, so an IRQ1 cannot land between the check and the `sti; hlt` that
 /// sleeps until the next one.
@@ -331,9 +351,7 @@ function runTerminal(): void {
     if (character == NEWLINE) {
       Console::writeChar(NEWLINE);
 
-      if (lineIs(&mut line as *mut u8, length, UPTIME_COMMAND)) {
-        printUptime();
-      }
+      runCommand(&mut line as *mut u8, length);
 
       length = 0;
       printPrompt();

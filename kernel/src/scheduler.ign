@@ -292,6 +292,55 @@ export namespace Scheduler {
     return SchedulerState::preemptions;
   }
 
+  /// The state of slot `slot` as a word for display, "free" for an unused
+  /// slot.
+  function stateName(slot: u64): str {
+    let state: u64 = (*slotPointer(slot)).state;
+
+    if (state == READY) {
+      return "ready";
+    }
+
+    if (state == RUNNING) {
+      return "running";
+    }
+
+    if (state == BLOCKED) {
+      return "sleeping";
+    }
+
+    if (state == DEAD) {
+      return "dead";
+    }
+
+    return "free";
+  }
+
+  /// The id of the thread in `slot`. Meaningful when the slot is in use.
+  function slotId(slot: u64): u64 {
+    return (*slotPointer(slot)).id;
+  }
+
+  /// True when `slot` holds a thread.
+  function slotInUse(slot: u64): boolean {
+    return (*slotPointer(slot)).state != UNUSED;
+  }
+
+  /// Timer ticks the thread in `slot` has been running when a tick arrived.
+  /// The count grows only once preemption is enabled.
+  function slotRunTicks(slot: u64): u64 {
+    return (*slotPointer(slot)).runTicks;
+  }
+
+  /// The tick a sleeping thread wakes at, or 0 when `slot` is not asleep.
+  function slotWakeTick(slot: u64): u64 {
+    if ((*slotPointer(slot)).state != BLOCKED) {
+      return 0;
+    }
+
+    return (*slotPointer(slot)).wakeTick;
+  }
+
   /// Threads currently in the table, idle and boot included.
   function threadCount(): u64 {
     let mut count: u64 = 0;

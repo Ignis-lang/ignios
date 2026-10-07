@@ -1,0 +1,146 @@
+//! The terminal commands that show and exercise threads: `ps` lists the
+//! thread table, and `threads` starts three demo threads that print their id
+//! and the tick count. Nothing here runs unless a command asks for it.
+
+import ContextAsm from "./arch/x86_64/context";
+import Cpu from "./arch/x86_64/cpu";
+import Console from "./console";
+import Scheduler from "./scheduler";
+import Timer from "./timer";
+
+export namespace ThreadCommands {
+  /// Lines each demo thread prints before it exits.
+  const DEMO_LINES: u64 = 4;
+
+  /// Ticks the busy demo thread spins for without yielding.
+  const BUSY_TICKS: u64 = 250;
+
+  const ID_WIDTH: u64 = 4;
+  const STATE_WIDTH: u64 = 10;
+  const TICKS_WIDTH: u64 = 8;
+
+  /// Prints one row per thread in the table: id, state, the ticks it was
+  /// running at, and the tick a sleeper wakes at.
+  function printThreads(): void {
+    let saved: u64 = Cpu::saveAndDisableInterrupts();
+
+    Console::writeLine("  id  state     ticks   wake");
+
+    let mut slot: u64 = 0;
+
+    while (slot < Scheduler::MAX_THREADS) {
+      if (Scheduler::slotInUse(slot)) {
+        Console::write("  ");
+        writeNumber(Scheduler::slotId(slot), ID_WIDTH);
+        writeText(Scheduler::stateName(slot), STATE_WIDTH);
+        writeNumber(Scheduler::slotRunTicks(slot), TICKS_WIDTH);
+
+        if (Scheduler::slotWakeTick(slot) != 0) {
+          Console::writeDecimal(Scheduler::slotWakeTick(slot));
+        }
+
+        Console::writeLine("");
+      }
+
+      slot += 1;
+    }
+
+    Cpu::restoreInterrupts(saved);
+  }
+
+  /// Starts two threads that print a line every 0.5 s and 0.7 s, and a third
+  /// that spins for `BUSY_TICKS` ticks without ever yielding. The printers
+  /// keep their schedule while the busy thread spins, which only the timer
+  /// interrupt makes possible. Returns false when a thread could not be
+  /// created.
+  function startDemo(): boolean {
+    let first: u64 = Scheduler::spawn(ContextAsm::ignis_function_address(printer), 50);
+    let second: u64 = Scheduler::spawn(ContextAsm::ignis_function_address(printer), 70);
+    let busy: u64 = Scheduler::spawn(ContextAsm::ignis_function_address(busySpinner), BUSY_TICKS);
+
+    return first != Scheduler::NO_THREAD && second != Scheduler::NO_THREAD && busy != Scheduler::NO_THREAD;
+  }
+
+  /// Prints `DEMO_LINES` lines with its id and the tick, sleeping
+  /// `interval` ticks between them.
+  function printer(interval: u64): void {
+    let mut line: u64 = 0;
+
+    while (line < DEMO_LINES) {
+      printTick("alive");
+      Scheduler::sleep(interval);
+      line += 1;
+    }
+
+    printTick("done");
+  }
+
+  /// Spins for `duration` ticks without yielding, announcing the start and
+  /// the end.
+  function busySpinner(duration: u64): void {
+    let end: u64 = Timer::ticks() + duration;
+
+    printTick("spinning");
+
+    while (Timer::ticks() < end) {
+    }
+
+    printTick("done");
+  }
+
+  /// One line, written in one critical section so other threads cannot cut
+  /// it.
+  function printTick(label: str): void {
+    let saved: u64 = Cpu::saveAndDisableInterrupts();
+
+    Console::write("thread ");
+    Console::writeDecimal(Scheduler::currentId());
+    Console::write(": ");
+    Console::write(label);
+    Console::write(" at tick ");
+    Console::writeDecimal(Timer::ticks());
+    Console::writeLine("");
+
+    Cpu::restoreInterrupts(saved);
+  }
+
+  /// Writes `value` in decimal, then spaces up to `width` columns.
+  function writeNumber(value: u64, width: u64): void {
+    Console::writeDecimal(value);
+    pad(digits(value), width);
+  }
+
+  function writeText(text: str, width: u64): void {
+    let mut length: u64 = 0;
+    let mut cursor: *u8 = text as *u8;
+
+    while (*cursor != 0) {
+      length += 1;
+      cursor = cursor + 1;
+    }
+
+    Console::write(text);
+    pad(length, width);
+  }
+
+  function pad(used: u64, width: u64): void {
+    let mut count: u64 = used;
+
+    while (count < width) {
+      Console::writeChar(0x20);
+      count += 1;
+    }
+  }
+
+  function digits(value: u64): u64 {
+    let mut count: u64 = 1;
+    let mut rest: u64 = value;
+
+    while (rest >= 10) {
+      rest /= 10;
+      count += 1;
+    }
+
+    return count;
+  }
+}

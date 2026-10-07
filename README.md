@@ -17,9 +17,10 @@ Early, and only tested in QEMU with OVMF.
 | CPU | Own GDT and TSS (IST stack for double faults), IDT with exception reports |
 | Interrupts | ACPI MADT parsed; keyboard routed through the IOAPIC to vector 0x21 with local APIC end of interrupt; 8259 remapped to 0x20-0x2F and fully masked; idle loop sleeps with `sti; hlt` |
 | Timer | Local APIC timer calibrated against PIT channel 2, periodic 100 Hz tick on vector 0x30; `uptime` at the prompt prints the time since boot |
+| Threads | Kernel threads with their own stacks and a guard page, a round-robin run queue, `yield`, `sleep` and `exit`, an idle thread, and preemption by the timer tick with 100 ms time slices; `ps` lists the threads and `threads` starts a demo; the boot thread runs the terminal |
 | Input | PS/2 keyboard, scancode set 1, US layout, Shift and Caps Lock, line editing at a `>` prompt |
 | Memory | Bitmap frame allocator over the Limine memory map; own 4-level page tables (kernel image per segment with W^X, direct map with 2 MiB pages, write-combining framebuffer, NX and write protection on); kernel heap in the higher half behind the compiler's allocation handlers |
-| Next | scheduler, syscalls, userland |
+| Next | syscalls, userland |
 
 ## Quick start
 
@@ -49,7 +50,7 @@ The build also needs an Ignis compiler with freestanding support (Ignis `main` f
 
 ## How it is built
 
-Ignis compiles the whole kernel to one C unit, which clang compiles for `x86_64-unknown-none` with kernel flags (no red zone, no SSE, `-mcmodel=kernel`). The few routines that cannot be written in Ignis are small `.S` files under `kernel/src/arch/x86_64/`: interrupt entry stubs and the code segment reload. `ld.lld` links everything with `kernel/linker.ld`, and `mtools` writes the boot image. No cross GCC is involved.
+Ignis compiles the whole kernel to one C unit, which clang compiles for `x86_64-unknown-none` with kernel flags (no red zone, no SSE, `-mcmodel=kernel`). The few routines that cannot be written in Ignis are small `.S` files under `kernel/src/arch/x86_64/`: interrupt entry stubs, the code segment reload and the stack switch. `ld.lld` links everything with `kernel/linker.ld`, and `mtools` writes the boot image. No cross GCC is involved.
 
 ## Layout
 
@@ -66,7 +67,10 @@ kernel/src/pmm.ign             physical frame allocator
 kernel/src/vmm.ign             kernel page tables: map, unmap, translate, flush
 kernel/src/heap.ign            kernel heap: first-fit allocator over PMM-backed pages
 kernel/src/hhdm.ign            physical memory through the higher half direct map
-kernel/src/arch/x86_64/        GDT, IDT, PIC, local APIC, IOAPIC, PIT, port I/O and CPU helpers, .S stubs
+kernel/src/scheduler.ign       kernel threads, run queue, sleep and timer preemption
+kernel/src/scheduler_test.ign  boot-time scheduler self-tests
+kernel/src/thread_commands.ign the `ps` and `threads` terminal commands
+kernel/src/arch/x86_64/        GDT, IDT, PIC, local APIC, IOAPIC, PIT, port I/O, CPU helpers and stack switching, .S stubs
 kernel/linker.ld               higher-half layout
 boot/limine.conf               boot entry
 scripts/                       font generator, screenshot and key test drivers
