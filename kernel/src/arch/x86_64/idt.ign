@@ -1,9 +1,6 @@
 //! The interrupt descriptor table: 256 interrupt gates, all pointing at the
-//! assembly thunks in `interrupt_asm.S`, which share one dispatcher.
-//!
-//! The table itself is zeroed storage in the assembly file, because Ignis has
-//! no way to declare a large zero-initialized `static mut` without writing
-//! every element.
+//! assembly thunks in `interrupt_asm.S`, which share one dispatcher. The table
+//! itself is a zero-initialized `static mut` in `.bss`.
 
 import Gdt from "./gdt";
 import Lapic from "./lapic";
