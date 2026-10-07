@@ -22,10 +22,10 @@
 
 import Boot from "@boot";
 import Drivers from "@drivers";
-import Vmm from "./vmm";
+import _ from "./vmm";
 
 /// The module API.
-export namespace Modules {
+namespace Mm::Modules {
   /// 4 KiB.
   const PAGE_SIZE: u64 = 4096;
 
@@ -49,7 +49,7 @@ export namespace Modules {
       let start: u64 = @integerFromPointer((*file).address) / PAGE_SIZE * PAGE_SIZE;
       let end: u64 = (@integerFromPointer((*file).address) + (*file).size + PAGE_SIZE - 1) / PAGE_SIZE * PAGE_SIZE;
 
-      Vmm::mapRange(start, start - Boot::Hhdm::offset(), end - start, Vmm::NO_EXECUTE);
+      Mm::Vmm::mapRange(start, start - Boot::Hhdm::offset(), end - start, Mm::Vmm::NO_EXECUTE);
 
       Drivers::Console::write("modules: ");
       writeText((*file).string);

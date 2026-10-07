@@ -70,7 +70,7 @@ record PmmState {
 
 /// The frame allocator API. Frames are identified by their physical address,
 /// which is always a multiple of `FRAME_SIZE`.
-export namespace Pmm {
+namespace Mm::Pmm {
   /// Size of a frame: 4 KiB, the smallest page the page tables map.
   const FRAME_SIZE: u64 = 4096;
 

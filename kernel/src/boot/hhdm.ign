@@ -17,7 +17,7 @@
 //!
 //! The kernel's own page tables (`vmm.ign`) rebuild the same mapping with the
 //! same offset, so pointers made here stay valid across the CR3 switch in
-//! `Vmm::initialize`. The kernel uses it to edit page tables, read ACPI
+//! `Mm::Vmm::initialize`. The kernel uses it to edit page tables, read ACPI
 //! tables, touch memory-mapped device registers and hand out physical frames
 //! as ordinary pointers. See concept doc 09.
 

@@ -22,7 +22,7 @@
 //! it enables the keyboard.
 
 import Drivers from "@drivers";
-import Pmm from "./pmm";
+import Mm from "@mm";
 import Process from "./process";
 import Programs from "./programs";
 import Timer from "./timer";
@@ -132,7 +132,7 @@ export namespace UserTest {
   /// checks that each one is killed with the status of the matching signal,
   /// that the kernel is still running afterwards and that no frame leaked.
   function runIsolation(): void {
-    let freeBefore: u64 = Pmm::freeFrameCount();
+    let freeBefore: u64 = Mm::Pmm::freeFrameCount();
 
     expectKilled(NULL_WRITE, KILLED_BY_SEGV);
     expectKilled(HLT, KILLED_BY_SEGV);
@@ -144,7 +144,7 @@ export namespace UserTest {
     expectKilled(STACK_JUMP, KILLED_BY_SEGV);
     expectKilled(DIVIDE, KILLED_BY_FPE);
 
-    if (Pmm::freeFrameCount() != freeBefore) {
+    if (Mm::Pmm::freeFrameCount() != freeBefore) {
       @panic("user test: killed processes leaked frames");
     }
 

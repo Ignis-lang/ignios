@@ -30,7 +30,7 @@
 //! restores its own state, not the state of the thread that ran before.
 //!
 //! A thread may own an address space, the physical address of a PML4 made by
-//! `AddressSpace::create`. Every switch loads the incoming thread's PML4, or
+//! `Mm::AddressSpace::create`. Every switch loads the incoming thread's PML4, or
 //! the kernel's when it owns none, and points TSS.RSP0 and the `SYSCALL`
 //! stack slot at the incoming thread's kernel stack, so an interrupt or a
 //! system call from ring 3 lands on it. The thread's end destroys the space
@@ -98,10 +98,8 @@
 //! See concept doc 13.
 
 import Arch from "@arch";
-import AddressSpace from "./address_space";
-import Pmm from "./pmm";
+import Mm from "@mm";
 import Timer from "./timer";
-import Vmm from "./vmm";
 
 /// One entry of the thread table.
 @cLayout
@@ -306,7 +304,7 @@ export namespace Scheduler {
 
     if (slot == NO_THREAD || !createThread(slot, entry, argument, root)) {
       if (root != 0) {
-        AddressSpace::destroy(root);
+        Mm::AddressSpace::destroy(root);
       }
 
       Arch::Cpu::restoreInterrupts(saved);
@@ -525,11 +523,11 @@ export namespace Scheduler {
     let mut page: u64 = 1;
 
     while (page <= STACK_PAGES) {
-      let frame: u64 = Pmm::allocateFrame();
+      let frame: u64 = Mm::Pmm::allocateFrame();
 
-      if (frame == Pmm::NO_FRAME || !Vmm::map(base + page * PAGE_SIZE, frame, Vmm::WRITABLE | Vmm::NO_EXECUTE)) {
-        if (frame != Pmm::NO_FRAME) {
-          Pmm::freeFrame(frame);
+      if (frame == Mm::Pmm::NO_FRAME || !Mm::Vmm::map(base + page * PAGE_SIZE, frame, Mm::Vmm::WRITABLE | Mm::Vmm::NO_EXECUTE)) {
+        if (frame != Mm::Pmm::NO_FRAME) {
+          Mm::Pmm::freeFrame(frame);
         }
 
         unmapStack(base, page - 1);
@@ -549,10 +547,10 @@ export namespace Scheduler {
 
     while (page <= pages) {
       let address: u64 = base + page * PAGE_SIZE;
-      let frame: u64 = Vmm::translate(address);
+      let frame: u64 = Mm::Vmm::translate(address);
 
-      Vmm::unmap(address);
-      Pmm::freeFrame(frame);
+      Mm::Vmm::unmap(address);
+      Mm::Pmm::freeFrame(frame);
       page += 1;
     }
   }
@@ -573,7 +571,7 @@ export namespace Scheduler {
     unmapStack((*thread).stackBase, STACK_PAGES);
 
     if ((*thread).root != 0) {
-      AddressSpace::destroy((*thread).root);
+      Mm::AddressSpace::destroy((*thread).root);
       (*thread).root = 0;
     }
 
@@ -587,7 +585,7 @@ export namespace Scheduler {
     let mut root: u64 = (*thread).root;
 
     if (root == 0) {
-      root = Vmm::rootTable();
+      root = Mm::Vmm::rootTable();
     } else {
       Arch::UserMode::setKernelStack((*thread).stackBase + STACK_SPAN);
     }

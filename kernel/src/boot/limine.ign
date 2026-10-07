@@ -43,7 +43,7 @@
 //! | Framebuffer        | `Drivers::Console::initialize`, `Vmm`             | pixel buffer address and format    |
 //! | Memory map         | `Pmm`, `Vmm`                             | list of physical memory regions    |
 //! | HHDM               | `Hhdm`                                   | virtual offset of physical memory  |
-//! | Executable address | `Vmm::mapKernelImage`                    | physical and virtual kernel base   |
+//! | Executable address | `Mm::Vmm::mapKernelImage`                    | physical and virtual kernel base   |
 //! | Modules            | `Modules`                                | files listed in `boot/limine.conf` |
 //! | RSDP               | `Acpi`                                   | physical/direct-map address of ACPI|
 //!

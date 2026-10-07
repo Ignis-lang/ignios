@@ -120,7 +120,7 @@
 import Arch from "@arch";
 import Boot from "@boot";
 import Lib from "@lib";
-import Pmm from "./pmm";
+import _ from "./pmm";
 
 /// The one piece of VMM state: the physical address of the kernel PML4.
 record VmmState {
@@ -152,7 +152,7 @@ extern LinkerSymbols {
 
 /// The virtual memory API. The `*In` variants take the physical address of the
 /// PML4 to operate on, the others use the kernel's.
-export namespace Vmm {
+namespace Mm::Vmm {
   /// 4 KiB, the size of a normal page and of a page table.
   const PAGE_SIZE: u64 = 4096;
 
@@ -462,9 +462,9 @@ export namespace Vmm {
   /// Maps and unmaps a fresh frame and checks that `translate` and the
   /// mappings agree with the direct map. Panics on the first violation.
   function selfTest(): void {
-    let frame: u64 = Pmm::allocateFrame();
+    let frame: u64 = Mm::Pmm::allocateFrame();
 
-    if (frame == Pmm::NO_FRAME) {
+    if (frame == Mm::Pmm::NO_FRAME) {
       @panic("vmm self-test: no frame");
     }
 
@@ -497,7 +497,7 @@ export namespace Vmm {
       @panic("vmm self-test: unmap failed");
     }
 
-    Pmm::freeFrame(frame);
+    Mm::Pmm::freeFrame(frame);
   }
 
   /// Maps text, rodata and data plus bss at the addresses Limine loaded the
@@ -715,9 +715,9 @@ export namespace Vmm {
 
   /// A zeroed frame for a page table.
   function allocateTable(): u64 {
-    let frame: u64 = Pmm::allocateFrame();
+    let frame: u64 = Mm::Pmm::allocateFrame();
 
-    if (frame == Pmm::NO_FRAME) {
+    if (frame == Mm::Pmm::NO_FRAME) {
       @panic("vmm: out of frames for page tables");
     }
 

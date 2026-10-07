@@ -139,7 +139,7 @@ namespace Arch::Cpu {
     return asm () -> (value: u64 in rax) { mov {value}, cr0 };
   }
 
-  /// Writes control register 0. `Vmm::initialize` uses it to set WP (bit 16).
+  /// Writes control register 0. `Mm::Vmm::initialize` uses it to set WP (bit 16).
   function writeCr0(value: u64): void {
     asm (value in rax) clobber(memory) { mov cr0, {value} }
   }

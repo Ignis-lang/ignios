@@ -18,11 +18,9 @@
 
 import Arch from "@arch";
 import Boot from "@boot";
-import AddressSpace from "./address_space";
-import Pmm from "./pmm";
+import Mm from "@mm";
 import Scheduler from "./scheduler";
 import Timer from "./timer";
-import Vmm from "./vmm";
 
 /// Results the test threads report back to the boot thread.
 record SchedulerTestState {
@@ -94,17 +92,17 @@ export namespace SchedulerTest {
   /// are left as they were found.
   function runAddressSpaces(): void {
     let saved: u64 = Arch::Cpu::saveAndDisableInterrupts();
-    let freeBefore: u64 = Pmm::freeFrameCount();
+    let freeBefore: u64 = Mm::Pmm::freeFrameCount();
     let mut ids: u64[2];
     let mut index: u64 = 0;
 
     while (index < 2) {
       SchedulerTestState::spaceReads[index] = 0;
 
-      let root: u64 = AddressSpace::create();
-      let frame: u64 = AddressSpace::allocatePage(root, SPACE_ADDRESS, Vmm::WRITABLE | Vmm::NO_EXECUTE);
+      let root: u64 = Mm::AddressSpace::create();
+      let frame: u64 = Mm::AddressSpace::allocatePage(root, SPACE_ADDRESS, Mm::Vmm::WRITABLE | Mm::Vmm::NO_EXECUTE);
 
-      if (root == Pmm::NO_FRAME || frame == Pmm::NO_FRAME) {
+      if (root == Mm::Pmm::NO_FRAME || frame == Mm::Pmm::NO_FRAME) {
         @panic("address space switch self-test: no memory");
       }
 
@@ -125,11 +123,11 @@ export namespace SchedulerTest {
       @panic("address space switch self-test: a thread saw another thread's page");
     }
 
-    if (Arch::Cpu::readCr3() != Vmm::rootTable()) {
+    if (Arch::Cpu::readCr3() != Mm::Vmm::rootTable()) {
       @panic("address space switch self-test: CR3 is not back on the kernel space");
     }
 
-    if (Pmm::freeFrameCount() != freeBefore) {
+    if (Mm::Pmm::freeFrameCount() != freeBefore) {
       @panic("address space switch self-test: an address space leaked frames");
     }
 

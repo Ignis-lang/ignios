@@ -65,7 +65,7 @@
 //! Controller (APIC)".
 
 import Arch from "@arch";
-import Vmm from "../vmm";
+import Mm from "@mm";
 
 /// The local APIC API. All register access is volatile MMIO.
 namespace Apic::Lapic {
@@ -155,9 +155,9 @@ namespace Apic::Lapic {
       @panic("lapic: x2APIC mode is not supported");
     }
 
-    let flags: u64 = Vmm::WRITABLE | Vmm::NO_EXECUTE | Vmm::UNCACHED;
+    let flags: u64 = Mm::Vmm::WRITABLE | Mm::Vmm::NO_EXECUTE | Mm::Vmm::UNCACHED;
 
-    if (!Vmm::map(MAPPING, base & APIC_BASE_ADDRESS_MASK, flags)) {
+    if (!Mm::Vmm::map(MAPPING, base & APIC_BASE_ADDRESS_MASK, flags)) {
       @panic("lapic: cannot map the APIC page");
     }
 

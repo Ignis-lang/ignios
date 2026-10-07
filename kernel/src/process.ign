@@ -23,7 +23,7 @@
 //! ```text
 //!   Programs::run("hello")
 //!     └─ Process::startElf(image)
-//!          ├─ AddressSpace::create            new PML4, kernel half shared
+//!          ├─ Mm::AddressSpace::create            new PML4, kernel half shared
 //!          ├─ Elf::load                       map and fill PT_LOAD segments
 //!          ├─ mapStack                        8 zeroed no-execute pages
 //!          └─ launch
@@ -46,7 +46,7 @@
 //!   0x0000000000400000  program segments (text r-x, rodata r--, data rw-)
 //!   0x00007FFFFFFF7000  ┐
 //!                       │ stack: 8 pages, read/write, no-execute, zeroed
-//!   0x00007FFFFFFFF000  ┘ STACK_TOP = AddressSpace::USER_LIMIT, the first
+//!   0x00007FFFFFFFF000  ┘ STACK_TOP = Mm::AddressSpace::USER_LIMIT, the first
 //!                         byte past the stack and the page that stays unmapped
 //!   initial RSP = STACK_TOP - 8, as if a `call` had just pushed a return
 //!   address, so the System V ABI alignment holds at the first instruction
@@ -58,11 +58,9 @@ import Arch from "@arch";
 import Boot from "@boot";
 import Drivers from "@drivers";
 import Lib from "@lib";
-import AddressSpace from "./address_space";
+import Mm from "@mm";
 import Elf, LoadedImage from "./elf";
-import Pmm from "./pmm";
 import Scheduler from "./scheduler";
-import Vmm from "./vmm";
 
 /// One entry of the process table.
 @cLayout
@@ -129,9 +127,9 @@ export namespace Process {
   /// the unmapped last page, so running off its bottom faults.
   const STACK_PAGES: u64 = 8;
 
-  /// The first address past the user stack: `AddressSpace::USER_LIMIT`. The
+  /// The first address past the user stack: `Mm::AddressSpace::USER_LIMIT`. The
   /// stack grows down from here and the page at this address stays unmapped.
-  const STACK_TOP: u64 = AddressSpace::USER_LIMIT;
+  const STACK_TOP: u64 = Mm::AddressSpace::USER_LIMIT;
 
   /// Process ids start at 1.
   function initialize(): void {
@@ -146,16 +144,16 @@ export namespace Process {
       return NO_PROCESS;
     }
 
-    let root: u64 = AddressSpace::create();
+    let root: u64 = Mm::AddressSpace::create();
 
-    if (root == Pmm::NO_FRAME) {
+    if (root == Mm::Pmm::NO_FRAME) {
       return NO_PROCESS;
     }
 
-    let frame: u64 = AddressSpace::allocatePage(root, CODE_BASE, 0);
+    let frame: u64 = Mm::AddressSpace::allocatePage(root, CODE_BASE, 0);
 
-    if (frame == Pmm::NO_FRAME || !mapStack(root)) {
-      AddressSpace::destroy(root);
+    if (frame == Mm::Pmm::NO_FRAME || !mapStack(root)) {
+      Mm::AddressSpace::destroy(root);
       return NO_PROCESS;
     }
 
@@ -168,9 +166,9 @@ export namespace Process {
   /// and a fresh stack. Prints what the loader mapped, or why it refused the
   /// file. Returns the process id, or `NO_PROCESS`.
   function startElf(image: *u8, size: u64): u64 {
-    let root: u64 = AddressSpace::create();
+    let root: u64 = Mm::AddressSpace::create();
 
-    if (root == Pmm::NO_FRAME) {
+    if (root == Mm::Pmm::NO_FRAME) {
       return NO_PROCESS;
     }
 
@@ -180,13 +178,13 @@ export namespace Process {
     if (error != Elf::OK) {
       Drivers::Console::write("elf: ");
       Drivers::Console::writeLine(Elf::describe(error));
-      AddressSpace::destroy(root);
+      Mm::AddressSpace::destroy(root);
       return NO_PROCESS;
     }
 
     if (!mapStack(root)) {
       Drivers::Console::writeLine("elf: out of memory for the stack");
-      AddressSpace::destroy(root);
+      Mm::AddressSpace::destroy(root);
       return NO_PROCESS;
     }
 
@@ -211,7 +209,7 @@ export namespace Process {
     while (page <= STACK_PAGES) {
       let address: u64 = STACK_TOP - page * PAGE_SIZE;
 
-      if (AddressSpace::allocatePage(root, address, Vmm::WRITABLE | Vmm::NO_EXECUTE) == Pmm::NO_FRAME) {
+      if (Mm::AddressSpace::allocatePage(root, address, Mm::Vmm::WRITABLE | Mm::Vmm::NO_EXECUTE) == Mm::Pmm::NO_FRAME) {
         return false;
       }
 
@@ -233,7 +231,7 @@ export namespace Process {
     let slot: u64 = findFreeSlot();
 
     if (slot == NO_PROCESS) {
-      AddressSpace::destroy(root);
+      Mm::AddressSpace::destroy(root);
       Arch::Cpu::restoreInterrupts(saved);
       return NO_PROCESS;
     }

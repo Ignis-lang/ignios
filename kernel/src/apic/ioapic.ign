@@ -60,8 +60,8 @@
 //!
 //! See concept doc 12 and the OSDev wiki page "IOAPIC".
 
+import Mm from "@mm";
 import Acpi from "../acpi";
-import Vmm from "../vmm";
 import _ from "./lapic";
 
 /// Per-chip data read once at start-up.
@@ -123,9 +123,9 @@ namespace Apic::Ioapic {
     let mut index: u64 = 0;
 
     while (index < count) {
-      let flags: u64 = Vmm::WRITABLE | Vmm::NO_EXECUTE | Vmm::UNCACHED;
+      let flags: u64 = Mm::Vmm::WRITABLE | Mm::Vmm::NO_EXECUTE | Mm::Vmm::UNCACHED;
 
-      if (!Vmm::map(pageOf(index), Acpi::ioapicAddress(index), flags)) {
+      if (!Mm::Vmm::map(pageOf(index), Acpi::ioapicAddress(index), flags)) {
         @panic("ioapic: cannot map an IOAPIC page");
       }
 

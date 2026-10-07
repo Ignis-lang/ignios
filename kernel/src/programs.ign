@@ -10,13 +10,13 @@
 //!
 //! ```text
 //!   Programs::run(name, length)
-//!     ├─ Modules::find            match the module string
+//!     ├─ Mm::Modules::find            match the module string
 //!     ├─ Process::startElf        build the address space, load, launch
 //!     └─ Process::wait            sleep until the process ended, return its status
 //! ```
 
 import Drivers from "@drivers";
-import Modules from "./modules";
+import Mm from "@mm";
 import Process from "./process";
 
 /// The program API.
@@ -25,9 +25,9 @@ export namespace Programs {
   /// `name`, waits for the process and returns its exit status. Returns
   /// `Process::NO_PROCESS` after printing why when no process ran.
   function run(name: *u8, length: u64): u64 {
-    let index: u64 = Modules::find(name, length);
+    let index: u64 = Mm::Modules::find(name, length);
 
-    if (index == Modules::NOT_FOUND) {
+    if (index == Mm::Modules::NOT_FOUND) {
       Drivers::Console::write("run: no program named ");
 
       let mut position: u64 = 0;
@@ -42,7 +42,7 @@ export namespace Programs {
       return Process::NO_PROCESS;
     }
 
-    let id: u64 = Process::startElf(Modules::address(index), Modules::size(index));
+    let id: u64 = Process::startElf(Mm::Modules::address(index), Mm::Modules::size(index));
 
     if (id == Process::NO_PROCESS) {
       return Process::NO_PROCESS;

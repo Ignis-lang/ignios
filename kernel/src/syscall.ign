@@ -19,7 +19,7 @@
 //! `OP_NONE` and fails with `-ENOSYS`.
 //!
 //! Every pointer a process passes is checked before the kernel touches it,
-//! and never dereferenced directly: `AddressSpace::copyFromUser` and
+//! and never dereferenced directly: `Mm::AddressSpace::copyFromUser` and
 //! `copyToUser` walk the process's page tables and refuse a range that
 //! leaves the user half or crosses a page that is not mapped, not user
 //! accessible, or, for a write, not writable. A refused range is `-EFAULT`.
@@ -63,7 +63,7 @@
 //! doc 15.
 
 import Drivers from "@drivers";
-import AddressSpace from "./address_space";
+import Mm from "@mm";
 import Process from "./process";
 import Scheduler from "./scheduler";
 import Timer from "./timer";
@@ -219,7 +219,7 @@ export namespace Syscall {
     let root: u64 = Process::currentRoot();
     let chunk: *mut u8 = &mut SyscallState::copyBuffer as *mut u8;
 
-    if (!AddressSpace::isAccessible(root, buffer, total, false)) {
+    if (!Mm::AddressSpace::isAccessible(root, buffer, total, false)) {
       return failure(EFAULT);
     }
 
@@ -228,7 +228,7 @@ export namespace Syscall {
     while (done < total) {
       let piece: u64 = total - done < COPY_BUFFER_SIZE ? total - done : COPY_BUFFER_SIZE;
 
-      if (!AddressSpace::copyFromUser(root, chunk, buffer + done, piece)) {
+      if (!Mm::AddressSpace::copyFromUser(root, chunk, buffer + done, piece)) {
         return failure(EFAULT);
       }
 
@@ -252,7 +252,7 @@ export namespace Syscall {
     let root: u64 = Process::currentRoot();
     let mut time: Timespec = Timespec { seconds: 0, nanoseconds: 0 };
 
-    if (!AddressSpace::copyFromUser(root, &mut time as *mut u8, request, 16)) {
+    if (!Mm::AddressSpace::copyFromUser(root, &mut time as *mut u8, request, 16)) {
       return failure(EFAULT);
     }
 
@@ -273,7 +273,7 @@ export namespace Syscall {
     if (remaining != 0) {
       let zero: Timespec = Timespec { seconds: 0, nanoseconds: 0 };
 
-      if (!AddressSpace::copyToUser(root, remaining, &zero as *u8, 16)) {
+      if (!Mm::AddressSpace::copyToUser(root, remaining, &zero as *u8, 16)) {
         return failure(EFAULT);
       }
     }

@@ -75,8 +75,8 @@
 //! See concept doc 10.
 
 import Arch from "@arch";
-import Pmm from "./pmm";
-import Vmm from "./vmm";
+import _ from "./pmm";
+import _ from "./vmm";
 
 /// Heap state, touched only with interrupts disabled.
 record HeapState {
@@ -93,7 +93,7 @@ record HeapState {
 
 /// The heap API. `allocate` and `free` are the only entry points the rest of
 /// the kernel needs.
-export namespace Heap {
+namespace Mm::Heap {
   /// Start of the heap, in its own top-level slot away from the direct map.
   const BASE: u64 = 0xFFFFC00000000000;
 
@@ -127,7 +127,7 @@ export namespace Heap {
 
   /// Prepares an empty heap. Nothing is mapped until the first allocation.
   function initialize(): void {
-    if (Vmm::translate(BASE) != Vmm::NOT_MAPPED) {
+    if (Mm::Vmm::translate(BASE) != Mm::Vmm::NOT_MAPPED) {
       @panic("heap: the heap base is already mapped");
     }
 
@@ -451,13 +451,13 @@ export namespace Heap {
     let mut mapped: u64 = 0;
 
     while (mapped < pages) {
-      let frame: u64 = Pmm::allocateFrame();
+      let frame: u64 = Mm::Pmm::allocateFrame();
 
-      if (frame == Pmm::NO_FRAME) {
+      if (frame == Mm::Pmm::NO_FRAME) {
         break;
       }
 
-      if (!Vmm::map(HeapState::mappedEnd, frame, Vmm::WRITABLE | Vmm::NO_EXECUTE)) {
+      if (!Mm::Vmm::map(HeapState::mappedEnd, frame, Mm::Vmm::WRITABLE | Mm::Vmm::NO_EXECUTE)) {
         @panic("heap: a heap page was already mapped");
       }
 
@@ -556,7 +556,7 @@ export namespace Heap {
 /// way to handle a null result.
 @allocHandler
 function onAllocate(size: u64, align: u64): *mut u8 {
-  let pointer: *mut u8 = Heap::allocate(size, align);
+  let pointer: *mut u8 = Mm::Heap::allocate(size, align);
 
   if (pointer == null) {
     @panic("heap: out of memory");
@@ -568,5 +568,5 @@ function onAllocate(size: u64, align: u64): *mut u8 {
 /// The compiler's release hook, the counterpart of `onAllocate`.
 @freeHandler
 function onFree(pointer: *mut u8): void {
-  Heap::free(pointer);
+  Mm::Heap::free(pointer);
 }

@@ -14,7 +14,7 @@
 //! writable when the segment has `PF_W` and executable when it has `PF_X`; a
 //! segment with both is refused, so no user page is ever writable and
 //! executable at once. Two segments may not share a page, and nothing may be
-//! mapped below one page or at or above `AddressSpace::USER_LIMIT`.
+//! mapped below one page or at or above `Mm::AddressSpace::USER_LIMIT`.
 //!
 //! The loader trusts nothing in the file: every offset, size and address is
 //! checked against the file size and the user range before it is used, with
@@ -74,9 +74,7 @@
 //! See concept doc 15 and the System V ABI, "ELF-64 Object File Format".
 
 import Drivers from "@drivers";
-import AddressSpace from "./address_space";
-import Pmm from "./pmm";
-import Vmm from "./vmm";
+import Mm from "@mm";
 
 /// `Elf64_Ehdr`, 64 bytes. The field names follow the Ignis convention; each
 /// matches the `e_*` field of the same meaning.
@@ -353,7 +351,7 @@ export namespace Elf {
     let offset: u64 = (*segment).offset;
     let flags: u32 = (*segment).flags;
 
-    if (memorySize == 0 || address < PAGE_SIZE || !AddressSpace::isUserRange(address, memorySize)) {
+    if (memorySize == 0 || address < PAGE_SIZE || !Mm::AddressSpace::isUserRange(address, memorySize)) {
       return ERR_SEGMENT_RANGE;
     }
 
@@ -368,11 +366,11 @@ export namespace Elf {
     let mut pageFlags: u64 = 0;
 
     if ((flags & FLAG_WRITE) != 0) {
-      pageFlags = Vmm::WRITABLE;
+      pageFlags = Mm::Vmm::WRITABLE;
     }
 
     if ((flags & FLAG_EXECUTE) == 0) {
-      pageFlags = pageFlags | Vmm::NO_EXECUTE;
+      pageFlags = pageFlags | Mm::Vmm::NO_EXECUTE;
     }
 
     let first: u64 = address / PAGE_SIZE * PAGE_SIZE;
@@ -381,18 +379,18 @@ export namespace Elf {
     let mut page: u64 = first;
 
     while (page < end) {
-      if (Vmm::translateIn(root, page) != Vmm::NOT_MAPPED) {
+      if (Mm::Vmm::translateIn(root, page) != Mm::Vmm::NOT_MAPPED) {
         return ERR_OVERLAP;
       }
 
-      if (AddressSpace::allocatePage(root, page, pageFlags) == Pmm::NO_FRAME) {
+      if (Mm::AddressSpace::allocatePage(root, page, pageFlags) == Mm::Pmm::NO_FRAME) {
         return ERR_MEMORY;
       }
 
       page += PAGE_SIZE;
     }
 
-    if (!AddressSpace::loadBytes(root, address, image + offset, fileSize)) {
+    if (!Mm::AddressSpace::loadBytes(root, address, image + offset, fileSize)) {
       return ERR_SEGMENT_FILE;
     }
 
@@ -415,13 +413,13 @@ export namespace Elf {
 
   /// The entry point must sit in a mapped, user accessible, executable page.
   function checkEntry(root: u64, entry: u64): u64 {
-    if (!AddressSpace::isUserRange(entry, 1)) {
+    if (!Mm::AddressSpace::isUserRange(entry, 1)) {
       return ERR_ENTRY;
     }
 
-    let leaf: u64 = Vmm::leafEntryIn(root, entry);
+    let leaf: u64 = Mm::Vmm::leafEntryIn(root, entry);
 
-    if ((leaf & Vmm::PRESENT) == 0 || (leaf & Vmm::USER) == 0 || (leaf & Vmm::NO_EXECUTE) != 0) {
+    if ((leaf & Mm::Vmm::PRESENT) == 0 || (leaf & Mm::Vmm::USER) == 0 || (leaf & Mm::Vmm::NO_EXECUTE) != 0) {
       return ERR_ENTRY;
     }
 

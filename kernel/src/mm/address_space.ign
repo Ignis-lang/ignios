@@ -10,14 +10,14 @@
 //! `USER_LIMIT`) is private: only the process's own pages are mapped there,
 //! all with the U/S bit set. The upper half (entries 256 to 511) is the
 //! kernel's: `create` copies those 256 entries from the kernel PML4, and
-//! `Vmm::initialize` already gave every one of them a page directory pointer
+//! `Mm::Vmm::initialize` already gave every one of them a page directory pointer
 //! table, so the copies point at the same tables for good. A kernel mapping
 //! made after a space was created appears in that space too, and the kernel
 //! code, the direct map and every kernel stack stay reachable after a CR3
 //! load.
 //!
 //! ```text
-//!   kernel PML4 (Vmm::rootTable)              process PML4 (AddressSpace::create)
+//!   kernel PML4 (Mm::Vmm::rootTable)              process PML4 (Mm::AddressSpace::create)
 //!   ┌────────────────────────────┐            ┌────────────────────────────┐
 //!   │ 0..255   empty             │            │ 0..255   private, starts   │
 //!   │                            │            │          empty, filled by  │
@@ -55,12 +55,12 @@
 import Arch from "@arch";
 import Boot from "@boot";
 import Lib from "@lib";
-import Pmm from "./pmm";
-import Vmm from "./vmm";
+import _ from "./pmm";
+import _ from "./vmm";
 
 /// The address space API. A space is identified by the physical address of
 /// its PML4, which every function here takes as `root`.
-export namespace AddressSpace {
+namespace Mm::AddressSpace {
   /// 4 KiB.
   const PAGE_SIZE: u64 = 4096;
 
@@ -97,17 +97,17 @@ export namespace AddressSpace {
   const SELF_TEST_KERNEL_MARKER: u64 = 0xCCCC0000CCCC0003;
 
   /// Makes an empty address space whose upper half is the kernel's. Returns
-  /// the physical address of its PML4, or `Pmm::NO_FRAME` when no frame is
+  /// the physical address of its PML4, or `Mm::Pmm::NO_FRAME` when no frame is
   /// left.
   function create(): u64 {
-    let root: u64 = Pmm::allocateFrame();
+    let root: u64 = Mm::Pmm::allocateFrame();
 
-    if (root == Pmm::NO_FRAME) {
-      return Pmm::NO_FRAME;
+    if (root == Mm::Pmm::NO_FRAME) {
+      return Mm::Pmm::NO_FRAME;
     }
 
-    let table: *mut u64 = Vmm::tableAt(root) as *mut u64;
-    let kernelTable: *mut u64 = Vmm::tableAt(Vmm::rootTable()) as *mut u64;
+    let table: *mut u64 = Mm::Vmm::tableAt(root) as *mut u64;
+    let kernelTable: *mut u64 = Mm::Vmm::tableAt(Mm::Vmm::rootTable()) as *mut u64;
 
     Lib::Mem::fill(table as *mut u8, 0, USER_HALF_ENTRIES * 8);
     Lib::Mem::copy((table + USER_HALF_ENTRIES) as *mut u8, (kernelTable + USER_HALF_ENTRIES) as *u8, USER_HALF_ENTRIES * 8);
@@ -122,20 +122,20 @@ export namespace AddressSpace {
       @panic("address space: destroying the active space");
     }
 
-    let pml4: *mut u64 = Vmm::tableAt(root) as *mut u64;
+    let pml4: *mut u64 = Mm::Vmm::tableAt(root) as *mut u64;
     let mut index: u64 = 0;
 
     while (index < USER_HALF_ENTRIES) {
       let entry: u64 = *(pml4 + index);
 
-      if ((entry & Vmm::PRESENT) != 0) {
-        freeLevel(entry & Vmm::ADDRESS_MASK, 3);
+      if ((entry & Mm::Vmm::PRESENT) != 0) {
+        freeLevel(entry & Mm::Vmm::ADDRESS_MASK, 3);
       }
 
       index += 1;
     }
 
-    Pmm::freeFrame(root);
+    Mm::Pmm::freeFrame(root);
   }
 
   /// Loads the space into CR3.
@@ -151,24 +151,24 @@ export namespace AddressSpace {
       return false;
     }
 
-    return Vmm::mapIn(root, virtualAddress, frame, flags | Vmm::USER);
+    return Mm::Vmm::mapIn(root, virtualAddress, frame, flags | Mm::Vmm::USER);
   }
 
   /// Maps a new zeroed frame at `virtualAddress` and returns it, or
-  /// `Pmm::NO_FRAME` when no frame is left or the address cannot be mapped.
+  /// `Mm::Pmm::NO_FRAME` when no frame is left or the address cannot be mapped.
   /// The space owns the frame from then on.
   function allocatePage(root: u64, virtualAddress: u64, flags: u64): u64 {
-    let frame: u64 = Pmm::allocateFrame();
+    let frame: u64 = Mm::Pmm::allocateFrame();
 
-    if (frame == Pmm::NO_FRAME) {
-      return Pmm::NO_FRAME;
+    if (frame == Mm::Pmm::NO_FRAME) {
+      return Mm::Pmm::NO_FRAME;
     }
 
     Lib::Mem::fill(Boot::Hhdm::toVirtual(frame), 0, PAGE_SIZE);
 
     if (!mapPage(root, virtualAddress, frame, flags)) {
-      Pmm::freeFrame(frame);
-      return Pmm::NO_FRAME;
+      Mm::Pmm::freeFrame(frame);
+      return Mm::Pmm::NO_FRAME;
     }
 
     return frame;
@@ -191,17 +191,17 @@ export namespace AddressSpace {
       return NOT_MAPPED;
     }
 
-    let entry: u64 = Vmm::leafEntryIn(root, virtualAddress);
+    let entry: u64 = Mm::Vmm::leafEntryIn(root, virtualAddress);
 
-    if ((entry & Vmm::PRESENT) == 0 || (entry & Vmm::USER) == 0) {
+    if ((entry & Mm::Vmm::PRESENT) == 0 || (entry & Mm::Vmm::USER) == 0) {
       return NOT_MAPPED;
     }
 
-    if (forWrite && (entry & Vmm::WRITABLE) == 0) {
+    if (forWrite && (entry & Mm::Vmm::WRITABLE) == 0) {
       return NOT_MAPPED;
     }
 
-    return (entry & Vmm::ADDRESS_MASK) | (virtualAddress & (PAGE_SIZE - 1));
+    return (entry & Mm::Vmm::ADDRESS_MASK) | (virtualAddress & (PAGE_SIZE - 1));
   }
 
   /// True when every page of the byte range is user accessible, and
@@ -292,9 +292,9 @@ export namespace AddressSpace {
     let mut done: u64 = 0;
 
     while (done < length) {
-      let physical: u64 = Vmm::translateIn(root, destination + done);
+      let physical: u64 = Mm::Vmm::translateIn(root, destination + done);
 
-      if (physical == Vmm::NOT_MAPPED) {
+      if (physical == Mm::Vmm::NOT_MAPPED) {
         return false;
       }
 
@@ -313,13 +313,13 @@ export namespace AddressSpace {
   /// Panics on the first violation. Interrupts are left as they were found.
   function selfTest(): void {
     let saved: u64 = Arch::Cpu::saveAndDisableInterrupts();
-    let freeBefore: u64 = Pmm::freeFrameCount();
-    let kernelRoot: u64 = Vmm::rootTable();
+    let freeBefore: u64 = Mm::Pmm::freeFrameCount();
+    let kernelRoot: u64 = Mm::Vmm::rootTable();
 
     let first: u64 = create();
     let second: u64 = create();
 
-    if (first == Pmm::NO_FRAME || second == Pmm::NO_FRAME || first == second || first == kernelRoot) {
+    if (first == Mm::Pmm::NO_FRAME || second == Mm::Pmm::NO_FRAME || first == second || first == kernelRoot) {
       @panic("address space self-test: bad PML4");
     }
 
@@ -330,7 +330,7 @@ export namespace AddressSpace {
     destroy(first);
     destroy(second);
 
-    if (Pmm::freeFrameCount() != freeBefore) {
+    if (Mm::Pmm::freeFrameCount() != freeBefore) {
       @panic("address space self-test: destroy leaked frames");
     }
 
@@ -340,9 +340,9 @@ export namespace AddressSpace {
   /// The two spaces start with the kernel's upper-half entries and nothing
   /// below.
   function testSharedHalf(first: u64, second: u64, kernelRoot: u64): void {
-    let kernel: *mut u64 = Vmm::tableAt(kernelRoot) as *mut u64;
-    let one: *mut u64 = Vmm::tableAt(first) as *mut u64;
-    let two: *mut u64 = Vmm::tableAt(second) as *mut u64;
+    let kernel: *mut u64 = Mm::Vmm::tableAt(kernelRoot) as *mut u64;
+    let one: *mut u64 = Mm::Vmm::tableAt(first) as *mut u64;
+    let two: *mut u64 = Mm::Vmm::tableAt(second) as *mut u64;
 
     let mut index: u64 = 0;
 
@@ -362,43 +362,43 @@ export namespace AddressSpace {
   /// The same user address maps to different frames in the two spaces, with
   /// the U/S bit, and nothing leaks into the other space or the kernel's.
   function testPrivateHalf(first: u64, second: u64, kernelRoot: u64): void {
-    let flags: u64 = Vmm::WRITABLE | Vmm::NO_EXECUTE;
+    let flags: u64 = Mm::Vmm::WRITABLE | Mm::Vmm::NO_EXECUTE;
 
     let frameA: u64 = allocatePage(first, SELF_TEST_ADDRESS, flags);
     let frameB: u64 = allocatePage(second, SELF_TEST_ADDRESS, flags);
     let extra: u64 = allocatePage(first, SELF_TEST_SECOND_ADDRESS, flags);
 
-    if (frameA == Pmm::NO_FRAME || frameB == Pmm::NO_FRAME || extra == Pmm::NO_FRAME || frameA == frameB) {
+    if (frameA == Mm::Pmm::NO_FRAME || frameB == Mm::Pmm::NO_FRAME || extra == Mm::Pmm::NO_FRAME || frameA == frameB) {
       @panic("address space self-test: no distinct frames");
     }
 
     *(Boot::Hhdm::toVirtual(frameA) as *mut u64) = SELF_TEST_MARKER_A;
     *(Boot::Hhdm::toVirtual(frameB) as *mut u64) = SELF_TEST_MARKER_B;
 
-    if (Vmm::translateIn(first, SELF_TEST_ADDRESS) != frameA || Vmm::translateIn(second, SELF_TEST_ADDRESS) != frameB) {
+    if (Mm::Vmm::translateIn(first, SELF_TEST_ADDRESS) != frameA || Mm::Vmm::translateIn(second, SELF_TEST_ADDRESS) != frameB) {
       @panic("address space self-test: a page maps to the wrong frame");
     }
 
-    if (Vmm::translateIn(kernelRoot, SELF_TEST_ADDRESS) != Vmm::NOT_MAPPED) {
+    if (Mm::Vmm::translateIn(kernelRoot, SELF_TEST_ADDRESS) != Mm::Vmm::NOT_MAPPED) {
       @panic("address space self-test: a user page leaked into the kernel space");
     }
 
-    if (Vmm::translateIn(second, SELF_TEST_SECOND_ADDRESS) != Vmm::NOT_MAPPED) {
+    if (Mm::Vmm::translateIn(second, SELF_TEST_SECOND_ADDRESS) != Mm::Vmm::NOT_MAPPED) {
       @panic("address space self-test: a user page leaked into another space");
     }
 
-    let entry: u64 = Vmm::leafEntryIn(first, SELF_TEST_ADDRESS);
-    let top: u64 = *(Vmm::tableAt(first) as *mut u64);
+    let entry: u64 = Mm::Vmm::leafEntryIn(first, SELF_TEST_ADDRESS);
+    let top: u64 = *(Mm::Vmm::tableAt(first) as *mut u64);
 
-    if ((entry & Vmm::USER) == 0 || (entry & Vmm::WRITABLE) == 0 || (entry & Vmm::NO_EXECUTE) == 0) {
+    if ((entry & Mm::Vmm::USER) == 0 || (entry & Mm::Vmm::WRITABLE) == 0 || (entry & Mm::Vmm::NO_EXECUTE) == 0) {
       @panic("address space self-test: wrong permission bits on a user page");
     }
 
-    if ((top & Vmm::USER) == 0) {
+    if ((top & Mm::Vmm::USER) == 0) {
       @panic("address space self-test: the PML4 entry lacks the U/S bit");
     }
 
-    if ((Vmm::leafEntryIn(first, Vmm::textStartAddress()) & Vmm::USER) != 0) {
+    if ((Mm::Vmm::leafEntryIn(first, Mm::Vmm::textStartAddress()) & Mm::Vmm::USER) != 0) {
       @panic("address space self-test: kernel text is user accessible");
     }
 
@@ -415,13 +415,13 @@ export namespace AddressSpace {
   /// page mapped after both spaces were created. The kernel page must show
   /// the same value everywhere and the user page a different one per space.
   function testSwitching(first: u64, second: u64, kernelRoot: u64): void {
-    let frame: u64 = Pmm::allocateFrame();
+    let frame: u64 = Mm::Pmm::allocateFrame();
 
-    if (frame == Pmm::NO_FRAME || !Vmm::map(Vmm::TEST_ADDRESS, frame, Vmm::WRITABLE | Vmm::NO_EXECUTE)) {
+    if (frame == Mm::Pmm::NO_FRAME || !Mm::Vmm::map(Mm::Vmm::TEST_ADDRESS, frame, Mm::Vmm::WRITABLE | Mm::Vmm::NO_EXECUTE)) {
       @panic("address space self-test: cannot map the kernel test page");
     }
 
-    let kernelPage: *mut u64 = @pointerFromInteger<*mut u64>(Vmm::TEST_ADDRESS);
+    let kernelPage: *mut u64 = @pointerFromInteger<*mut u64>(Mm::Vmm::TEST_ADDRESS);
     let userPage: *mut u64 = @pointerFromInteger<*mut u64>(SELF_TEST_ADDRESS);
 
     *kernelPage = SELF_TEST_KERNEL_MARKER;
@@ -438,8 +438,8 @@ export namespace AddressSpace {
 
     activate(kernelRoot);
 
-    Vmm::unmap(Vmm::TEST_ADDRESS);
-    Pmm::freeFrame(frame);
+    Mm::Vmm::unmap(Mm::Vmm::TEST_ADDRESS);
+    Mm::Pmm::freeFrame(frame);
 
     if (userInFirst != SELF_TEST_MARKER_A || userInSecond != SELF_TEST_MARKER_B) {
       @panic("address space self-test: loading CR3 did not change the user half");
@@ -460,23 +460,23 @@ export namespace AddressSpace {
   /// Frees a table `level` levels above the page frames (3 is a page
   /// directory pointer table, 1 a page table) with everything below it.
   function freeLevel(table: u64, level: u64): void {
-    let entries: *mut u64 = Vmm::tableAt(table) as *mut u64;
+    let entries: *mut u64 = Mm::Vmm::tableAt(table) as *mut u64;
     let mut index: u64 = 0;
 
     while (index < ENTRIES_PER_TABLE) {
       let entry: u64 = *(entries + index);
 
-      if ((entry & Vmm::PRESENT) != 0) {
+      if ((entry & Mm::Vmm::PRESENT) != 0) {
         if (level == 1) {
-          Pmm::freeFrame(entry & Vmm::ADDRESS_MASK);
+          Mm::Pmm::freeFrame(entry & Mm::Vmm::ADDRESS_MASK);
         } else {
-          freeLevel(entry & Vmm::ADDRESS_MASK, level - 1);
+          freeLevel(entry & Mm::Vmm::ADDRESS_MASK, level - 1);
         }
       }
 
       index += 1;
     }
 
-    Pmm::freeFrame(table);
+    Mm::Pmm::freeFrame(table);
   }
 }

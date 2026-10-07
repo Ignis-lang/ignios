@@ -31,11 +31,11 @@
 //!   ├─ Drivers::Console::initialize ....... framebuffer text console     console.ign       doc 07
 //!   ├─ printBanner ............... banner, framebuffer, memory map
 //!   ├─ initializeMemory
-//!   │    ├─ Pmm::initialize ...... frame bitmap                 pmm.ign           doc 08
-//!   │    ├─ Vmm::initialize ...... own page tables, CR3 switch  vmm.ign           doc 09
-//!   │    ├─ Modules::initialize .. map Limine modules           modules.ign       doc 15
-//!   │    ├─ Heap::initialize ..... kernel heap                  heap.ign          doc 10
-//!   │    └─ AddressSpace::selfTest                              address_space.ign doc 14
+//!   │    ├─ Mm::Pmm::initialize ...... frame bitmap                 pmm.ign           doc 08
+//!   │    ├─ Mm::Vmm::initialize ...... own page tables, CR3 switch  vmm.ign           doc 09
+//!   │    ├─ Mm::Modules::initialize .. map Limine modules           modules.ign       doc 15
+//!   │    ├─ Mm::Heap::initialize ..... kernel heap                  heap.ign          doc 10
+//!   │    └─ Mm::AddressSpace::selfTest                              address_space.ign doc 14
 //!   ├─ Scheduler::initialize, Process::initialize, Syscall::initialize
 //!   ├─ Arch::UserMode::initialize ...... EFER.SCE, STAR/LSTAR/FMASK   usermode.ign      doc 14
 //!   ├─ Acpi::initialize/report ... RSDP, XSDT, MADT             acpi.ign          doc 12
@@ -77,12 +77,9 @@ import Arch from "@arch";
 import Boot from "@boot";
 import Drivers from "@drivers";
 import Lib from "@lib";
+import Mm from "@mm";
 import Acpi from "./acpi";
-import AddressSpace from "./address_space";
-import Heap from "./heap";
 import Interrupts from "./interrupts";
-import Modules from "./modules";
-import Pmm from "./pmm";
 import Process from "./process";
 import Programs from "./programs";
 import Scheduler from "./scheduler";
@@ -91,7 +88,6 @@ import Syscall from "./syscall";
 import ThreadCommands from "./thread_commands";
 import UserTest from "./user_test";
 import Timer from "./timer";
-import Vmm from "./vmm";
 
 /// Set by the first panic so a second panic knows the console path already
 /// failed or is in use.
@@ -269,47 +265,47 @@ function reportGdt(): void {
 /// Builds the frame allocator, the kernel page tables and the heap, reports on
 /// them and runs their self-tests.
 ///
-/// The order is fixed. `Vmm::initialize` takes page-table frames from the
-/// PMM, and `Modules::initialize` and the heap map their pages through the
+/// The order is fixed. `Mm::Vmm::initialize` takes page-table frames from the
+/// PMM, and `Mm::Modules::initialize` and the heap map their pages through the
 /// VMM. Every self-test panics on failure, so a boot that continues has
 /// passed them.
 function initializeMemory(framebuffer: *mut Boot::Limine::Framebuffer): void {
-  Pmm::initialize();
+  Mm::Pmm::initialize();
 
   Drivers::Console::write("pmm: ");
-  Drivers::Console::writeDecimal(Pmm::totalFrames());
+  Drivers::Console::writeDecimal(Mm::Pmm::totalFrames());
   Drivers::Console::write(" usable frames, ");
-  Drivers::Console::writeDecimal(Pmm::freeFrameCount());
+  Drivers::Console::writeDecimal(Mm::Pmm::freeFrameCount());
   Drivers::Console::write(" free (");
-  Drivers::Console::writeDecimal(Pmm::freeFrameCount() * 4 / 1024);
+  Drivers::Console::writeDecimal(Mm::Pmm::freeFrameCount() * 4 / 1024);
   Drivers::Console::writeLine(" MiB)");
 
-  Pmm::selfTest();
+  Mm::Pmm::selfTest();
   Drivers::Console::writeLine("pmm: self-test ok");
 
-  Vmm::initialize(framebuffer);
+  Mm::Vmm::initialize(framebuffer);
 
   Drivers::Console::write("vmm: cr3 switched, cr3 ");
   Drivers::Console::writeHex(Arch::Cpu::readCr3());
   Drivers::Console::write(", pml4 ");
-  Drivers::Console::writeHex(Vmm::rootTable());
+  Drivers::Console::writeHex(Mm::Vmm::rootTable());
   Drivers::Console::writeLine("");
 
-  Vmm::selfTest();
+  Mm::Vmm::selfTest();
   Drivers::Console::writeLine("vmm: self-test ok");
 
-  Modules::initialize();
+  Mm::Modules::initialize();
 
-  Heap::initialize();
-  Heap::selfTest();
+  Mm::Heap::initialize();
+  Mm::Heap::selfTest();
 
   Drivers::Console::write("heap: self-test ok, ");
-  Drivers::Console::writeDecimal(Heap::mappedBytes() / 1024);
+  Drivers::Console::writeDecimal(Mm::Heap::mappedBytes() / 1024);
   Drivers::Console::write(" KiB mapped, ");
-  Drivers::Console::writeDecimal(Heap::allocatedBytes());
+  Drivers::Console::writeDecimal(Mm::Heap::allocatedBytes());
   Drivers::Console::writeLine(" bytes in use");
 
-  AddressSpace::selfTest();
+  Mm::AddressSpace::selfTest();
   Drivers::Console::writeLine("address space: self-test ok, private user half, shared kernel half, frames returned");
 }
 

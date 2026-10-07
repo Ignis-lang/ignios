@@ -1,0 +1,42 @@
+//!
+//! # Mm
+//!
+//! Memory management: physical frames, the kernel page tables, the kernel
+//! heap, per-process address spaces and the Limine modules.
+//!
+//! ## Public API
+//!
+//! | Name                | File               | Purpose                                                  |
+//! |---------------------|--------------------|----------------------------------------------------------|
+//! | `Mm::Pmm`           | `pmm.ign`          | bitmap allocator of 4 KiB physical frames                |
+//! | `Mm::Vmm`           | `vmm.ign`          | the kernel page tables, `map`, `unmap`, `translate`      |
+//! | `Mm::AddressSpace`  | `address_space.ign`| private user halves and checked copies to and from user memory |
+//! | `Mm::Heap`          | `heap.ign`         | kernel heap behind `@allocHandler` and `@freeHandler`    |
+//! | `Mm::Modules`       | `modules.ign`      | the files Limine loaded next to the kernel               |
+//!
+//! ## Dependencies
+//!
+//! | Imports   | Why                                                                |
+//! |-----------|--------------------------------------------------------------------|
+//! | `Boot`    | the memory map, the direct map, the executable address             |
+//! | `Arch`    | control registers, `invlpg`, interrupt flag handling               |
+//! | `Lib`     | `memcpy`, `memset`                                                 |
+//! | `Drivers` | `Mm::Modules` lists each module on the console                     |
+//!
+//! `Mm::Modules` is here and not in `Boot` because it maps the module pages
+//! with `Mm::Vmm::mapRange`, and `Mm` already imports `Boot`.
+//!
+//! The order of the boot calls is fixed: `Mm::Pmm::initialize`, then
+//! `Mm::Vmm::initialize` (which takes its page-table frames from the PMM),
+//! then `Mm::Modules::initialize` and `Mm::Heap::initialize`, which map their
+//! pages through the VMM.
+
+import _ from "./address_space";
+import _ from "./heap";
+import _ from "./modules";
+import _ from "./pmm";
+import _ from "./vmm";
+
+/// Aggregate namespace of the memory manager. The files above contribute the
+/// sub-namespaces listed in the module header.
+export namespace Mm {}
