@@ -1,10 +1,47 @@
-//! x86_64 processor control.
+//!
+//! # Processor Control
+//!
+//! Thin wrappers over the privileged instructions the kernel needs: interrupt
+//! flag control, halting, model specific registers and control registers.
+//!
+//! ## Overview
+//!
+//! Every function is a short inline `asm` block. Interrupt-disabled sections
+//! are the kernel's only mutual exclusion, because it runs on one processor:
+//! when interrupts are off nothing can preempt the running code. Sections
+//! nest by saving the previous state:
+//!
+//! ```text
+//!   let saved = Cpu::saveAndDisableInterrupts();   // pushfq; pop; cli
+//!       ... critical section ...
+//!       let inner = Cpu::saveAndDisableInterrupts();   // nested: saved IF = 0
+//!       Cpu::restoreInterrupts(inner);                 // IF stays off
+//!   Cpu::restoreInterrupts(saved);                 // IF back as it was
+//! ```
+//!
+//! ## Registers Touched
+//!
+//! | Register           | Bit / number | Meaning                                       |
+//! |--------------------|--------------|-----------------------------------------------|
+//! | RFLAGS             | bit 9 (`0x200`) | IF, maskable interrupts enabled            |
+//! | MSR                | number in ECX | read with `rdmsr` into EDX:EAX, write with `wrmsr` |
+//! | CR0                | -            | protection and paging control (WP is bit 16)   |
+//! | CR2                | -            | faulting address of a page fault (read in `interrupts.ign`) |
+//! | CR3                | -            | physical address of the PML4 in bits 12-51     |
+//!
+//! The MSRs used elsewhere: `IA32_APIC_BASE` (`0x1B`), `IA32_PAT` (`0x277`),
+//! `IA32_EFER` (`0xC0000080`), `IA32_STAR` (`0xC0000081`), `IA32_LSTAR`
+//! (`0xC0000082`) and `IA32_FMASK` (`0xC0000084`). See concept doc 02 and
+//! Intel SDM Vol. 3A, "System Architecture Overview".
 
+/// The processor control API.
 export namespace Cpu {
   /// RFLAGS bit 9, the interrupt-enable flag.
   const FLAGS_INTERRUPT_ENABLE: u64 = 0x200;
 
-  /// Disables interrupts and parks the processor for good.
+  /// Disables interrupts and parks the processor for good. The `cli; hlt` pair
+  /// sits in a loop because a non-maskable interrupt or a system management
+  /// interrupt can still wake the processor from `hlt`.
   function haltForever(): never {
     while (true) {
       asm () clobber(memory) {
@@ -14,12 +51,13 @@ export namespace Cpu {
     }
   }
 
-  /// Lets maskable interrupts through from the next instruction on.
+  /// Lets maskable interrupts through from the next instruction on (`sti`; the
+  /// interrupt shadow means the instruction after `sti` always runs first).
   function enableInterrupts(): void {
     asm () clobber(memory) { sti }
   }
 
-  /// Masks maskable interrupts.
+  /// Masks maskable interrupts (`cli`). NMIs are not affected.
   function disableInterrupts(): void {
     asm () clobber(memory) { cli }
   }
@@ -48,6 +86,7 @@ export namespace Cpu {
     }
   }
 
+  /// Reads RFLAGS (`pushfq; pop`).
   function readFlags(): u64 {
     return asm () -> (flags: u64 in rax) {
       pushfq
@@ -72,7 +111,9 @@ export namespace Cpu {
     asm () { pause }
   }
 
-  /// Reads a model specific register.
+  /// Reads the model specific register `msr` with `rdmsr`: the number goes in
+  /// ECX and the 64-bit result comes back split in EDX (high half) and EAX (low
+  /// half). Faults with `#GP` for a register the processor does not have.
   function readMsr(msr: u32): u64 {
     asm (msr in ecx) -> (low: u32 in eax, high: u32 in edx) {
       rdmsr
@@ -81,6 +122,9 @@ export namespace Cpu {
     return ((high as u64) << 32) | (low as u64);
   }
 
+  /// Writes `value` to the model specific register `msr` with `wrmsr`
+  /// (ECX = number, EDX:EAX = value). Faults with `#GP` for an unknown register
+  /// or a reserved bit set.
   function writeMsr(msr: u32, value: u64): void {
     let low: u32 = value as u32;
     let high: u32 = (value >> 32) as u32;
@@ -90,14 +134,17 @@ export namespace Cpu {
     }
   }
 
+  /// Reads control register 0.
   function readCr0(): u64 {
     return asm () -> (value: u64 in rax) { mov {value}, cr0 };
   }
 
+  /// Writes control register 0. `Vmm::initialize` uses it to set WP (bit 16).
   function writeCr0(value: u64): void {
     asm (value in rax) clobber(memory) { mov cr0, {value} }
   }
 
+  /// Reads control register 3: the physical address of the active PML4.
   function readCr3(): u64 {
     return asm () -> (value: u64 in rax) { mov {value}, cr3 };
   }

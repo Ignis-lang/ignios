@@ -1,16 +1,88 @@
-//! The Ignis side of interrupt handling. `interrupt_asm.S` saves the
-//! registers and calls `dispatch` with a pointer to the saved frame.
+//!
+//! # Interrupt and Exception Dispatch
+//!
+//! The Ignis side of interrupt handling: one dispatcher for every vector, the
+//! exception reports and the rule for faults in ring 3.
+//!
+//! ## Overview
+//!
+//! `interrupt_asm.S` saves the registers of the interrupted code and calls
+//! `dispatch` with a pointer to the saved frame. From there:
+//!
+//! ```text
+//!   Interrupts::dispatch(frame)
+//!   │
+//!   ├─ vector 0xFF  local APIC spurious ......... return, no EOI
+//!   ├─ vector 0x21  keyboard (IOAPIC) ........... Ps2::handleInterrupt, Lapic EOI
+//!   ├─ vector 0x30  local APIC timer ............ Timer::handleTick, Lapic EOI,
+//!   │                                             Scheduler::onTick (may switch threads)
+//!   ├─ vectors 0x20-0x2F (the rest)  8259 ....... acknowledge or absorb a spurious one
+//!   ├─ exception from ring 3 (cs & 3 == 3) ..... report, kill the process
+//!   └─ any other exception ...................... report on COM1 and the
+//!                                                 console, halt the machine
+//! ```
 //!
 //! A CPU exception in the kernel is fatal: it is reported on COM1 and on the
 //! console, then the processor halts. An exception taken in ring 3 (the saved
 //! code selector has RPL 3) is the process's own fault: it is reported and the
-//! process is killed while the kernel keeps running. Device interrupts come from the IOAPIC
-//! and are acknowledged at the local APIC: the keyboard arrives at vector
-//! 0x21 and the local APIC timer at vector 0x30, whose handler may switch to
-//! another thread after acknowledging the interrupt. The 8259 is fully
-//! masked, but its vectors 0x20-0x2F stay mapped to thunks so a spurious 8259
-//! interrupt is absorbed. The local APIC's spurious vector is ignored without
-//! any acknowledgement.
+//! process is killed while the kernel keeps running. NMI and machine check
+//! stay fatal even from ring 3, because they report the machine and not the
+//! process.
+//!
+//! Device interrupts come from the IOAPIC and are acknowledged at the local
+//! APIC with `Lapic::endOfInterrupt`. The 8259 is fully masked, but its
+//! vectors `0x20-0x2F` stay mapped to thunks so a spurious 8259 interrupt is
+//! absorbed. The local APIC's spurious vector is ignored without any
+//! acknowledgement.
+//!
+//! ## Exceptions
+//!
+//! | Vec | Mnemonic | Name                         | Class | Error code |
+//! |-----|----------|------------------------------|-------|------------|
+//! | 0   | `#DE`    | Divide Error                 | fault | no         |
+//! | 1   | `#DB`    | Debug                        | fault/trap | no    |
+//! | 2   | NMI      | Non-Maskable Interrupt       | interrupt | no      |
+//! | 3   | `#BP`    | Breakpoint                   | trap  | no         |
+//! | 4   | `#OF`    | Overflow                     | trap  | no         |
+//! | 5   | `#BR`    | Bound Range Exceeded         | fault | no         |
+//! | 6   | `#UD`    | Invalid Opcode               | fault | no         |
+//! | 7   | `#NM`    | Device Not Available         | fault | no         |
+//! | 8   | `#DF`    | Double Fault                 | abort | yes (0)    |
+//! | 9   | -        | Coprocessor Segment Overrun  | fault (legacy) | no |
+//! | 10  | `#TS`    | Invalid TSS                  | fault | yes        |
+//! | 11  | `#NP`    | Segment Not Present          | fault | yes        |
+//! | 12  | `#SS`    | Stack-Segment Fault          | fault | yes        |
+//! | 13  | `#GP`    | General Protection Fault     | fault | yes        |
+//! | 14  | `#PF`    | Page Fault                   | fault | yes        |
+//! | 16  | `#MF`    | x87 Floating-Point Exception | fault | no         |
+//! | 17  | `#AC`    | Alignment Check              | fault | yes (0)    |
+//! | 18  | `#MC`    | Machine Check                | abort | no         |
+//! | 19  | `#XM`    | SIMD Floating-Point Exception| fault | no         |
+//! | 20  | `#VE`    | Virtualization Exception     | fault | no         |
+//! | 21  | `#CP`    | Control Protection Exception | fault | yes        |
+//! | 28  | `#HV`    | Hypervisor Injection (AMD)   | fault | no         |
+//! | 29  | `#VC`    | VMM Communication (AMD)      | fault | yes        |
+//! | 30  | `#SX`    | Security Exception (AMD)     | fault | yes        |
+//! | 15, 22-27, 31 | - | reserved                 |       |            |
+//!
+//! For a page fault the error code has these bits, and CR2 holds the faulting
+//! address:
+//!
+//! ```text
+//!   bit 0  P    0 = page not present, 1 = protection violation
+//!   bit 1  W    1 = the access was a write
+//!   bit 2  U    1 = the access came from ring 3
+//!   bit 3  RSVD 1 = a reserved bit was set in a page table entry
+//!   bit 4  I/D  1 = the access was an instruction fetch
+//!
+//!   0x06 = user write to an unmapped page        (the "null write" test)
+//!   0x05 = user read of a supervisor-only page   (the "kernel read" test)
+//!   0x07 = user write to a read-only page        (the "code write" test)
+//!   0x15 = user instruction fetch from a no-execute page (the "stack jump")
+//! ```
+//!
+//! See concept doc 04 and Intel SDM Vol. 3A, "Interrupt and Exception
+//! Handling".
 
 import Cpu from "./arch/x86_64/cpu";
 import Lapic from "./arch/x86_64/lapic";
@@ -26,34 +98,114 @@ import Timer from "./timer";
 /// The registers are pushed by the common stub, `vector` by the thunk, and
 /// `errorCode` by the thunk when the processor did not push one. The last
 /// five fields are the processor's own frame.
+///
+/// ```text
+///   offset  field        pushed by
+///     0     rax          common stub (last push, lowest address)
+///     8     rbx          ...
+///    16     rcx
+///    24     rdx
+///    32     rsi
+///    40     rdi
+///    48     rbp
+///    56     r8
+///    64     r9
+///    72     r10
+///    80     r11
+///    88     r12
+///    96     r13
+///   104     r14
+///   112     r15          common stub (first push)
+///   120     vector       thunk
+///   128     errorCode    processor, or 0 from the thunk
+///   136     rip          processor: where to resume
+///   144     cs           processor: code segment; bits 1:0 are the CPL
+///   152     rflags       processor
+///   160     rsp          processor: stack pointer of the interrupted code
+///   168     ss           processor
+/// ```
+///
+/// The `SYSCALL` entry stub builds the same frame by hand, with vector 256,
+/// so system calls and interrupts share one record. A handler may change the
+/// saved values: the registers are reloaded from the frame on the way out.
 @cLayout
 export record InterruptFrame {
+  /// Saved general purpose registers. The `rsp` field further down is the stack
+  /// pointer of the interrupted code, not the register at the time of the call.
   public rax: u64;
+
+  /// Saved `rbx`.
   public rbx: u64;
+
+  /// Saved `rcx`.
   public rcx: u64;
+
+  /// Saved `rdx`.
   public rdx: u64;
+
+  /// Saved `rsi`.
   public rsi: u64;
+
+  /// Saved `rdi`.
   public rdi: u64;
+
+  /// Saved `rbp`.
   public rbp: u64;
+
+  /// Saved `r8`.
   public r8: u64;
+
+  /// Saved `r9`.
   public r9: u64;
+
+  /// Saved `r10`.
   public r10: u64;
+
+  /// Saved `r11`.
   public r11: u64;
+
+  /// Saved `r12`.
   public r12: u64;
+
+  /// Saved `r13`.
   public r13: u64;
+
+  /// Saved `r14`.
   public r14: u64;
+
+  /// Saved `r15`.
   public r15: u64;
+
+  /// The vector number, 0 to 255, or 256 for a system call.
   public vector: u64;
+
+  /// The processor's error code for the vectors that push one, otherwise 0.
   public errorCode: u64;
+
+  /// Address of the instruction to resume at (for a fault, the one that
+  /// faulted).
   public rip: u64;
+
+  /// Code segment selector of the interrupted code. Its low two bits are the
+  /// privilege level: 0 for the kernel, 3 for a user process.
   public cs: u64;
+
+  /// RFLAGS of the interrupted code, including its interrupt flag.
   public rflags: u64;
+
+  /// Stack pointer of the interrupted code.
   public rsp: u64;
+
+  /// Stack segment selector of the interrupted code.
   public ss: u64;
 }
 
+/// Interrupt vector numbers and the dispatcher.
 export namespace Interrupts {
+  /// First vector of the remapped 8259 range, `0x20`.
   const FIRST_IRQ_VECTOR: u64 = 32;
+
+  /// Number of vectors in the 8259 range: 16 lines.
   const IRQ_VECTOR_COUNT: u64 = 16;
 
   /// The vector the IOAPIC raises for the keyboard. It equals the vector of
@@ -63,28 +215,63 @@ export namespace Interrupts {
   /// The vector of the local APIC timer tick. It is just above the 8259
   /// vectors so nothing legacy shares it.
   const TIMER_VECTOR: u64 = 0x30;
+
+  /// Vector 14.
   const PAGE_FAULT: u64 = 14;
 
+  /// Vector 0.
   const DIVIDE_ERROR: u64 = 0;
+
+  /// Vector 1.
   const DEBUG: u64 = 1;
+
+  /// Vector 2.
   const NMI: u64 = 2;
+
+  /// Vector 3.
   const BREAKPOINT: u64 = 3;
+
+  /// Vector 6.
   const INVALID_OPCODE: u64 = 6;
+
+  /// Vector 16.
   const X87_FAULT: u64 = 16;
+
+  /// Vector 17.
   const ALIGNMENT_CHECK: u64 = 17;
+
+  /// Vector 18.
   const MACHINE_CHECK: u64 = 18;
+
+  /// Vector 19.
   const SIMD_FAULT: u64 = 19;
 
-  /// Signal numbers of Linux x86_64, and the 128 a shell adds to report a
-  /// process that died of one.
+  /// Signal numbers of Linux x86_64. `killUserProcess` maps each exception to
+  /// the signal Linux would send for it.
+  ///
+  /// SIGILL (4): illegal instruction.
   const SIGILL: u64 = 4;
+
+  /// SIGTRAP (5): breakpoint or debug trap.
   const SIGTRAP: u64 = 5;
+
+  /// SIGBUS (7): misaligned access.
   const SIGBUS: u64 = 7;
+
+  /// SIGFPE (8): arithmetic error.
   const SIGFPE: u64 = 8;
+
+  /// SIGSEGV (11): invalid memory access or privilege violation. The fallback
+  /// for every exception that has no more specific signal.
   const SIGSEGV: u64 = 11;
+
+  /// Added to the signal number to build the exit status of a killed process,
+  /// as a shell does: 128 + 11 = 139 for a segmentation fault.
   const EXIT_STATUS_SIGNAL_BASE: u64 = 128;
 
-  /// Called by the common stub for every vector, on the interrupted stack.
+  /// Called by the common stub for every vector, on the interrupted stack,
+  /// with interrupts disabled. `frame` points at the saved registers and can be
+  /// modified. See the module header for the routing.
   @externName("ignis_interrupt_dispatch")
   function dispatch(frame: *mut InterruptFrame): void {
     let vector: u64 = (*frame).vector;
@@ -259,6 +446,7 @@ export namespace Interrupts {
     };
   }
 
+  /// Reads CR2, the linear address that caused the last page fault.
   function readCr2(): u64 {
     return asm () -> (value: u64 in rax) { mov {value}, cr2 };
   }
@@ -273,6 +461,7 @@ export namespace Interrupts {
     }
   }
 
+  /// Like `emitText` for a hexadecimal number.
   function emitHex(value: u64): void {
     if (Console::isInitialized()) {
       Console::writeHex(value);
@@ -281,6 +470,7 @@ export namespace Interrupts {
     }
   }
 
+  /// Like `emitText` for a decimal number.
   function emitDecimal(value: u64): void {
     if (Console::isInitialized()) {
       Console::writeDecimal(value);
@@ -289,6 +479,7 @@ export namespace Interrupts {
     }
   }
 
+  /// The short name of an exception vector, for example `#PF`.
   function mnemonic(vector: u64): str {
     return match (vector) {
       0 -> "#DE",
@@ -319,6 +510,7 @@ export namespace Interrupts {
     };
   }
 
+  /// The long name of an exception vector, for example `Page Fault`.
   function name(vector: u64): str {
     return match (vector) {
       0 -> "Divide Error",

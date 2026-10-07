@@ -1,43 +1,159 @@
-//! The kernel's global descriptor table and task state segment.
 //!
-//! The selector order is the one SYSCALL and SYSRET need: kernel code, kernel
-//! data, then user data and user code, all flat 64-bit segments. The TSS
-//! carries IST1, the stack the double fault handler runs on, and RSP0, the
-//! kernel stack the processor switches to when an interrupt or exception
-//! arrives in ring 3. The scheduler updates RSP0 on every switch to a thread
-//! that has a user half (`setKernelStack`).
+//! # Global Descriptor Table and Task State Segment
+//!
+//! The kernel's own GDT, the TSS, and the stack for double faults.
+//!
+//! ## Overview
+//!
+//! In 64-bit mode segmentation is mostly gone: base and limit of CS, DS, ES
+//! and SS are ignored and every segment is flat. What the GDT still decides is
+//! the privilege level (ring 0 or 3), whether a code segment is 64-bit, and
+//! where the TSS is. The selector order below is the one the `SYSCALL` and
+//! `SYSRET` instructions need: kernel code, kernel data, then user data and
+//! user code, all flat 64-bit segments.
+//!
+//! The TSS carries IST1, the stack the double fault handler runs on, and
+//! RSP0, the kernel stack the processor switches to when an interrupt or
+//! exception arrives in ring 3. The scheduler updates RSP0 on every switch to
+//! a thread that has a user half (`setKernelStack`).
+//!
+//! ## Table Layout
+//!
+//! ```text
+//!   index  selector  entry                      value               DPL
+//!   0      0x00      null                       0x0000000000000000  -
+//!   1      0x08      kernel code (64-bit)       0x00AF9A000000FFFF  0
+//!   2      0x10      kernel data                0x00CF92000000FFFF  0
+//!   3      0x18      user data                  0x00CFF2000000FFFF  3
+//!   4      0x20      user code (64-bit)         0x00AFFA000000FFFF  3
+//!   5-6    0x28      TSS (16-byte descriptor)   built at run time   0
+//! ```
+//!
+//! User selectors carry RPL 3 when loaded: `0x18 | 3 = 0x1B` for SS and
+//! `0x20 | 3 = 0x23` for CS.
+//!
+//! ## Segment Descriptor (8 bytes)
+//!
+//! ```text
+//!   63        56 55  52 51      48 47      40 39        16 15        0
+//!   ┌──────────┬──────┬──────────┬──────────┬────────────┬───────────┐
+//!   │ base     │flags │ limit    │ access   │ base       │ limit     │
+//!   │ 31..24   │      │ 19..16   │ byte     │ 23..0      │ 15..0     │
+//!   └──────────┴──────┴──────────┴──────────┴────────────┴───────────┘
+//!
+//!   access byte (bits 47..40)        flags nibble (bits 55..52)
+//!     7  P    present                  3  G    granularity (4 KiB units)
+//!     6-5 DPL privilege level          2  D/B  default size (0 for 64-bit code)
+//!     4  S    1 = code or data         1  L    64-bit code segment
+//!     3  E    1 = code                 0  AVL  free for software
+//!     2  DC   direction/conforming
+//!     1  RW   readable / writable
+//!     0  A    accessed
+//!
+//!   0x9A = P=1 DPL=0 S=1 E=1 RW=1         flags 0xA = G=1 L=1 (64-bit code)
+//!   0x92 = P=1 DPL=0 S=1 E=0 RW=1         flags 0xC = G=1 D/B=1 (data)
+//!   0xFA = P=1 DPL=3 S=1 E=1 RW=1
+//!   0xF2 = P=1 DPL=3 S=1 E=0 RW=1
+//! ```
+//!
+//! ## Task State Segment (104 bytes)
+//!
+//! ```text
+//!   offset  field
+//!    0      reserved
+//!    4      rsp0   stack for ring 3 -> ring 0 transitions
+//!   12      rsp1   (unused)
+//!   20      rsp2   (unused)
+//!   28      reserved
+//!   36      ist1   double fault stack top
+//!   44      ist2 ... 84 ist7   (unused)
+//!   92      reserved
+//!  100      reserved (u16)
+//!  102      ioMapBase = 104: no I/O permission bitmap, so every port access
+//!           from ring 3 faults
+//! ```
+//!
+//! The TSS descriptor is a system descriptor of 16 bytes that takes two table
+//! slots. Its access byte `0x89` is P=1, DPL=0, S=0, type 9 (available 64-bit
+//! TSS).
+//!
+//! ```text
+//!   slot 5:  limit 15..0 | base 23..0 << 16 | 0x89 << 40 |
+//!            limit 19..16 << 48 | base 31..24 << 56
+//!   slot 6:  base 63..32
+//! ```
+//!
+//! See concept doc 03 and Intel SDM Vol. 3A, "Segment Descriptors" and "Task
+//! Management".
 
-/// The task state segment of the 64-bit mode.
+/// The task state segment of the 64-bit mode. Packed to match the hardware
+/// layout exactly; the size is `Gdt::TSS_SIZE`.
 @cLayout
 @packed
 record TaskStateSegment {
+  /// Reserved by the architecture, must be zero.
   public reserved0: u32;
+
+  /// Stack pointer loaded on a transition to ring 0 through an interrupt gate.
   public rsp0: u64;
+
+  /// Stack pointer for ring 1. Unused.
   public rsp1: u64;
+
+  /// Stack pointer for ring 2. Unused.
   public rsp2: u64;
+
+  /// Reserved by the architecture, must be zero.
   public reserved1: u64;
+
+  /// Interrupt stack table slot 1: the stack a gate with IST number 1 switches
+  /// to, whatever the privilege level. Used by the double fault gate.
   public ist1: u64;
+
+  /// IST slots 2 to 7 are unused.
   public ist2: u64;
+
+  /// IST slot 3. Unused.
   public ist3: u64;
+
+  /// IST slot 4. Unused.
   public ist4: u64;
+
+  /// IST slot 5. Unused.
   public ist5: u64;
+
+  /// IST slot 6. Unused.
   public ist6: u64;
+
+  /// IST slot 7. Unused.
   public ist7: u64;
+
+  /// Reserved by the architecture, must be zero.
   public reserved2: u64;
+
+  /// Reserved by the architecture, must be zero.
   public reserved3: u16;
+
+  /// Offset of the I/O permission bitmap from the start of the TSS. A value at
+  /// or past the segment limit means there is none.
   public ioMapBase: u16;
 }
 
-/// The operand of `lgdt`.
+/// The operand of `lgdt`: a 16-bit limit (last valid byte offset) followed by
+/// the 64-bit linear address of the table. 10 bytes, packed.
 @cLayout
 @packed
 record GdtPointer {
+  /// Size of the table in bytes minus one: the offset of its last valid byte.
   public limit: u16;
+
+  /// Linear address of the first descriptor.
   public base: u64;
 }
 
 /// Seven slots: null, four segments and the 16-byte TSS descriptor.
 record GdtState {
+  /// The table. Slots 5 and 6 are filled by `installTaskStateDescriptor`.
   static mut entries: u64[7] = [
     0x0000000000000000,
     0x00AF9A000000FFFF,
@@ -48,6 +164,7 @@ record GdtState {
     0,
   ];
 
+  /// The one TSS, initialized by `Gdt::initialize`.
   static mut tss: TaskStateSegment = TaskStateSegment {
     reserved0: 0,
     rsp0: 0,
@@ -67,28 +184,49 @@ record GdtState {
   };
 }
 
+/// Implemented in `gdt_asm.S`.
 extern GdtAsm {
+  /// Loads CS through a far return and the data segment registers with `data`.
+  /// Implemented in `gdt_asm.S`. Interrupts must be off.
   function ignis_gdt_reload_segments(code: u16, data: u16): void;
 }
 
-/// The stack the double fault handler runs on.
+/// The stack the double fault handler runs on. A double fault happens when the
+/// current stack may be unusable, so the CPU switches to this one through IST1.
 record DoubleFaultStack {
+  /// 16 KiB of zero-initialized storage in `.bss`. The stack grows down from its
+  /// end.
   static mut MEMORY: u8[16384];
 }
 
+/// The GDT and TSS API.
 export namespace Gdt {
+  /// Selector of the kernel code segment (table index 1).
   const KERNEL_CODE: u16 = 0x08;
+
+  /// Selector of the kernel data segment (index 2).
   const KERNEL_DATA: u16 = 0x10;
+
+  /// Selector of the user data segment (index 3). Load with RPL 3 (`| 3`).
   const USER_DATA: u16 = 0x18;
+
+  /// Selector of the user code segment (index 4). Load with RPL 3 (`| 3`).
   const USER_CODE: u16 = 0x20;
+
+  /// Selector of the TSS descriptor (index 5, occupies slots 5 and 6).
   const TASK_STATE: u16 = 0x28;
 
   /// IST slot the double fault gate uses.
   const DOUBLE_FAULT_IST: u8 = 1;
 
+  /// Size of the TSS in bytes (104), also the descriptor limit plus one and the
+  /// `ioMapBase` value that means "no bitmap".
   const TSS_SIZE: u64 = 104;
+
   /// Access byte of the TSS descriptor: present, type 9 (available 64-bit TSS).
   const TSS_AVAILABLE_ACCESS: u64 = 0x89;
+
+  /// Table index where the 16-byte TSS descriptor starts.
   const TSS_SLOT: u64 = 5;
 
   /// Size of `DoubleFaultStack::MEMORY`; array sizes must be literals, so the
@@ -104,6 +242,8 @@ export namespace Gdt {
   /// Loads the table, reloads the segment registers and loads the task
   /// register. Interrupts must be off.
   function initialize(): void {
+    // The TSS must be filled before its descriptor is built and loaded, because
+    // `ltr` reads the descriptor and marks it busy.
     GdtState::tss.ist1 = doubleFaultStackTop();
     GdtState::tss.ioMapBase = TSS_SIZE as u16;
 
@@ -116,8 +256,12 @@ export namespace Gdt {
 
     asm (descriptor in mem) clobber(memory) { lgdt {descriptor} }
 
+    // `lgdt` alone changes nothing the processor is using. The segment registers
+    // still hold the bootloader's descriptors until they are reloaded.
     GdtAsm::ignis_gdt_reload_segments(KERNEL_CODE, KERNEL_DATA);
 
+    // Loads the task register with the TSS selector. After this the processor
+    // finds RSP0 and IST1 in `GdtState::tss`.
     let selector: u16 = TASK_STATE;
 
     asm (selector in ax) clobber(memory) { ltr {selector} }
