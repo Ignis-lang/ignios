@@ -58,6 +58,8 @@ User programs are Ignis projects under `user/` built with `std = false` and the 
 
 ## Layout
 
+New to the code? [docs/READING.md](docs/READING.md) is a reading guide in the order the code runs, with a virtual address space map and the boot log explained line by line.
+
 ```
 kernel/src/main.ign            kmain, banner, panic handler, terminal loop
 kernel/src/limine.ign          Limine requests and responses
@@ -87,6 +89,7 @@ user/lib/                      the user standard library (syscalls, text output)
 user/hello/                    the first user program
 user/user.ld                   user program layout
 boot/limine.conf               boot entry and the user program module
+docs/READING.md                reading guide: file by file, address space map, annotated boot log
 scripts/                       font generator, screenshot and key test drivers
 ```
 
