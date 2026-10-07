@@ -6,24 +6,24 @@
 //!
 //! ## Overview
 //!
-//! `run hello` at the terminal ends up in `Programs::run`:
+//! `run hello` at the terminal ends up in `Proc::Programs::run`:
 //!
 //! ```text
-//!   Programs::run(name, length)
+//!   Proc::Programs::run(name, length)
 //!     ├─ Mm::Modules::find            match the module string
-//!     ├─ Process::startElf        build the address space, load, launch
-//!     └─ Process::wait            sleep until the process ended, return its status
+//!     ├─ Proc::Process::startElf        build the address space, load, launch
+//!     └─ Proc::Process::wait            sleep until the process ended, return its status
 //! ```
 
 import Drivers from "@drivers";
 import Mm from "@mm";
-import Process from "./process";
+import _ from "./process";
 
 /// The program API.
-export namespace Programs {
+namespace Proc::Programs {
   /// Runs the module whose configuration string is the `length` bytes at
   /// `name`, waits for the process and returns its exit status. Returns
-  /// `Process::NO_PROCESS` after printing why when no process ran.
+  /// `Proc::Process::NO_PROCESS` after printing why when no process ran.
   function run(name: *u8, length: u64): u64 {
     let index: u64 = Mm::Modules::find(name, length);
 
@@ -39,16 +39,16 @@ export namespace Programs {
 
       Drivers::Console::writeLine("");
 
-      return Process::NO_PROCESS;
+      return Proc::Process::NO_PROCESS;
     }
 
-    let id: u64 = Process::startElf(Mm::Modules::address(index), Mm::Modules::size(index));
+    let id: u64 = Proc::Process::startElf(Mm::Modules::address(index), Mm::Modules::size(index));
 
-    if (id == Process::NO_PROCESS) {
-      return Process::NO_PROCESS;
+    if (id == Proc::Process::NO_PROCESS) {
+      return Proc::Process::NO_PROCESS;
     }
 
-    return Process::wait(id);
+    return Proc::Process::wait(id);
   }
 
   /// `run` for a name known at compile time.

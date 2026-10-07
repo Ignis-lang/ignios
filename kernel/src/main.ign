@@ -36,7 +36,7 @@
 //!   │    ├─ Mm::Modules::initialize .. map Limine modules           modules.ign       doc 15
 //!   │    ├─ Mm::Heap::initialize ..... kernel heap                  heap.ign          doc 10
 //!   │    └─ Mm::AddressSpace::selfTest                              address_space.ign doc 14
-//!   ├─ Sched::Scheduler::initialize, Process::initialize, Syscall::initialize
+//!   ├─ Sched::Scheduler::initialize, Proc::Process::initialize, Syscall::initialize
 //!   ├─ Arch::UserMode::initialize ...... EFER.SCE, STAR/LSTAR/FMASK   usermode.ign      doc 14
 //!   ├─ Acpi::initialize/report ... RSDP, XSDT, MADT             acpi.ign          doc 12
 //!   ├─ Arch::Pic::initialize ........... remap and mask the 8259      pic.ign           doc 05
@@ -79,11 +79,10 @@ import Boot from "@boot";
 import Drivers from "@drivers";
 import Lib from "@lib";
 import Mm from "@mm";
+import Proc from "@proc";
 import Sched from "@sched";
 import Time from "@time";
 import Interrupts from "./interrupts";
-import Process from "./process";
-import Programs from "./programs";
 import SchedulerTest from "./scheduler_test";
 import Syscall from "./syscall";
 import ThreadCommands from "./thread_commands";
@@ -459,7 +458,7 @@ function runCommand(line: *mut u8, length: u64): void {
       Drivers::Console::writeLine("threads: the thread table is full");
     }
   } else if (lineStartsWith(line, length, RUN_COMMAND)) {
-    Programs::run((line + RUN_COMMAND_LENGTH) as *u8, length - RUN_COMMAND_LENGTH);
+    Proc::Programs::run((line + RUN_COMMAND_LENGTH) as *u8, length - RUN_COMMAND_LENGTH);
   }
 }
 
@@ -569,7 +568,7 @@ function kmain(): void {
   initializeMemory(framebuffer);
 
   Sched::Scheduler::initialize();
-  Process::initialize();
+  Proc::Process::initialize();
   Syscall::initialize();
 
   // Sets IA32_EFER.SCE and programs IA32_STAR, IA32_LSTAR and IA32_FMASK. See

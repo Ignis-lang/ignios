@@ -154,21 +154,23 @@ record ProgramHeader {
   public alignment: u64;
 }
 
-/// What `Elf::load` reports about a loaded image.
-@cLayout
-export record LoadedImage {
-  /// The entry point, taken from the header.
-  public entry: u64;
+namespace Proc {
+  /// What `Proc::Elf::load` reports about a loaded image.
+  @cLayout
+  record LoadedImage {
+    /// The entry point, taken from the header.
+    public entry: u64;
 
-  /// Loadable segments mapped.
-  public segments: u64;
+    /// Loadable segments mapped.
+    public segments: u64;
 
-  /// Pages mapped across all segments.
-  public pages: u64;
+    /// Pages mapped across all segments.
+    public pages: u64;
+  }
 }
 
 /// The loader API.
-export namespace Elf {
+namespace Proc::Elf {
   /// Size of `Elf64_Ehdr`.
   const HEADER_SIZE: u64 = 64;
 
@@ -205,7 +207,7 @@ export namespace Elf {
   /// `p_flags` PF_W.
   const FLAG_WRITE: u32 = 2;
 
-  /// `Elf::load` results: 0 is success, anything else names what was wrong.
+  /// `Proc::Elf::load` results: 0 is success, anything else names what was wrong.
   const OK: u64 = 0;
 
   /// The file is shorter than an ELF header.
@@ -245,7 +247,7 @@ export namespace Elf {
   /// Loads the executable in the `size` bytes at `image` into the address
   /// space `root` and fills `result`. On failure the pages mapped so far
   /// stay in the space, which the caller destroys.
-  function load(image: *u8, size: u64, root: u64, result: *mut LoadedImage): u64 {
+  function load(image: *u8, size: u64, root: u64, result: *mut Proc::LoadedImage): u64 {
     let problem: u64 = checkHeader(image, size);
 
     if (problem != OK) {
@@ -343,7 +345,7 @@ export namespace Elf {
     size: u64,
     root: u64,
     segment: *ProgramHeader,
-    result: *mut LoadedImage
+    result: *mut Proc::LoadedImage
   ): u64 {
     let address: u64 = (*segment).virtualAddress;
     let memorySize: u64 = (*segment).memorySize;

@@ -23,9 +23,8 @@
 
 import Drivers from "@drivers";
 import Mm from "@mm";
+import Proc from "@proc";
 import Time from "@time";
-import Process from "./process";
-import Programs from "./programs";
 
 /// Functions implemented in `user_test_asm.S`.
 extern UserTestAsm {
@@ -165,7 +164,7 @@ export namespace UserTest {
   /// Runs `hello`, the ELF program the bootloader loaded as a module. It
   /// prints from ring 3 and exits with 0 when its own checks pass.
   function runHello(): void {
-    let status: u64 = Programs::runNamed("hello");
+    let status: u64 = Proc::Programs::runNamed("hello");
 
     if (status != 0) {
       @panic("user test: the hello program failed");
@@ -200,12 +199,12 @@ export namespace UserTest {
     let start: u64 = UserTestAsm::ignis_user_test_start(index);
     let size: u64 = UserTestAsm::ignis_user_test_size(index);
 
-    let id: u64 = Process::startCode(@pointerFromInteger<*u8>(start), size);
+    let id: u64 = Proc::Process::startCode(@pointerFromInteger<*u8>(start), size);
 
-    if (id == Process::NO_PROCESS) {
+    if (id == Proc::Process::NO_PROCESS) {
       @panic("user test: cannot start a process");
     }
 
-    return Process::wait(id);
+    return Proc::Process::wait(id);
   }
 }

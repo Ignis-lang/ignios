@@ -87,9 +87,9 @@
 import Apic from "@apic";
 import Arch from "@arch";
 import Drivers from "@drivers";
+import Proc from "@proc";
 import Sched from "@sched";
 import Time from "@time";
-import Process from "./process";
 
 /// Interrupt vector numbers and the dispatcher.
 export namespace Interrupts {
@@ -219,7 +219,7 @@ export namespace Interrupts {
     let vector: u64 = (*frame).vector;
 
     Drivers::Console::write("process ");
-    Drivers::Console::writeDecimal(Process::currentId());
+    Drivers::Console::writeDecimal(Proc::Process::currentId());
     Drivers::Console::write(" faulted: ");
     Drivers::Console::write(mnemonic(vector));
     Drivers::Console::write(" ");
@@ -239,7 +239,7 @@ export namespace Interrupts {
 
     Drivers::Console::writeLine("");
 
-    Process::killCurrent(EXIT_STATUS_SIGNAL_BASE + signalFor(vector));
+    Proc::Process::killCurrent(EXIT_STATUS_SIGNAL_BASE + signalFor(vector));
   }
 
   /// The signal Linux sends for an exception, which a shell reports as

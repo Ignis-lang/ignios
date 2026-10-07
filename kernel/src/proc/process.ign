@@ -21,10 +21,10 @@
 //! ## Lifetime
 //!
 //! ```text
-//!   Programs::run("hello")
-//!     └─ Process::startElf(image)
+//!   Proc::Programs::run("hello")
+//!     └─ Proc::Process::startElf(image)
 //!          ├─ Mm::AddressSpace::create            new PML4, kernel half shared
-//!          ├─ Elf::load                       map and fill PT_LOAD segments
+//!          ├─ Proc::Elf::load                       map and fill PT_LOAD segments
 //!          ├─ mapStack                        8 zeroed no-execute pages
 //!          └─ launch
 //!               ├─ slot := RUNNING, id := nextId++
@@ -36,7 +36,7 @@
 //!                      └─ Sched::Scheduler::exitCurrent   thread DEAD
 //!   next thread:     reapZombie frees the kernel stack and destroys the
 //!                    address space (every frame goes back to the PMM)
-//!   Process::wait:   sleeps until EXITED and the thread is gone,
+//!   Proc::Process::wait:   sleeps until EXITED and the thread is gone,
 //!                    returns the status, slot := FREE
 //! ```
 //!
@@ -60,7 +60,7 @@ import Drivers from "@drivers";
 import Lib from "@lib";
 import Mm from "@mm";
 import Sched from "@sched";
-import Elf, LoadedImage from "./elf";
+import _ from "./elf";
 
 /// One entry of the process table.
 @cLayout
@@ -97,7 +97,7 @@ record ProcessState {
 }
 
 /// The process API.
-export namespace Process {
+namespace Proc::Process {
   /// Size of the process table.
   const MAX_PROCESSES: u64 = 8;
 
@@ -172,12 +172,12 @@ export namespace Process {
       return NO_PROCESS;
     }
 
-    let mut loaded: LoadedImage = LoadedImage { entry: 0, segments: 0, pages: 0 };
-    let error: u64 = Elf::load(image, size, root, &mut loaded as *mut LoadedImage);
+    let mut loaded: Proc::LoadedImage = Proc::LoadedImage { entry: 0, segments: 0, pages: 0 };
+    let error: u64 = Proc::Elf::load(image, size, root, &mut loaded as *mut Proc::LoadedImage);
 
-    if (error != Elf::OK) {
+    if (error != Proc::Elf::OK) {
       Drivers::Console::write("elf: ");
-      Drivers::Console::writeLine(Elf::describe(error));
+      Drivers::Console::writeLine(Proc::Elf::describe(error));
       Mm::AddressSpace::destroy(root);
       return NO_PROCESS;
     }

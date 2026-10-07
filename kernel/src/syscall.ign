@@ -64,9 +64,9 @@
 
 import Drivers from "@drivers";
 import Mm from "@mm";
+import Proc from "@proc";
 import Sched from "@sched";
 import Time from "@time";
-import Process from "./process";
 
 /// The number-to-operation table of the Linux ABI and a scratch buffer.
 record SyscallState {
@@ -181,20 +181,20 @@ export namespace Syscall {
   /// the calling thread.
   @externName("ignis_syscall_dispatch")
   function dispatch(frame: *mut Arch::InterruptFrame): void {
-    let operation: u8 = lookup(Process::currentAbi(), (*frame).rax);
+    let operation: u8 = lookup(Proc::Process::currentAbi(), (*frame).rax);
 
     let first: u64 = (*frame).rdi;
     let second: u64 = (*frame).rsi;
     let third: u64 = (*frame).rdx;
 
     if (operation == OP_EXIT) {
-      Process::exitCurrent(first & 0xFF);
+      Proc::Process::exitCurrent(first & 0xFF);
     }
 
     if (operation == OP_WRITE) {
       (*frame).rax = write(first, second, third);
     } else if (operation == OP_GET_PID) {
-      (*frame).rax = Process::currentId();
+      (*frame).rax = Proc::Process::currentId();
     } else if (operation == OP_YIELD) {
       Sched::Scheduler::yield();
       (*frame).rax = 0;
@@ -216,7 +216,7 @@ export namespace Syscall {
     }
 
     let total: u64 = count < MAX_WRITE ? count : MAX_WRITE;
-    let root: u64 = Process::currentRoot();
+    let root: u64 = Proc::Process::currentRoot();
     let chunk: *mut u8 = &mut SyscallState::copyBuffer as *mut u8;
 
     if (!Mm::AddressSpace::isAccessible(root, buffer, total, false)) {
@@ -249,7 +249,7 @@ export namespace Syscall {
   /// whole timer ticks (10 ms). The sleep is never interrupted, so `rem`,
   /// when given, is set to zero.
   function nanosleep(request: u64, remaining: u64): u64 {
-    let root: u64 = Process::currentRoot();
+    let root: u64 = Proc::Process::currentRoot();
     let mut time: Timespec = Timespec { seconds: 0, nanoseconds: 0 };
 
     if (!Mm::AddressSpace::copyFromUser(root, &mut time as *mut u8, request, 16)) {
@@ -300,12 +300,12 @@ export namespace Syscall {
   @externName("ignis_syscall_bad_return")
   function badReturn(rip: u64): never {
     Drivers::Console::write("process ");
-    Drivers::Console::writeDecimal(Process::currentId());
+    Drivers::Console::writeDecimal(Proc::Process::currentId());
     Drivers::Console::write(": non-canonical return address ");
     Drivers::Console::writeHex(rip);
     Drivers::Console::writeLine("");
 
-    Process::killCurrent(139);
+    Proc::Process::killCurrent(139);
   }
 
   /// The value a failing call returns in RAX: the errno, negated.
