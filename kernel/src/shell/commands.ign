@@ -1,0 +1,121 @@
+//!
+//! # Shell Commands
+//!
+//! The commands the terminal understands and how a line is matched against
+//! them.
+//!
+//! ## Terminal Commands
+//!
+//! | Command     | Effect                                                  |
+//! |-------------|---------------------------------------------------------|
+//! | `uptime`    | Time since the timer started, from the tick counter     |
+//! | `ps`        | Lists the kernel threads (`thread_commands.ign`)        |
+//! | `threads`   | Starts the demo threads (`thread_commands.ign`)         |
+//! | `run NAME`  | Runs the Limine module called NAME in ring 3            |
+//!
+//! A line that names no command does nothing: there is no "unknown command"
+//! message. The line buffer is not NUL-terminated, so every comparison is
+//! bounded by the length the terminal passes in.
+
+import Drivers from "@drivers";
+import Proc from "@proc";
+import Time from "@time";
+import _ from "./thread_commands";
+
+/// The command table.
+namespace Shell::Commands {
+  /// Prints the time since the timer started.
+  const UPTIME_COMMAND: str = "uptime";
+
+  /// Lists the kernel threads.
+  const PS_COMMAND: str = "ps";
+
+  /// Starts the demo threads.
+  const THREADS_COMMAND: str = "threads";
+
+  /// Runs a program the bootloader loaded: `run hello`. The command is a prefix
+  /// followed by a module name.
+  const RUN_COMMAND: str = "run ";
+
+  /// Byte length of `RUN_COMMAND`, including the trailing space.
+  const RUN_COMMAND_LENGTH: u64 = 4;
+
+  /// Prints seconds with three decimals, then the raw tick count. The
+  /// fraction is zero-padded by hand to three digits, because `writeDecimal`
+  /// does no padding.
+  function printUptime(): void {
+    let milliseconds: u64 = Time::Timer::uptimeMilliseconds();
+    let fraction: u64 = milliseconds % 1000;
+
+    Drivers::Console::write("uptime: ");
+    Drivers::Console::writeDecimal(milliseconds / 1000);
+    Drivers::Console::write(".");
+
+    if (fraction < 100) {
+      Drivers::Console::write("0");
+    }
+
+    if (fraction < 10) {
+      Drivers::Console::write("0");
+    }
+
+    Drivers::Console::writeDecimal(fraction);
+    Drivers::Console::write(" s, ");
+    Drivers::Console::writeDecimal(Time::Timer::ticks());
+    Drivers::Console::write(" ticks at ");
+    Drivers::Console::writeDecimal(Time::Timer::FREQUENCY);
+    Drivers::Console::writeLine(" Hz");
+  }
+
+  /// True when the first `length` bytes of `line` spell `text` exactly.
+  /// `text` is NUL-terminated and `line` is not, so `length` bounds `line`.
+  function lineIs(line: *mut u8, length: u64, text: str): boolean {
+    let mut cursor: *u8 = text as *u8;
+    let mut index: u64 = 0;
+
+    while (*cursor != 0) {
+      if (index == length || *(line + index) != *cursor) {
+        return false;
+      }
+
+      index += 1;
+      cursor = cursor + 1;
+    }
+
+    return index == length;
+  }
+
+  /// True when the line begins with `prefix`. `prefix` is NUL-terminated and
+  /// `line` is not, so `length` bounds `line`.
+  function lineStartsWith(line: *mut u8, length: u64, prefix: str): boolean {
+    let mut cursor: *u8 = prefix as *u8;
+    let mut index: u64 = 0;
+
+    while (*cursor != 0) {
+      if (index == length || *(line + index) != *cursor) {
+        return false;
+      }
+
+      index += 1;
+      cursor = cursor + 1;
+    }
+
+    return true;
+  }
+
+  /// Runs the command on the line. A line that names no command does nothing:
+  /// there is no "unknown command" message.
+  function run(line: *mut u8, length: u64): void {
+    if (lineIs(line, length, UPTIME_COMMAND)) {
+      printUptime();
+    } else if (lineIs(line, length, PS_COMMAND)) {
+      Shell::ThreadCommands::printThreads();
+    } else if (lineIs(line, length, THREADS_COMMAND)) {
+      if (!Shell::ThreadCommands::startDemo()) {
+        Drivers::Console::writeLine("threads: the thread table is full");
+      }
+    } else if (lineStartsWith(line, length, RUN_COMMAND)) {
+      Proc::Programs::run((line + RUN_COMMAND_LENGTH) as *u8, length - RUN_COMMAND_LENGTH);
+    }
+  }
+}

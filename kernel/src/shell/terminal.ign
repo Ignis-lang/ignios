@@ -1,0 +1,108 @@
+//!
+//! # Shell Terminal
+//!
+//! The interactive prompt: reads keys, edits one line and runs it.
+//!
+//! ## Overview
+//!
+//! `Shell::Terminal::run` is where the boot thread ends up. It drains the
+//! scancode queue that the keyboard interrupt fills (`Lib::ScancodeQueue`),
+//! decodes each scancode (`Drivers::Keyboard::decode`) and edits one line at a
+//! time. Printable characters are echoed and stored, Backspace erases the last
+//! stored character but never the prompt, and Enter runs the line as a command
+//! (`Shell::Commands::run`) and starts a new prompt. The terminal runs in the
+//! boot thread, so the keyboard keeps working while other threads run. Input
+//! past `LINE_CAPACITY` and Tab are ignored.
+
+import Arch from "@arch";
+import Drivers from "@drivers";
+import Lib from "@lib";
+import _ from "./commands";
+
+/// The terminal loop.
+namespace Shell::Terminal {
+  /// ASCII backspace (0x08), the byte the Backspace key decodes to.
+  const BACKSPACE: u8 = 0x08;
+
+  /// ASCII line feed (0x0A), the byte the Enter key decodes to.
+  const NEWLINE: u8 = 0x0A;
+
+  /// First printable ASCII character, space (0x20).
+  const FIRST_PRINTABLE: u8 = 0x20;
+
+  /// Last printable ASCII character, tilde (0x7E). The terminal stores only
+  /// bytes from `FIRST_PRINTABLE` to `LAST_PRINTABLE`, both included.
+  const LAST_PRINTABLE: u8 = 0x7E;
+
+  /// Bytes one input line can hold. It must equal the array size in
+  /// `runTerminal`, which has to be an integer literal.
+  const LINE_CAPACITY: u64 = 128;
+
+  /// Prints the green `> ` prompt, then switches to bright white for the text
+  /// the user types.
+  function printPrompt(): void {
+    Drivers::Console::setColors(Drivers::Color::BRIGHT_GREEN, Drivers::Color::BLACK);
+    Drivers::Console::write("> ");
+    Drivers::Console::setColors(Drivers::Color::BRIGHT_WHITE, Drivers::Color::BLACK);
+  }
+
+  /// Drains the scancode queue forever and edits one line at a time: printable
+  /// characters are echoed and stored, Backspace erases the last stored
+  /// character but never the prompt, and Enter runs the line as a command and
+  /// starts a new prompt. The terminal runs in the boot thread, so the keyboard
+  /// keeps working while other threads run. Input past `LINE_CAPACITY` and Tab
+  /// are ignored.
+  ///
+  /// The queue is checked with interrupts off, so an IRQ1 cannot land between
+  /// the check and the `sti; hlt` that sleeps until the next one:
+  ///
+  /// ```text
+  ///   cli
+  ///   queue empty?  ── yes ──► sti; hlt   (one pair: an interrupt that was
+  ///                            │           already pending wakes the hlt)
+  ///                            └─ loop
+  ///   no ──► sti, pop one scancode, decode, act
+  /// ```
+  ///
+  /// Without the `cli` the interrupt could fire after the emptiness check and
+  /// before the `hlt`, and the processor would sleep with a byte waiting.
+  function run(): void {
+    // Literal size: array lengths must be integer literals, so this repeats
+    // `LINE_CAPACITY`.
+    let mut line: u8[128];
+    let mut length: u64 = 0;
+
+    printPrompt();
+
+    while (true) {
+      Arch::Cpu::disableInterrupts();
+
+      if (Lib::ScancodeQueue::isEmpty()) {
+        Arch::Cpu::waitForInterrupt();
+        continue;
+      }
+
+      Arch::Cpu::enableInterrupts();
+
+      let character: u8 = Drivers::Keyboard::decode(Lib::ScancodeQueue::pop());
+
+      if (character == NEWLINE) {
+        Drivers::Console::writeChar(NEWLINE);
+
+        Shell::Commands::run(&mut line as *mut u8, length);
+
+        length = 0;
+        printPrompt();
+      } else if (character == BACKSPACE) {
+        if (length > 0) {
+          length -= 1;
+          Drivers::Console::writeChar(BACKSPACE);
+        }
+      } else if (character >= FIRST_PRINTABLE && character <= LAST_PRINTABLE && length < LINE_CAPACITY) {
+        line[length] = character;
+        length += 1;
+        Drivers::Console::writeChar(character);
+      }
+    }
+  }
+}

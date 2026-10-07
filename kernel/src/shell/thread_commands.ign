@@ -32,7 +32,7 @@ import Sched from "@sched";
 import Time from "@time";
 
 /// The commands.
-export namespace ThreadCommands {
+namespace Shell::ThreadCommands {
   /// Lines each demo thread prints before it exits.
   const DEMO_LINES: u64 = 4;
 

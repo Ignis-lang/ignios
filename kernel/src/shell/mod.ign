@@ -1,0 +1,35 @@
+//!
+//! # Shell
+//!
+//! The interactive terminal the boot thread becomes once the kernel is up:
+//! a prompt, line editing and a few commands.
+//!
+//! ## Public API
+//!
+//! | Name                     | File                 | Purpose                                         |
+//! |--------------------------|----------------------|-------------------------------------------------|
+//! | `Shell::Terminal::run`   | `terminal.ign`       | the prompt loop, never returns                  |
+//! | `Shell::Commands`        | `commands.ign`       | matches a line against `uptime`, `ps`, `threads`, `run NAME` |
+//! | `Shell::ThreadCommands`  | `thread_commands.ign`| the `ps` table and the `threads` demo           |
+//!
+//! ## Dependencies
+//!
+//! `Shell` is at the top of the kernel: it imports whatever a command needs
+//! and nothing imports it except `main`.
+//!
+//! | Imports   | Why                                                                |
+//! |-----------|--------------------------------------------------------------------|
+//! | `Drivers` | the console, the keyboard decoder                                  |
+//! | `Lib`     | the scancode ring buffer the keyboard interrupt fills              |
+//! | `Arch`    | `cli`, `sti`, `hlt` around the empty-queue check                   |
+//! | `Time`    | `uptime`                                                           |
+//! | `Sched`   | `ps` and the demo threads                                          |
+//! | `Proc`    | `run NAME` starts a program from a Limine module                   |
+
+import _ from "./commands";
+import _ from "./terminal";
+import _ from "./thread_commands";
+
+/// Aggregate namespace of the shell. The files above contribute
+/// `Shell::Terminal`, `Shell::Commands` and `Shell::ThreadCommands`.
+export namespace Shell {}
