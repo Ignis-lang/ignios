@@ -1,0 +1,473 @@
+//! The kernel's own 4-level page tables.
+//!
+//! The tables are built from PMM frames, written through the higher half
+//! direct map, and loaded into CR3 by `initialize`. They map:
+//!
+//! - the kernel image, one mapping per linker segment: text is read and
+//!   execute, rodata is read only, data and bss are read and write, and
+//!   everything but text is no-execute;
+//! - the direct map at the same offset Limine uses, so pointers made before
+//!   the switch stay valid. It covers the memory map entry types Limine maps
+//!   for base revision 6 (usable, bootloader reclaimable, executable and
+//!   modules, framebuffer, reserved mapped, ACPI reclaimable and ACPI NVS),
+//!   read and write and no-execute, with 2 MiB pages wherever a range allows
+//!   it;
+//! - the framebuffer, write-combining.
+//!
+//! Only 4 KiB and 2 MiB pages exist. Tables are never freed, and the code is
+//! not synchronized: the kernel has one processor.
+
+import Cpu from "./arch/x86_64/cpu";
+import Hhdm from "./hhdm";
+import Limine from "./limine";
+import Pmm from "./pmm";
+import Mem from "./lib/mem";
+
+record VmmState {
+  static mut root: u64 = 0;
+}
+
+export namespace Vmm {
+  const PAGE_SIZE: u64 = 4096;
+  const LARGE_PAGE_SIZE: u64 = 2097152;
+  const INDEX_MASK: u64 = 0x1FF;
+
+  /// Bits 12 to 51 of an entry: the physical address of the next table or
+  /// of a 4 KiB page.
+  const ADDRESS_MASK: u64 = 0x000FFFFFFFFFF000;
+  const LARGE_ADDRESS_MASK: u64 = 0x000FFFFFFFE00000;
+
+  const PRESENT: u64 = 0x1;
+  const HUGE: u64 = 0x80;
+  const WRITE_THROUGH: u64 = 0x8;
+  const PAT_SMALL: u64 = 0x80;
+  const PAT_LARGE: u64 = 0x1000;
+
+  /// Flags for `map` and `mapLarge`. A page is read only and executable
+  /// unless they say otherwise.
+  const WRITABLE: u64 = 0x2;
+  const USER: u64 = 0x4;
+  const NO_EXECUTE: u64 = 0x8000000000000000;
+
+  /// Selects PAT entry 5, which Limine programs as write-combining. It is
+  /// kept in an ignored entry bit and turned into the PAT, PCD and PWT bits
+  /// that fit the page size.
+  const WRITE_COMBINING: u64 = 0x200;
+
+  const EFER_MSR: u32 = 0xC0000080;
+  const EFER_NO_EXECUTE_ENABLE: u64 = 0x800;
+  const CR0_WRITE_PROTECT: u64 = 0x10000;
+
+  /// Returned by `translate` for an address that is not mapped.
+  const NOT_MAPPED: u64 = 0xFFFFFFFFFFFFFFFF;
+
+  /// One bit per memory map entry type: usable (0), ACPI reclaimable (2),
+  /// ACPI NVS (3), bootloader reclaimable (5), executable and modules (6),
+  /// framebuffer (7) and reserved mapped (8).
+  const DIRECT_MAPPED_KINDS: u64 = 0x1ED;
+
+  const TEST_ADDRESS: u64 = 0xFFFFE00000000000;
+
+  /// Builds the kernel page tables and switches to them. Needs the PMM and
+  /// the Limine responses; the framebuffer may be null.
+  function initialize(framebuffer: *mut Limine::Framebuffer): void {
+    Cpu::writeMsr(EFER_MSR, Cpu::readMsr(EFER_MSR) | EFER_NO_EXECUTE_ENABLE);
+    Cpu::writeCr0(Cpu::readCr0() | CR0_WRITE_PROTECT);
+
+    VmmState::root = allocateTable();
+
+    mapKernelImage();
+
+    if (framebuffer != null) {
+      mapFramebuffer(framebuffer);
+    }
+
+    mapDirectMap();
+
+    Cpu::writeCr3(VmmState::root);
+  }
+
+  /// The physical address of the PML4 in use.
+  function rootTable(): u64 {
+    return VmmState::root;
+  }
+
+  /// Maps the 4 KiB page at `virtualAddress` to `physical`. Returns false
+  /// and changes nothing when an address is not page aligned or the page is
+  /// already mapped, alone or as part of a 2 MiB page.
+  function map(virtualAddress: u64, physical: u64, flags: u64): boolean {
+    if (virtualAddress % PAGE_SIZE != 0 || physical % PAGE_SIZE != 0) {
+      return false;
+    }
+
+    let directory: *mut u64 = directoryFor(virtualAddress);
+    let directoryEntry: u64 = *(directory + level2Index(virtualAddress));
+
+    if ((directoryEntry & HUGE) != 0 && (directoryEntry & PRESENT) != 0) {
+      return false;
+    }
+
+    let pageTable: *mut u64 = descend(directory, level2Index(virtualAddress));
+    let entry: *mut u64 = pageTable + level1Index(virtualAddress);
+
+    if ((*entry & PRESENT) != 0) {
+      return false;
+    }
+
+    *entry = physical | leafBits(flags, PAT_SMALL) | PRESENT;
+    flush(virtualAddress);
+
+    return true;
+  }
+
+  /// Maps the 2 MiB page at `virtualAddress` to `physical`. Returns false
+  /// and changes nothing when an address is not 2 MiB aligned or anything is
+  /// already mapped in that range.
+  function mapLarge(virtualAddress: u64, physical: u64, flags: u64): boolean {
+    if (virtualAddress % LARGE_PAGE_SIZE != 0 || physical % LARGE_PAGE_SIZE != 0) {
+      return false;
+    }
+
+    let directory: *mut u64 = directoryFor(virtualAddress);
+    let entry: *mut u64 = directory + level2Index(virtualAddress);
+
+    if ((*entry & PRESENT) != 0) {
+      return false;
+    }
+
+    *entry = physical | leafBits(flags, PAT_LARGE) | HUGE | PRESENT;
+    flush(virtualAddress);
+
+    return true;
+  }
+
+  /// Unmaps the 4 KiB page at `virtualAddress` and drops its TLB entry. The
+  /// page table stays. Returns false when no 4 KiB page is mapped there.
+  function unmap(virtualAddress: u64): boolean {
+    let entry: *mut u64 = findSmallEntry(virtualAddress);
+
+    if (entry == null || (*entry & PRESENT) == 0) {
+      return false;
+    }
+
+    *entry = 0;
+    flush(virtualAddress);
+
+    return true;
+  }
+
+  /// The physical address `virtualAddress` maps to, offset included, or
+  /// `NOT_MAPPED`.
+  function translate(virtualAddress: u64): u64 {
+    let pml4: *mut u64 = tableAt(VmmState::root);
+    let pdptEntry: u64 = *(pml4 + level4Index(virtualAddress));
+
+    if ((pdptEntry & PRESENT) == 0) {
+      return NOT_MAPPED;
+    }
+
+    let pdpt: *mut u64 = tableAt(pdptEntry & ADDRESS_MASK);
+    let directoryEntry: u64 = *(pdpt + level3Index(virtualAddress));
+
+    if ((directoryEntry & PRESENT) == 0) {
+      return NOT_MAPPED;
+    }
+
+    let directory: *mut u64 = tableAt(directoryEntry & ADDRESS_MASK);
+    let largeOrTable: u64 = *(directory + level2Index(virtualAddress));
+
+    if ((largeOrTable & PRESENT) == 0) {
+      return NOT_MAPPED;
+    }
+
+    if ((largeOrTable & HUGE) != 0) {
+      return (largeOrTable & LARGE_ADDRESS_MASK) | (virtualAddress & (LARGE_PAGE_SIZE - 1));
+    }
+
+    let pageTable: *mut u64 = tableAt(largeOrTable & ADDRESS_MASK);
+    let pageEntry: u64 = *(pageTable + level1Index(virtualAddress));
+
+    if ((pageEntry & PRESENT) == 0) {
+      return NOT_MAPPED;
+    }
+
+    return (pageEntry & ADDRESS_MASK) | (virtualAddress & (PAGE_SIZE - 1));
+  }
+
+  /// Drops the TLB entry of the page containing `virtualAddress`.
+  function flush(virtualAddress: u64): void {
+    Cpu::invalidatePage(virtualAddress);
+  }
+
+  /// Maps and unmaps a fresh frame and checks that `translate` and the
+  /// mappings agree with the direct map. Panics on the first violation.
+  function selfTest(): void {
+    let frame: u64 = Pmm::allocateFrame();
+
+    if (frame == Pmm::NO_FRAME) {
+      @panic("vmm self-test: no frame");
+    }
+
+    if (translate(TEST_ADDRESS) != NOT_MAPPED) {
+      @panic("vmm self-test: test address already mapped");
+    }
+
+    if (!map(TEST_ADDRESS, frame, WRITABLE | NO_EXECUTE)) {
+      @panic("vmm self-test: map failed");
+    }
+
+    if (map(TEST_ADDRESS, frame, WRITABLE | NO_EXECUTE)) {
+      @panic("vmm self-test: double map succeeded");
+    }
+
+    if (translate(TEST_ADDRESS + 0x123) != frame + 0x123) {
+      @panic("vmm self-test: translate disagrees with map");
+    }
+
+    let mapped: *mut u64 = @pointerFromInteger<*mut u64>(TEST_ADDRESS);
+    let direct: *mut u64 = Hhdm::toVirtual(frame) as *mut u64;
+
+    *mapped = 0x1234567890ABCDEF;
+
+    if (*direct != 0x1234567890ABCDEF) {
+      @panic("vmm self-test: the mapping and the direct map differ");
+    }
+
+    if (!unmap(TEST_ADDRESS) || translate(TEST_ADDRESS) != NOT_MAPPED) {
+      @panic("vmm self-test: unmap failed");
+    }
+
+    Pmm::freeFrame(frame);
+  }
+
+  /// Maps text, rodata and data plus bss at the addresses Limine loaded the
+  /// image at.
+  function mapKernelImage(): void {
+    let response: *mut Limine::ExecutableAddressResponse = Limine::executableAddress();
+
+    if (response == null) {
+      @panic("Limine provided no executable address");
+    }
+
+    let textStart: u64 = textStartAddress();
+
+    if ((*response).virtualBase != textStart) {
+      @panic("vmm: the kernel is not loaded at its link address");
+    }
+
+    mapSegment(textStartAddress(), textEndAddress(), 0);
+    mapSegment(rodataStartAddress(), rodataEndAddress(), NO_EXECUTE);
+    mapSegment(dataStartAddress(), dataEndAddress(), WRITABLE | NO_EXECUTE);
+  }
+
+  /// The page-aligned segment boundaries that `kernel/linker.ld` defines.
+  /// They are read with `lea` because a linker symbol has an address and no
+  /// value, and Ignis has no way to take the address of an extern constant.
+  function textStartAddress(): u64 {
+    return asm () -> (value: u64 in rax) { lea {value}, [rip + __text_start] };
+  }
+
+  function textEndAddress(): u64 {
+    return asm () -> (value: u64 in rax) { lea {value}, [rip + __text_end] };
+  }
+
+  function rodataStartAddress(): u64 {
+    return asm () -> (value: u64 in rax) { lea {value}, [rip + __rodata_start] };
+  }
+
+  function rodataEndAddress(): u64 {
+    return asm () -> (value: u64 in rax) { lea {value}, [rip + __rodata_end] };
+  }
+
+  function dataStartAddress(): u64 {
+    return asm () -> (value: u64 in rax) { lea {value}, [rip + __data_start] };
+  }
+
+  function dataEndAddress(): u64 {
+    return asm () -> (value: u64 in rax) { lea {value}, [rip + __data_end] };
+  }
+
+  function mapSegment(start: u64, end: u64, flags: u64): void {
+    let response: *mut Limine::ExecutableAddressResponse = Limine::executableAddress();
+    let delta: u64 = (*response).physicalBase - (*response).virtualBase;
+
+    let mut address: u64 = start;
+
+    while (address < end) {
+      if (!map(address, address + delta, flags)) {
+        @panic("vmm: kernel image page mapped twice");
+      }
+
+      address += PAGE_SIZE;
+    }
+  }
+
+  /// Maps the framebuffer write-combining through the direct map. It is
+  /// mapped before the memory map pass so that its mapping is the one that
+  /// stays.
+  function mapFramebuffer(framebuffer: *mut Limine::Framebuffer): void {
+    let virtualStart: u64 = @integerFromPointer((*framebuffer).address);
+    let size: u64 = (*framebuffer).pitch * (*framebuffer).height;
+
+    let start: u64 = virtualStart / PAGE_SIZE * PAGE_SIZE;
+    let end: u64 = (virtualStart + size + PAGE_SIZE - 1) / PAGE_SIZE * PAGE_SIZE;
+
+    mapRange(start, start - Hhdm::offset(), end - start, WRITABLE | NO_EXECUTE | WRITE_COMBINING);
+  }
+
+  /// Maps every memory map entry that Limine maps in its direct map.
+  function mapDirectMap(): void {
+    let memmap: *mut Limine::MemmapResponse = Limine::memmap();
+    let offset: u64 = Hhdm::offset();
+
+    let mut index: u64 = 0;
+
+    while (index < (*memmap).entryCount) {
+      let entry: *mut Limine::MemmapEntry = Limine::memmapEntry(memmap, index);
+
+      if (isDirectMapped((*entry).kind)) {
+        let start: u64 = (*entry).base / PAGE_SIZE * PAGE_SIZE;
+        let end: u64 = ((*entry).base + (*entry).length + PAGE_SIZE - 1) / PAGE_SIZE * PAGE_SIZE;
+
+        let mut flags: u64 = WRITABLE | NO_EXECUTE;
+
+        if ((*entry).kind == Limine::MEMMAP_FRAMEBUFFER) {
+          flags = flags | WRITE_COMBINING;
+        }
+
+        mapRange(offset + start, start, end - start, flags);
+      }
+
+      index += 1;
+    }
+  }
+
+  /// The entry types Limine maps in the direct map at base revision 6,
+  /// looked up in `DIRECT_MAPPED_KINDS`.
+  function isDirectMapped(kind: u64): boolean {
+    return kind < 64 && ((DIRECT_MAPPED_KINDS >> kind) & 1) != 0;
+  }
+
+  /// Maps `[virtualStart, virtualStart + length)` to `physicalStart`, with
+  /// 2 MiB pages where both addresses and the remaining length allow it. A
+  /// page that is already mapped is left as it is, because memory map entries
+  /// other than usable ones may overlap.
+  function mapRange(virtualStart: u64, physicalStart: u64, length: u64, flags: u64): void {
+    let mut done: u64 = 0;
+
+    while (done < length) {
+      let virtualAddress: u64 = virtualStart + done;
+      let physical: u64 = physicalStart + done;
+
+      if (virtualAddress % LARGE_PAGE_SIZE == 0 && physical % LARGE_PAGE_SIZE == 0 && length - done >= LARGE_PAGE_SIZE) {
+        if (!mapLarge(virtualAddress, physical, flags)) {
+          mapSmallRange(virtualAddress, physical, LARGE_PAGE_SIZE, flags);
+        }
+
+        done += LARGE_PAGE_SIZE;
+      } else {
+        map(virtualAddress, physical, flags);
+        done += PAGE_SIZE;
+      }
+    }
+  }
+
+  function mapSmallRange(virtualStart: u64, physicalStart: u64, length: u64, flags: u64): void {
+    let mut done: u64 = 0;
+
+    while (done < length) {
+      map(virtualStart + done, physicalStart + done, flags);
+      done += PAGE_SIZE;
+    }
+  }
+
+  /// The entry bits that belong in a leaf entry: the permission flags, and
+  /// for write-combining the PAT selection for this page size.
+  function leafBits(flags: u64, patBit: u64): u64 {
+    if ((flags & WRITE_COMBINING) == 0) {
+      return flags;
+    }
+
+    return (flags & ~WRITE_COMBINING) | patBit | WRITE_THROUGH;
+  }
+
+  /// The page directory for `virtualAddress`, creating the levels above it.
+  function directoryFor(virtualAddress: u64): *mut u64 {
+    let pdpt: *mut u64 = descend(tableAt(VmmState::root), level4Index(virtualAddress));
+
+    return descend(pdpt, level3Index(virtualAddress));
+  }
+
+  /// The entry of the 4 KiB page for `virtualAddress`, or null when a level
+  /// above it is missing or the address sits in a 2 MiB page.
+  function findSmallEntry(virtualAddress: u64): *mut u64 {
+    let pml4: *mut u64 = tableAt(VmmState::root);
+    let pdptEntry: u64 = *(pml4 + level4Index(virtualAddress));
+
+    if ((pdptEntry & PRESENT) == 0) {
+      return null;
+    }
+
+    let pdpt: *mut u64 = tableAt(pdptEntry & ADDRESS_MASK);
+    let directoryEntry: u64 = *(pdpt + level3Index(virtualAddress));
+
+    if ((directoryEntry & PRESENT) == 0) {
+      return null;
+    }
+
+    let directory: *mut u64 = tableAt(directoryEntry & ADDRESS_MASK);
+    let tableEntry: u64 = *(directory + level2Index(virtualAddress));
+
+    if ((tableEntry & PRESENT) == 0 || (tableEntry & HUGE) != 0) {
+      return null;
+    }
+
+    return tableAt(tableEntry & ADDRESS_MASK) + level1Index(virtualAddress);
+  }
+
+  /// The table that entry `index` of `table` points to, allocating it when
+  /// the entry is empty. Intermediate entries allow everything, so the leaf
+  /// entry alone decides the permissions.
+  function descend(table: *mut u64, index: u64): *mut u64 {
+    let entry: *mut u64 = table + index;
+
+    if ((*entry & PRESENT) == 0) {
+      *entry = allocateTable() | WRITABLE | PRESENT;
+    }
+
+    return tableAt(*entry & ADDRESS_MASK);
+  }
+
+  /// A zeroed frame for a page table.
+  function allocateTable(): u64 {
+    let frame: u64 = Pmm::allocateFrame();
+
+    if (frame == Pmm::NO_FRAME) {
+      @panic("vmm: out of frames for page tables");
+    }
+
+    Mem::fill(Hhdm::toVirtual(frame), 0, PAGE_SIZE);
+
+    return frame;
+  }
+
+  function tableAt(physical: u64): *mut u64 {
+    return Hhdm::toVirtual(physical) as *mut u64;
+  }
+
+  function level4Index(virtualAddress: u64): u64 {
+    return (virtualAddress >> 39) & INDEX_MASK;
+  }
+
+  function level3Index(virtualAddress: u64): u64 {
+    return (virtualAddress >> 30) & INDEX_MASK;
+  }
+
+  function level2Index(virtualAddress: u64): u64 {
+    return (virtualAddress >> 21) & INDEX_MASK;
+  }
+
+  function level1Index(virtualAddress: u64): u64 {
+    return (virtualAddress >> 12) & INDEX_MASK;
+  }
+}

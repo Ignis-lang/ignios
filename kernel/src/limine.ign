@@ -94,6 +94,20 @@ export namespace Limine {
     public response: *mut HhdmResponse;
   }
 
+  @cLayout
+  record ExecutableAddressResponse {
+    public revision: u64;
+    public physicalBase: u64;
+    public virtualBase: u64;
+  }
+
+  @cLayout
+  record ExecutableAddressRequest {
+    public id: u64[4];
+    public revision: u64;
+    public response: *mut ExecutableAddressResponse;
+  }
+
   record Requests {
     static mut baseRevision: BaseRevision = BaseRevision {
       magic: [0xf9562b2d5c95a6c8, 0x6a7b384944536bdc],
@@ -114,6 +128,12 @@ export namespace Limine {
 
     static mut hhdm: HhdmRequest = HhdmRequest {
       id: [COMMON_MAGIC_0, COMMON_MAGIC_1, 0x48dcf1cb8ad2b852, 0x63984e959a98244b],
+      revision: 0,
+      response: null,
+    };
+
+    static mut executableAddress: ExecutableAddressRequest = ExecutableAddressRequest {
+      id: [COMMON_MAGIC_0, COMMON_MAGIC_1, 0x71ba76863cc55f63, 0xb2644a48c516a487],
       revision: 0,
       response: null,
     };
@@ -156,5 +176,13 @@ export namespace Limine {
   /// The higher half direct map, or null when the bootloader provided none.
   function hhdm(): *mut HhdmResponse {
     return readResponse<HhdmResponse>(&mut Requests::hhdm.response as *mut *mut HhdmResponse);
+  }
+
+  /// Where the kernel image is loaded, or null when the bootloader gave no
+  /// answer.
+  function executableAddress(): *mut ExecutableAddressResponse {
+    return readResponse<ExecutableAddressResponse>(
+      &mut Requests::executableAddress.response as *mut *mut ExecutableAddressResponse,
+    );
   }
 }

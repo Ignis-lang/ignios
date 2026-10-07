@@ -37,4 +37,45 @@ export namespace Cpu {
   function pause(): void {
     asm () { pause }
   }
+
+  /// Reads a model specific register.
+  function readMsr(msr: u32): u64 {
+    asm (msr in ecx) -> (low: u32 in eax, high: u32 in edx) {
+      rdmsr
+    }
+
+    return ((high as u64) << 32) | (low as u64);
+  }
+
+  function writeMsr(msr: u32, value: u64): void {
+    let low: u32 = value as u32;
+    let high: u32 = (value >> 32) as u32;
+
+    asm (msr in ecx, low in eax, high in edx) clobber(memory) {
+      wrmsr
+    }
+  }
+
+  function readCr0(): u64 {
+    return asm () -> (value: u64 in rax) { mov {value}, cr0 };
+  }
+
+  function writeCr0(value: u64): void {
+    asm (value in rax) clobber(memory) { mov cr0, {value} }
+  }
+
+  function readCr3(): u64 {
+    return asm () -> (value: u64 in rax) { mov {value}, cr3 };
+  }
+
+  /// Loads a new top-level page table. Every translation that is not global
+  /// is dropped from the TLB.
+  function writeCr3(value: u64): void {
+    asm (value in rax) clobber(memory) { mov cr3, {value} }
+  }
+
+  /// Drops the TLB entry of the page containing `address`.
+  function invalidatePage(address: u64): void {
+    asm (address in rax) clobber(memory) { invlpg [{address}] }
+  }
 }

@@ -15,17 +15,25 @@ SECTIONS
     /* Limine requires the kernel in the top 2 GiB of the address space. */
     . = 0xffffffff80000000;
 
+    /* The boundaries are page aligned and let the kernel map each segment
+     * with its own permissions. */
+    __text_start = .;
+
     .text : {
         *(.text .text.*)
     } :text
 
     . = ALIGN(CONSTANT(MAXPAGESIZE));
+    __text_end = .;
+    __rodata_start = .;
 
     .rodata : {
         *(.rodata .rodata.*)
     } :rodata
 
     . = ALIGN(CONSTANT(MAXPAGESIZE));
+    __rodata_end = .;
+    __data_start = .;
 
     .data : {
         *(.data .data.*)
@@ -36,6 +44,9 @@ SECTIONS
         *(.bss .bss.*)
         *(COMMON)
     } :data
+
+    . = ALIGN(CONSTANT(MAXPAGESIZE));
+    __data_end = .;
 
     /DISCARD/ : {
         *(.eh_frame*)

@@ -13,6 +13,7 @@ import Pmm from "./pmm";
 import Ps2 from "./ps2";
 import ScancodeQueue from "./scancode_queue";
 import Serial from "./serial";
+import Vmm from "./vmm";
 import _ from "./lib/mem";
 
 record PanicState {
@@ -137,8 +138,9 @@ function reportGdt(): void {
   Serial::write("\n");
 }
 
-/// Builds the frame allocator, reports its counts and runs its self-test.
-function initializeMemory(): void {
+/// Builds the frame allocator and the kernel page tables, reports on them and
+/// runs their self-tests.
+function initializeMemory(framebuffer: *mut Limine::Framebuffer): void {
   Pmm::initialize();
 
   Console::write("pmm: ");
@@ -151,6 +153,17 @@ function initializeMemory(): void {
 
   Pmm::selfTest();
   Console::writeLine("pmm: self-test ok");
+
+  Vmm::initialize(framebuffer);
+
+  Console::write("vmm: cr3 switched, cr3 ");
+  Console::writeHex(Cpu::readCr3());
+  Console::write(", pml4 ");
+  Console::writeHex(Vmm::rootTable());
+  Console::writeLine("");
+
+  Vmm::selfTest();
+  Console::writeLine("vmm: self-test ok");
 }
 
 function printPrompt(): void {
@@ -222,7 +235,7 @@ function kmain(): void {
   Console::initialize(framebuffer);
   printBanner(framebuffer);
 
-  initializeMemory();
+  initializeMemory(framebuffer);
 
   if (!initializeKeyboard()) {
     Cpu::haltForever();
