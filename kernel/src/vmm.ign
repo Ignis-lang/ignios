@@ -8,10 +8,11 @@
 //!   everything but text is no-execute;
 //! - the direct map at the same offset Limine uses, so pointers made before
 //!   the switch stay valid. It covers the memory map entry types Limine maps
-//!   for base revision 6 (usable, bootloader reclaimable, executable and
-//!   modules, framebuffer, reserved mapped, ACPI reclaimable and ACPI NVS),
-//!   read and write and no-execute, with 2 MiB pages wherever a range allows
-//!   it;
+//!   for base revision 6 except executable and modules (usable, bootloader
+//!   reclaimable, framebuffer, reserved mapped, ACPI reclaimable and ACPI
+//!   NVS), read and write and no-execute, with 2 MiB pages wherever a range
+//!   allows it. The kernel image is left out, so its text and rodata cannot
+//!   be written through the direct map;
 //! - the framebuffer, write-combining.
 //!
 //! Only 4 KiB and 2 MiB pages exist. Tables are never freed, and the code is
@@ -62,9 +63,9 @@ export namespace Vmm {
   const NOT_MAPPED: u64 = 0xFFFFFFFFFFFFFFFF;
 
   /// One bit per memory map entry type: usable (0), ACPI reclaimable (2),
-  /// ACPI NVS (3), bootloader reclaimable (5), executable and modules (6),
-  /// framebuffer (7) and reserved mapped (8).
-  const DIRECT_MAPPED_KINDS: u64 = 0x1ED;
+  /// ACPI NVS (3), bootloader reclaimable (5), framebuffer (7) and reserved
+  /// mapped (8). Executable and modules (6) is left out on purpose.
+  const DIRECT_MAPPED_KINDS: u64 = 0x1AD;
 
   const TEST_ADDRESS: u64 = 0xFFFFE00000000000;
 
@@ -342,8 +343,7 @@ export namespace Vmm {
     }
   }
 
-  /// The entry types Limine maps in the direct map at base revision 6,
-  /// looked up in `DIRECT_MAPPED_KINDS`.
+  /// The entry types the kernel maps in the direct map, looked up in `DIRECT_MAPPED_KINDS`.
   function isDirectMapped(kind: u64): boolean {
     return kind < 64 && ((DIRECT_MAPPED_KINDS >> kind) & 1) != 0;
   }
