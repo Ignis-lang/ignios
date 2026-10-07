@@ -1,0 +1,59 @@
+//!
+//! # Virtual Memory Self-Test
+//!
+//! Maps and unmaps a fresh frame and checks the kernel page tables.
+//!
+//! ## Overview
+//!
+//! The test maps a frame at `Mm::Vmm::TEST_ADDRESS`, checks that `translate`
+//! and the mapping agree with the direct map, that mapping twice fails and
+//! that `unmap` removes the translation. It panics on the first violation.
+
+import Boot from "@boot";
+import Drivers from "@drivers";
+import Mm from "@mm";
+
+namespace Tests::Vmm {
+  /// Maps and unmaps a fresh frame and checks that `translate` and the
+  /// mappings agree with the direct map. Panics on the first violation.
+  function run(): void {
+    let frame: u64 = Mm::Pmm::allocateFrame();
+
+    if (frame == Mm::Pmm::NO_FRAME) {
+      @panic("vmm self-test: no frame");
+    }
+
+    if (Mm::Vmm::translate(Mm::Vmm::TEST_ADDRESS) != Mm::Vmm::NOT_MAPPED) {
+      @panic("vmm self-test: test address already mapped");
+    }
+
+    if (!Mm::Vmm::map(Mm::Vmm::TEST_ADDRESS, frame, Mm::Vmm::WRITABLE | Mm::Vmm::NO_EXECUTE)) {
+      @panic("vmm self-test: map failed");
+    }
+
+    if (Mm::Vmm::map(Mm::Vmm::TEST_ADDRESS, frame, Mm::Vmm::WRITABLE | Mm::Vmm::NO_EXECUTE)) {
+      @panic("vmm self-test: double map succeeded");
+    }
+
+    if (Mm::Vmm::translate(Mm::Vmm::TEST_ADDRESS + 0x123) != frame + 0x123) {
+      @panic("vmm self-test: translate disagrees with map");
+    }
+
+    let mapped: *mut u64 = @pointerFromInteger<*mut u64>(Mm::Vmm::TEST_ADDRESS);
+    let direct: *mut u64 = Boot::Hhdm::toVirtual(frame) as *mut u64;
+
+    *mapped = 0x1234567890ABCDEF;
+
+    if (*direct != 0x1234567890ABCDEF) {
+      @panic("vmm self-test: the mapping and the direct map differ");
+    }
+
+    if (!Mm::Vmm::unmap(Mm::Vmm::TEST_ADDRESS) || Mm::Vmm::translate(Mm::Vmm::TEST_ADDRESS) != Mm::Vmm::NOT_MAPPED) {
+      @panic("vmm self-test: unmap failed");
+    }
+
+    Mm::Pmm::freeFrame(frame);
+
+    Drivers::Console::writeLine("vmm: self-test ok");
+  }
+}

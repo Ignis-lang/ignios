@@ -11,12 +11,13 @@
 //! | `Trap::dispatch`  | `dispatch.ign`  | called by `interrupt_asm.S` for every vector             |
 //! | `Trap::KEYBOARD_VECTOR`, `Trap::TIMER_VECTOR` | `dispatch.ign` | the two device vectors the kernel uses |
 //! | `Trap::Exception` | `exception.ign` | exception names, the fatal report, killing a faulting process |
+//! | `Trap::Setup`     | `setup.ign`     | GDT, IDT and `SYSCALL` setup, with their boot log lines  |
 //!
 //! ## Dependencies
 //!
 //! | Imports   | Why                                                                |
 //! |-----------|--------------------------------------------------------------------|
-//! | `Arch`    | the 8259, `Arch::Cpu::haltForever`, `Arch::InterruptFrame`         |
+//! | `Arch`    | the 8259, the GDT, the IDT, `Arch::Cpu::haltForever`, `Arch::InterruptFrame` |
 //! | `Apic`    | the end-of-interrupt write and the spurious vector                 |
 //! | `Drivers` | the PS/2 interrupt handler and the exception report                |
 //! | `Time`    | `Time::Timer::handleTick` on every timer interrupt                 |
@@ -33,7 +34,9 @@
 
 import _ from "./dispatch";
 import _ from "./exception";
+import _ from "./setup";
 
 /// Aggregate namespace of the trap code. `dispatch.ign` adds the dispatcher
-/// and the vector numbers, and `exception.ign` adds `Trap::Exception`.
+/// and the vector numbers, `exception.ign` adds `Trap::Exception` and
+/// `setup.ign` adds `Trap::Setup`.
 export namespace Trap {}

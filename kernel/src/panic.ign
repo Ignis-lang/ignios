@@ -1,0 +1,66 @@
+//!
+//! # Panic Handler
+//!
+//! Where every `@panic(...)` in the kernel ends.
+//!
+//! ## Overview
+//!
+//! `onPanic` is registered with `@panicHandler`, so every `@panic(...)` call in
+//! the kernel ends there. There is no unwinding: the machine stops in
+//! `Arch::Cpu::haltForever`.
+//!
+//! The report goes to COM1, and to the console once it is initialized. On the
+//! console it is bright white on red. On COM1 it is the same text with `\r\n`
+//! line endings (added by `Drivers::Serial::write`). A panic raised while
+//! reporting another one only reaches COM1, so a fault in the console cannot
+//! recurse.
+//!
+//! This file is not a subsystem. `main.ign` imports it so the handler is
+//! compiled in.
+
+import Arch from "@arch";
+import Drivers from "@drivers";
+
+/// Set by the first panic so a second panic knows the console path already
+/// failed or is in use.
+record PanicState {
+  /// True once a panic is being reported.
+  static mut active: boolean = false;
+}
+
+/// Reports the panic on COM1, and on the console once it is initialized, then
+/// stops the machine. A panic raised while reporting another one only reaches
+/// COM1, so a fault in the console cannot recurse.
+///
+/// The compiler routes every `@panic(...)` call here. `file` and `line` locate
+/// the call in the Ignis source. Never returns.
+///
+/// On the console the report is bright white on red. On COM1 it is the same
+/// text with `\r\n` line endings (added by `Drivers::Serial::write`).
+@panicHandler
+function onPanic(message: str, file: str, line: u32): never {
+  if (PanicState::active || !Drivers::Console::isInitialized()) {
+    Drivers::Serial::write("\npanic: ");
+    Drivers::Serial::write(message);
+    Drivers::Serial::write(" at ");
+    Drivers::Serial::write(file);
+    Drivers::Serial::write(":");
+    Drivers::Serial::writeDecimal(line);
+    Drivers::Serial::write("\n");
+
+    Arch::Cpu::haltForever();
+  }
+
+  PanicState::active = true;
+
+  Drivers::Console::setColors(Drivers::Color::BRIGHT_WHITE, Drivers::Color::RED);
+  Drivers::Console::write("\npanic: ");
+  Drivers::Console::write(message);
+  Drivers::Console::write(" at ");
+  Drivers::Console::write(file);
+  Drivers::Console::write(":");
+  Drivers::Console::writeDecimal(line);
+  Drivers::Console::write("\n");
+
+  Arch::Cpu::haltForever();
+}

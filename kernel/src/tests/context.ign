@@ -1,0 +1,122 @@
+//!
+//! # Context Switch Self-Test
+//!
+//! Switches into a test thread and back a few times.
+//!
+//! ## Overview
+//!
+//! The test checks what only a correct switch gives: the thread function runs
+//! on its own stack with the argument, a stack aligned as the ABI requires,
+//! interrupts enabled by the trampoline, local variables that survive every
+//! switch in both directions, and a clean return to the caller. Interrupts
+//! must be disabled, and are disabled again on return. It panics on the first
+//! violation.
+
+import Arch from "@arch";
+import Drivers from "@drivers";
+
+/// Storage for the self-test: a stack, the two saved stack pointers and what
+/// the test thread reports back. `STACK` is the stack of the test thread, 8192
+/// bytes aligned to 16 so its end is a valid stack top. It has no comment of
+/// its own because `ignis fmt` rejects a comment in front of an attribute on
+/// a record field.
+record ContextTestState {
+  @aligned(16)
+  static mut STACK: u8[8192];
+
+  /// RSP of the boot thread while the test thread runs.
+  static mut mainRsp: u64 = 0;
+
+  /// RSP of the test thread while the boot thread runs.
+  static mut threadRsp: u64 = 0;
+
+  /// Times the test thread ran, one per switch into it.
+  static mut rounds: u64 = 0;
+
+  /// The argument the test thread received.
+  static mut argument: u64 = 0;
+
+  /// RBP the test thread saw at its start, used to check stack alignment.
+  static mut framePointer: u64 = 0;
+
+  /// Whether interrupts were enabled when the test thread started.
+  static mut interruptsOnEntry: boolean = false;
+}
+
+namespace Tests::Context {
+  /// Switches into a test thread and back a few times, checking what only a
+  /// correct switch gives: the thread function runs on its own stack with
+  /// the argument, a stack aligned as the ABI requires, interrupts enabled
+  /// by the trampoline, local variables that survive every switch in both
+  /// directions, and a clean return to the caller. Interrupts must be
+  /// disabled, and are disabled again on return. Panics on the first
+  /// violation.
+  function run(): void {
+    const ROUNDS: u64 = 3;
+    const ARGUMENT: u64 = 0xC0FFEE;
+
+    let stackEnd: u64 = @integerFromPointer(&mut ContextTestState::STACK as *mut u8) + 8192;
+    let entry: u64 = Arch::ContextAsm::ignis_function_address(selfTestThread);
+
+    ContextTestState::rounds = 0;
+    ContextTestState::threadRsp = Arch::Context::prepareStack(stackEnd, entry, ARGUMENT);
+
+    let first: u64 = 0x1111111111111111;
+    let second: u64 = 0x2222222222222222;
+    let third: u64 = 0x3333333333333333;
+    let mut round: u64 = 0;
+
+    while (round < ROUNDS) {
+      Arch::Context::switchTo(&mut ContextTestState::mainRsp as *mut u64, ContextTestState::threadRsp);
+      round += 1;
+
+      if (ContextTestState::rounds != round) {
+        @panic("context self-test: the thread did not run once per switch");
+      }
+
+      if (first != 0x1111111111111111 || second != 0x2222222222222222 || third != 0x3333333333333333) {
+        @panic("context self-test: a register was lost across a switch");
+      }
+    }
+
+    if (ContextTestState::argument != ARGUMENT) {
+      @panic("context self-test: the thread function got the wrong argument");
+    }
+
+    if (!ContextTestState::interruptsOnEntry) {
+      @panic("context self-test: the trampoline left interrupts disabled");
+    }
+
+    if (ContextTestState::framePointer != stackEnd - 16) {
+      @panic("context self-test: the thread function started on a misaligned stack");
+    }
+
+    if (Arch::Cpu::interruptsEnabled()) {
+      @panic("context self-test: interrupts came back on");
+    }
+
+    Drivers::Console::writeLine("context: self-test ok, stack switch, argument, alignment and registers checked");
+  }
+
+  /// Runs on the test stack. It records what it sees, then hands the CPU back
+  /// forever. With a frame pointer the function pushes RBP at once, so RBP
+  /// is the entry RSP minus 8.
+  function selfTestThread(argument: u64): void {
+    let first: u64 = 0xAAAAAAAAAAAAAAAA;
+    let second: u64 = 0xBBBBBBBBBBBBBBBB;
+
+    ContextTestState::argument = argument;
+    ContextTestState::interruptsOnEntry = Arch::Cpu::interruptsEnabled();
+    ContextTestState::framePointer = asm () -> (value: u64 in rax) { mov {value}, rbp };
+
+    while (true) {
+      Arch::Cpu::disableInterrupts();
+      ContextTestState::rounds += 1;
+      Arch::Context::switchTo(&mut ContextTestState::threadRsp as *mut u64, ContextTestState::mainRsp);
+
+      if (first != 0xAAAAAAAAAAAAAAAA || second != 0xBBBBBBBBBBBBBBBB) {
+        @panic("context self-test: the thread lost a register across a switch");
+      }
+    }
+  }
+}

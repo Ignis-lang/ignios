@@ -14,10 +14,11 @@
 //!
 //! A thread function can only be turned into the address `Sched::Scheduler::spawn`
 //! takes where it is named, so every `spawn` here names its function.
-//! `main.ign` runs them in the order above and prints a line after each.
+//! `main.ign` runs them in the order above and each prints its own result line.
 
 import Arch from "@arch";
 import Boot from "@boot";
+import Drivers from "@drivers";
 import Mm from "@mm";
 import Sched from "@sched";
 import Time from "@time";
@@ -48,7 +49,7 @@ record SchedulerTestState {
 
 /// The scheduler tests. Each function checks one property and panics when it
 /// fails.
-export namespace SchedulerTest {
+namespace Tests::Scheduler {
   /// Round-robin workers started by `testRoundRobin`.
   const WORKERS: u64 = 3;
 
@@ -83,6 +84,10 @@ export namespace SchedulerTest {
     testFullTable();
 
     Arch::Cpu::restoreInterrupts(saved);
+
+    Drivers::Console::write("scheduler: self-test ok, round-robin, sleep and slot reuse, ");
+    Drivers::Console::writeDecimal(Sched::Scheduler::switchCount());
+    Drivers::Console::writeLine(" switches");
   }
 
   /// Two threads in two address spaces read the same user address while
@@ -132,14 +137,16 @@ export namespace SchedulerTest {
     }
 
     Arch::Cpu::restoreInterrupts(saved);
+
+    Drivers::Console::writeLine("scheduler: address-space self-test ok, each thread ran in its own CR3 and every frame came back");
   }
 
   /// Two threads that spin without ever yielding must both get the processor
   /// from the timer interrupt while the boot thread, which is waiting for
   /// time to pass, keeps getting it back. Preemption must be enabled.
-  /// Interrupts are left as they were found. Returns how many times the
-  /// timer took the processor away from a thread that had not given it up.
-  function runPreemptive(): u64 {
+  /// Interrupts are left as they were found. Prints how many times the timer
+  /// took the processor away from a thread that had not given it up.
+  function runPreemptive(): void {
     let saved: u64 = Arch::Cpu::saveAndDisableInterrupts();
     let preemptionsBefore: u64 = Sched::Scheduler::preemptionCount();
 
@@ -175,7 +182,9 @@ export namespace SchedulerTest {
 
     Arch::Cpu::restoreInterrupts(saved);
 
-    return preemptions;
+    Drivers::Console::write("scheduler: preemption self-test ok, two threads that never yield shared the processor, ");
+    Drivers::Console::writeDecimal(preemptions);
+    Drivers::Console::writeLine(" preemptions");
   }
 
   /// Three workers that yield after every step must interleave in the order

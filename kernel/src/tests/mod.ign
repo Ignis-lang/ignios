@@ -1,0 +1,41 @@
+//!
+//! # Tests
+//!
+//! The boot self-tests. Each one runs in `kmain` at the point where the
+//! subsystem it checks is ready, prints one line on success and panics on the
+//! first violation, so a boot that continues has passed them.
+//!
+//! ## Public API
+//!
+//! | Name                  | File               | Checks                                              |
+//! |-----------------------|--------------------|-----------------------------------------------------|
+//! | `Tests::Pmm`          | `pmm.ign`          | frame allocation, uniqueness, reuse, the free count  |
+//! | `Tests::Vmm`          | `vmm.ign`          | `map`, `unmap` and `translate` against the direct map |
+//! | `Tests::Heap`         | `heap.ign`         | alignment, reuse, merging, growth, the compiler handlers |
+//! | `Tests::AddressSpace` | `address_space.ign`| private user half, shared kernel half, no leaked frames |
+//! | `Tests::Timer`        | `timer.ign`        | ticks arrive                                        |
+//! | `Tests::Context`      | `context.ign`      | the stack switch, the argument, alignment, registers |
+//! | `Tests::Scheduler`    | `scheduler.ign`    | round-robin, sleep, slot reuse, CR3 per thread, preemption |
+//! | `Tests::User`         | `user.ign`         | ring 3, `SYSCALL`, process isolation, an ELF module  |
+//!
+//! ## Dependencies
+//!
+//! `Tests` may import every other subsystem, and nothing imports it except
+//! `main`. The production code has no test code in it: the tests use only the
+//! public functions of the subsystems.
+//!
+//! The ring 3 programs that `Tests::User` runs are assembled from
+//! `arch/x86_64/user_test_asm.S`, next to the other assembly files.
+
+import _ from "./address_space";
+import _ from "./context";
+import _ from "./heap";
+import _ from "./pmm";
+import _ from "./scheduler";
+import _ from "./timer";
+import _ from "./user";
+import _ from "./vmm";
+
+/// Aggregate namespace of the boot self-tests. The files above contribute the
+/// sub-namespaces listed in the module header.
+export namespace Tests {}

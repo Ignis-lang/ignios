@@ -52,6 +52,8 @@
 //!
 //! See concept doc 06.
 
+import _ from "./ps2";
+
 /// Decoder state kept between bytes. Every field is written only by `decode`.
 record KeyboardState {
   /// True after an `0xE0` prefix, until the next byte arrives.
@@ -294,5 +296,18 @@ namespace Drivers::Keyboard {
       0x35 -> '?' as u8,
       _ -> unshifted(key),
     };
+  }
+
+  /// Brings up the PS/2 controller and reports the result on the console.
+  /// Returns false when no controller answered, in which case the kernel halts:
+  /// without a keyboard the terminal is useless.
+  function initialize(): boolean {
+    if (!Ps2::initialize()) {
+      Drivers::Console::writeLine("keyboard: no PS/2 controller answered");
+      return false;
+    }
+
+    Drivers::Console::writeLine("keyboard: PS/2, scancode set 1, US layout, IRQ1 through the IOAPIC");
+    return true;
   }
 }

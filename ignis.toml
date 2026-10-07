@@ -69,3 +69,4 @@ emit = ["c"]
 "@syscall" = "kernel/src/syscall"
 "@trap" = "kernel/src/trap"
 "@shell" = "kernel/src/shell"
+"@tests" = "kernel/src/tests"

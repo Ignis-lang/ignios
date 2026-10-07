@@ -1,0 +1,187 @@
+//!
+//! # Heap Self-Test
+//!
+//! Exercises the kernel heap and checks its promises.
+//!
+//! ## Overview
+//!
+//! The test checks alignment, blocks that do not overlap, reuse of freed
+//! blocks, merging of neighbours, growth, and the compiler's allocation and
+//! release handlers (through a closure that captures a value). It panics on
+//! the first violation.
+
+import Drivers from "@drivers";
+import Mm from "@mm";
+
+namespace Tests::Heap {
+  /// Exercises the allocator and checks its promises: alignment, blocks that
+  /// do not overlap, reuse of freed blocks, merging of neighbours, growth,
+  /// and the compiler handlers. Panics on the first violation.
+  function run(): void {
+    let baseline: u64 = Mm::Heap::allocatedBytes();
+
+    let small: *mut u8 = Mm::Heap::allocate(1, 1);
+    let aligned64: *mut u8 = Mm::Heap::allocate(100, 64);
+    let page: *mut u8 = Mm::Heap::allocate(5000, 4096);
+    let odd: *mut u8 = Mm::Heap::allocate(33, 16);
+
+    checkAligned(small, 16);
+    checkAligned(aligned64, 64);
+    checkAligned(page, 4096);
+    checkAligned(odd, 16);
+
+    fillBlock(small, 1, 0x11);
+    fillBlock(aligned64, 100, 0x22);
+    fillBlock(page, 5000, 0x33);
+    fillBlock(odd, 33, 0x44);
+
+    expectBlock(small, 1, 0x11);
+    expectBlock(aligned64, 100, 0x22);
+    expectBlock(page, 5000, 0x33);
+    expectBlock(odd, 33, 0x44);
+
+    Mm::Heap::free(aligned64);
+
+    if (Mm::Heap::allocate(100, 64) != aligned64) {
+      @panic("heap self-test: freed block was not reused");
+    }
+
+    testMerging();
+    testGrowth();
+
+    Mm::Heap::free(small);
+    Mm::Heap::free(aligned64);
+    Mm::Heap::free(page);
+    Mm::Heap::free(odd);
+
+    if (Mm::Heap::allocatedBytes() != baseline) {
+      @panic("heap self-test: bytes leaked");
+    }
+
+    if (Mm::Heap::allocate(8, 3) != null) {
+      @panic("heap self-test: accepted an alignment that is not a power of two");
+    }
+
+    testClosureRelease();
+
+    Drivers::Console::write("heap: self-test ok, ");
+    Drivers::Console::writeDecimal(Mm::Heap::mappedBytes() / 1024);
+    Drivers::Console::write(" KiB mapped, ");
+    Drivers::Console::writeDecimal(Mm::Heap::allocatedBytes());
+    Drivers::Console::writeLine(" bytes in use");
+  }
+
+  /// Three neighbours freed middle last must merge back into one block that
+  /// a larger request then reuses from the first neighbour's address.
+  function testMerging(): void {
+    let first: *mut u8 = Mm::Heap::allocate(200, 16);
+    let second: *mut u8 = Mm::Heap::allocate(200, 16);
+    let third: *mut u8 = Mm::Heap::allocate(200, 16);
+
+    Mm::Heap::free(first);
+    Mm::Heap::free(third);
+    Mm::Heap::free(second);
+
+    let merged: *mut u8 = Mm::Heap::allocate(600, 16);
+
+    if (merged != first) {
+      @panic("heap self-test: neighbours did not merge");
+    }
+
+    Mm::Heap::free(merged);
+  }
+
+  /// A block bigger than what is mapped must grow the heap.
+  function testGrowth(): void {
+    let before: u64 = Mm::Heap::mappedBytes();
+    let size: u64 = 1048576;
+
+    let big: *mut u8 = Mm::Heap::allocate(size, 16);
+
+    if (big == null || Mm::Heap::mappedBytes() <= before) {
+      @panic("heap self-test: the heap did not grow");
+    }
+
+    fillBlock(big, size, 0x5A);
+    expectBlock(big, size, 0x5A);
+    Mm::Heap::free(big);
+  }
+
+  /// The handlers must reach the heap, both when called directly and when
+  /// the compiler calls them: a returned closure that captures a value gets
+  /// a heap environment from `onAllocate`, and dropping the closure returns
+  /// it through `onFree`.
+  function testHandlers(): void {
+    let before: u64 = Mm::Heap::allocatedBytes();
+    let direct: *mut u8 = Mm::Heap::onAllocate(64, 16);
+
+    if (Mm::Heap::allocatedBytes() <= before) {
+      @panic("heap self-test: the allocation handler did not reach the heap");
+    }
+
+    Mm::Heap::onFree(direct);
+
+    if (Mm::Heap::allocatedBytes() != before) {
+      @panic("heap self-test: the free handler did not reach the heap");
+    }
+
+    let adder: (u64) -> u64 = makeAdder(40);
+
+    if (Mm::Heap::allocatedBytes() <= before) {
+      @panic("heap self-test: the closure did not allocate from the heap");
+    }
+
+    if (adder(2) != 42) {
+      @panic("heap self-test: the closure lost its capture");
+    }
+  }
+
+  /// Runs `testHandlers` and checks that the closure environment it created
+  /// was freed when the closure went out of scope.
+  function testClosureRelease(): void {
+    let before: u64 = Mm::Heap::allocatedBytes();
+
+    testHandlers();
+
+    if (Mm::Heap::allocatedBytes() != before) {
+      @panic("heap self-test: a closure environment was not freed");
+    }
+  }
+
+  /// Returns a closure that captures `base`. The compiler allocates the
+  /// captured environment through `onAllocate`.
+  function makeAdder(base: u64): (u64) -> u64 {
+    return (value: u64): u64 -> value + base;
+  }
+
+  /// Self-test helper: panics unless `pointer` is non-null and a multiple of
+  /// `alignment`.
+  function checkAligned(pointer: *mut u8, alignment: u64): void {
+    if (pointer == null || @integerFromPointer(pointer) % alignment != 0) {
+      @panic("heap self-test: bad allocation or alignment");
+    }
+  }
+
+  /// Self-test helper: sets `length` bytes to `value`.
+  function fillBlock(pointer: *mut u8, length: u64, value: u8): void {
+    let mut index: u64 = 0;
+
+    while (index < length) {
+      *(pointer + index) = value;
+      index += 1;
+    }
+  }
+
+  /// Self-test helper: panics unless `length` bytes all equal `value`.
+  function expectBlock(pointer: *mut u8, length: u64, value: u8): void {
+    let mut index: u64 = 0;
+
+    while (index < length) {
+      if (*(pointer + index) != value) {
+        @panic("heap self-test: a block was overwritten");
+      }
+
+      index += 1;
+    }
+  }
+}

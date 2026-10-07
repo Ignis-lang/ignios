@@ -659,4 +659,36 @@ namespace Drivers::Console {
 
     return value >> ((8 - size) as u32);
   }
+
+  /// Draws the colored banner and the framebuffer line. This is the first
+  /// console output of the boot.
+  function printBanner(framebuffer: *mut Boot::Limine::Framebuffer): void {
+    setColors(Drivers::Color::BRIGHT_YELLOW, Drivers::Color::BLUE);
+    write(" IgniOS ");
+    setColors(Drivers::Color::BRIGHT_CYAN, Drivers::Color::BLACK);
+    writeLine(" an x86_64 kernel written in Ignis");
+    writeLine("");
+
+    setColors(Drivers::Color::WHITE, Drivers::Color::BLACK);
+    reportFramebuffer(framebuffer);
+  }
+
+  /// Prints the framebuffer geometry and the resulting cell grid, for example
+  /// `framebuffer: 1280x800, pitch 5120, bpp 32, 160x50 cells`. The pitch is
+  /// the number of bytes between two pixel rows and can exceed `width * 4`.
+  function reportFramebuffer(framebuffer: *mut Boot::Limine::Framebuffer): void {
+    write("framebuffer: ");
+    writeDecimal((*framebuffer).width);
+    write("x");
+    writeDecimal((*framebuffer).height);
+    write(", pitch ");
+    writeDecimal((*framebuffer).pitch);
+    write(", bpp ");
+    writeDecimal((*framebuffer).bpp);
+    write(", ");
+    writeDecimal(columns());
+    write("x");
+    writeDecimal(rows());
+    writeLine(" cells");
+  }
 }

@@ -119,6 +119,7 @@
 
 import Arch from "@arch";
 import Boot from "@boot";
+import Drivers from "@drivers";
 import Lib from "@lib";
 import _ from "./pmm";
 
@@ -319,6 +320,15 @@ namespace Mm::Vmm {
     return VmmState::root;
   }
 
+  /// Prints the page-table switch: `vmm: cr3 switched, cr3 ..., pml4 ...`.
+  function report(): void {
+    Drivers::Console::write("vmm: cr3 switched, cr3 ");
+    Drivers::Console::writeHex(Arch::Cpu::readCr3());
+    Drivers::Console::write(", pml4 ");
+    Drivers::Console::writeHex(rootTable());
+    Drivers::Console::writeLine("");
+  }
+
   /// Maps the 4 KiB page at `virtualAddress` to `physical` in the kernel
   /// page tables. Returns false and changes nothing when an address is not
   /// page aligned or the page is already mapped, alone or as part of a 2 MiB
@@ -457,47 +467,6 @@ namespace Mm::Vmm {
   /// from the TLB (`invlpg`). Single processor: no shootdown is needed.
   function flush(virtualAddress: u64): void {
     Arch::Cpu::invalidatePage(virtualAddress);
-  }
-
-  /// Maps and unmaps a fresh frame and checks that `translate` and the
-  /// mappings agree with the direct map. Panics on the first violation.
-  function selfTest(): void {
-    let frame: u64 = Mm::Pmm::allocateFrame();
-
-    if (frame == Mm::Pmm::NO_FRAME) {
-      @panic("vmm self-test: no frame");
-    }
-
-    if (translate(TEST_ADDRESS) != NOT_MAPPED) {
-      @panic("vmm self-test: test address already mapped");
-    }
-
-    if (!map(TEST_ADDRESS, frame, WRITABLE | NO_EXECUTE)) {
-      @panic("vmm self-test: map failed");
-    }
-
-    if (map(TEST_ADDRESS, frame, WRITABLE | NO_EXECUTE)) {
-      @panic("vmm self-test: double map succeeded");
-    }
-
-    if (translate(TEST_ADDRESS + 0x123) != frame + 0x123) {
-      @panic("vmm self-test: translate disagrees with map");
-    }
-
-    let mapped: *mut u64 = @pointerFromInteger<*mut u64>(TEST_ADDRESS);
-    let direct: *mut u64 = Boot::Hhdm::toVirtual(frame) as *mut u64;
-
-    *mapped = 0x1234567890ABCDEF;
-
-    if (*direct != 0x1234567890ABCDEF) {
-      @panic("vmm self-test: the mapping and the direct map differ");
-    }
-
-    if (!unmap(TEST_ADDRESS) || translate(TEST_ADDRESS) != NOT_MAPPED) {
-      @panic("vmm self-test: unmap failed");
-    }
-
-    Mm::Pmm::freeFrame(frame);
   }
 
   /// Maps text, rodata and data plus bss at the addresses Limine loaded the

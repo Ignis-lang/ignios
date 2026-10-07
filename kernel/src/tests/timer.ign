@@ -1,0 +1,40 @@
+//!
+//! # Timer Self-Test
+//!
+//! Waits for a few timer ticks.
+//!
+//! ## Overview
+//!
+//! The test sleeps with interrupts on until `SELF_TEST_TICKS` ticks have
+//! arrived, then turns interrupts off again. It does not return when the timer
+//! interrupt never comes. The boot log line printed just before makes that
+//! visible.
+
+import Arch from "@arch";
+import Drivers from "@drivers";
+import Time from "@time";
+
+namespace Tests::Timer {
+  /// Ticks the self-test waits for: 10 ticks is 100 ms.
+  const SELF_TEST_TICKS: u64 = 10;
+
+  /// Sleeps with interrupts on until `SELF_TEST_TICKS` ticks have arrived,
+  /// then turns interrupts off again. It does not return when the timer
+  /// interrupt never comes. The boot log line printed just before makes that
+  /// visible.
+  function run(): void {
+    let target: u64 = Time::Timer::ticks() + SELF_TEST_TICKS;
+
+    Arch::Cpu::enableInterrupts();
+
+    while (Time::Timer::ticks() < target) {
+      Arch::Cpu::waitForInterrupt();
+    }
+
+    Arch::Cpu::disableInterrupts();
+
+    Drivers::Console::write("timer: self-test ok, ");
+    Drivers::Console::writeDecimal(Time::Timer::ticks());
+    Drivers::Console::writeLine(" ticks so far");
+  }
+}

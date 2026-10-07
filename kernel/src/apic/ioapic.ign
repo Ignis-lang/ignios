@@ -61,6 +61,8 @@
 //! See concept doc 12 and the OSDev wiki page "IOAPIC".
 
 import Acpi from "@acpi";
+import Arch from "@arch";
+import Drivers from "@drivers";
 import Mm from "@mm";
 import _ from "./lapic";
 
@@ -262,5 +264,41 @@ namespace Apic::Ioapic {
   function writeRegister(index: u64, register: u32, value: u32): void {
     @writeVolatile<u32>(@pointerFromInteger<*mut u32>(pageOf(index) + SELECT_OFFSET), register);
     @writeVolatile<u32>(@pointerFromInteger<*mut u32>(pageOf(index) + WINDOW_OFFSET), value);
+  }
+
+  /// Prints every IOAPIC (ID, version, redirection entry count, first GSI) and
+  /// the route of an ISA interrupt: the IRQ, the GSI ACPI maps it to, the vector
+  /// the interrupt arrives on and the raw 64-bit redirection entry. Finishes
+  /// with the PIC interrupt mask register, which must read `0xffff` (all
+  /// masked).
+  function report(irq: u8, gsi: u32, vector: u64): void {
+    let mut index: u64 = 0;
+
+    while (index < Acpi::Madt::ioapicCount()) {
+      Drivers::Console::write("ioapic: id ");
+      Drivers::Console::writeDecimal(id(index) as u64);
+      Drivers::Console::write(", version ");
+      Drivers::Console::writeHex(version(index) as u64);
+      Drivers::Console::write(", ");
+      Drivers::Console::writeDecimal(entryCount(index));
+      Drivers::Console::write(" redirection entries, gsi base ");
+      Drivers::Console::writeDecimal(Acpi::Madt::ioapicGsiBase(index) as u64);
+      Drivers::Console::writeLine("");
+      index += 1;
+    }
+
+    Drivers::Console::write("ioapic: keyboard IRQ ");
+    Drivers::Console::writeDecimal(irq as u64);
+    Drivers::Console::write(" -> GSI ");
+    Drivers::Console::writeDecimal(gsi as u64);
+    Drivers::Console::write(", vector ");
+    Drivers::Console::writeHex(vector);
+    Drivers::Console::write(", entry ");
+    Drivers::Console::writeHex(redirection(gsi));
+    Drivers::Console::writeLine("");
+
+    Drivers::Console::write("pic: masked, imr ");
+    Drivers::Console::writeHex(Arch::Pic::masks() as u64);
+    Drivers::Console::writeLine("");
   }
 }

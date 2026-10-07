@@ -65,6 +65,7 @@
 //! Controller (APIC)".
 
 import Arch from "@arch";
+import Drivers from "@drivers";
 import Mm from "@mm";
 
 /// The local APIC API. All register access is volatile MMIO.
@@ -244,5 +245,23 @@ namespace Apic::Lapic {
   /// happens and keeps its order.
   function writeRegister(offset: u64, value: u32): void {
     @writeVolatile<u32>(@pointerFromInteger<*mut u32>(MAPPING + offset), value);
+  }
+
+  /// Prints the local APIC state: physical base from the `IA32_APIC_BASE` MSR,
+  /// its ID and version registers, and whether it is enabled in the MSR (global
+  /// enable, bit 11) and in the spurious vector register (software enable,
+  /// bit 8). LINT0 is masked because the PIC is not used, LINT1 is set to NMI.
+  function report(): void {
+    Drivers::Console::write("lapic: base ");
+    Drivers::Console::writeHex(physicalBase());
+    Drivers::Console::write(", id ");
+    Drivers::Console::writeDecimal(id() as u64);
+    Drivers::Console::write(", version ");
+    Drivers::Console::writeHex(version() as u64);
+    Drivers::Console::write(", msr enabled ");
+    Drivers::Console::writeDecimal(isGloballyEnabled() ? 1 : 0);
+    Drivers::Console::write(", svr enabled ");
+    Drivers::Console::writeDecimal(isSoftwareEnabled() ? 1 : 0);
+    Drivers::Console::writeLine(", LINT0 masked, LINT1 NMI");
   }
 }

@@ -1,15 +1,16 @@
 //!
 //! # Kernel Entry Point
 //!
-//! `kmain`, the boot sequence, the panic handler and the interactive terminal.
+//! `kmain`, the boot order. Every step is a call into the subsystem that owns
+//! it, and the subsystem prints its own boot log line.
 //!
 //! ## Overview
 //!
 //! Limine loads the kernel ELF, switches the CPU to 64-bit mode with paging
-//! on, answers the requests in `limine.ign` and jumps to `kmain` (the ELF
+//! on, answers the requests in `boot/limine.ign` and jumps to `kmain` (the ELF
 //! entry point named in `kernel/linker.ld`). From there everything runs in
-//! ring 0 on the boot thread. When `kmain` reaches `runTerminal` the boot
-//! thread becomes the shell and never returns.
+//! ring 0 on the boot thread. When `kmain` reaches `Shell::Terminal::run` the
+//! boot thread becomes the shell and never returns.
 //!
 //! State on entry (Limine protocol, x86-64): interrupts off (RFLAGS.IF clear),
 //! the 8259 PIC lines masked, Limine's own GDT loaded, a stack of at least
@@ -18,59 +19,49 @@
 //!
 //! ## Boot Sequence
 //!
-//! Each step needs the ones above it. The right column names the file to read
-//! and the concept doc that explains the hardware.
+//! Each step needs the ones above it. The right column names the subsystem
+//! that owns the step and the concept doc that explains the hardware.
 //!
 //! ```text
 //!   kmain
 //!   │
-//!   ├─ Drivers::Serial::initialize ........ COM1 up, first log line      serial.ign       doc 06
-//!   ├─ Arch::Gdt::initialize ........... own GDT, TSS, CS/SS/DS       gdt.ign           doc 03
-//!   ├─ Arch::Idt::initialize ........... 50 gates (49 thunks + spur.) idt.ign           doc 04
-//!   ├─ Boot::Limine::isBaseRevisionSupported                          limine.ign        doc 01
-//!   ├─ Drivers::Console::initialize ....... framebuffer text console     console.ign       doc 07
-//!   ├─ printBanner ............... banner, framebuffer, memory map
-//!   ├─ initializeMemory
-//!   │    ├─ Mm::Pmm::initialize ...... frame bitmap                 pmm.ign           doc 08
-//!   │    ├─ Mm::Vmm::initialize ...... own page tables, CR3 switch  vmm.ign           doc 09
-//!   │    ├─ Mm::Modules::initialize .. map Limine modules           modules.ign       doc 15
-//!   │    ├─ Mm::Heap::initialize ..... kernel heap                  heap.ign          doc 10
-//!   │    └─ Mm::AddressSpace::selfTest                              address_space.ign doc 14
+//!   ├─ Drivers::Serial::initialize ........ COM1 up, first log line       drivers/   doc 06
+//!   ├─ Trap::Setup::initializeGdt ......... own GDT, TSS, CS/SS/DS        trap/      doc 03
+//!   ├─ Trap::Setup::initializeIdt ......... 50 gates (49 thunks + spur.)  trap/      doc 04
+//!   ├─ Boot::Limine::require* ............. base revision, framebuffer    boot/      doc 01
+//!   ├─ Drivers::Console::initialize ....... framebuffer text console      drivers/   doc 07
+//!   ├─ banner, framebuffer, memory map lines
+//!   ├─ Mm::Pmm::initialize + Tests::Pmm ... frame bitmap                  mm/        doc 08
+//!   ├─ Mm::Vmm::initialize + Tests::Vmm ... own page tables, CR3 switch   mm/        doc 09
+//!   ├─ Mm::Modules::initialize ............ map Limine modules            mm/        doc 15
+//!   ├─ Mm::Heap::initialize + Tests::Heap . kernel heap                   mm/        doc 10
+//!   ├─ Tests::AddressSpace ................ private user halves           mm/        doc 14
 //!   ├─ Sched::Scheduler::initialize, Proc::Process::initialize, Syscall::initialize
-//!   ├─ Arch::UserMode::initialize ...... EFER.SCE, STAR/LSTAR/FMASK   usermode.ign      doc 14
-//!   ├─ Acpi::initialize/report ... RSDP, XSDT, MADT             acpi.ign          doc 12
-//!   ├─ Arch::Pic::initialize ........... remap and mask the 8259      pic.ign           doc 05
-//!   ├─ Apic::Lapic::initialize ......... local APIC on                lapic.ign         doc 05
-//!   ├─ Apic::Ioapic::initialize + routeIsa(keyboard)                  ioapic.ign        doc 12
-//!   ├─ initializeTimer ........... APIC timer, 100 Hz           timer.ign         doc 12
-//!   ├─ Arch::Context::selfTest, SchedulerTest::*                      scheduler_test.ign doc 13
+//!   ├─ Trap::Setup::initializeUserMode .... EFER.SCE, STAR/LSTAR/FMASK    trap/      doc 14
+//!   ├─ Acpi::initialize/report ............ RSDP, XSDT, MADT              acpi/      doc 12
+//!   ├─ Arch::Pic::initialize .............. remap and mask the 8259       arch/      doc 05
+//!   ├─ Apic::Lapic::initialize ............ local APIC on                 apic/      doc 05
+//!   ├─ Apic::Ioapic::initialize + routeIsa(keyboard)                      apic/      doc 12
+//!   ├─ Time::Timer::initialize ............ APIC timer, 100 Hz            time/      doc 12
+//!   ├─ Tests::Context, Tests::Scheduler ... context switch, scheduler     tests/     doc 13
 //!   ├─ Sched::Scheduler::enablePreemption
-//!   ├─ UserTest::run ............. ring 3 smoke tests           user_test.ign     doc 14
-//!   ├─ initializeKeyboard ........ 8042 enable, IRQ1 live       ps2.ign           doc 06
-//!   └─ runTerminal ............... prompt loop, never returns
+//!   ├─ Tests::User::run ................... ring 3 smoke tests            tests/     doc 14
+//!   ├─ Drivers::Keyboard::initialize ...... 8042 enable, IRQ1 live        drivers/   doc 06
+//!   └─ Shell::Terminal::run ............... prompt loop, never returns    shell/
 //! ```
 //!
 //! ## Where Output Goes
 //!
-//! Before the console exists, `kmain` logs to COM1 only (`Drivers::Serial::write`).
-//! `Drivers::Console::write` shows text on the framebuffer and mirrors every byte to
-//! COM1, so the serial log of a headless run contains the whole screen. The
-//! `docs/READING.md` guide annotates the complete boot log line by line.
-//!
-//! ## Terminal Commands
-//!
-//! | Command     | Effect                                                  |
-//! |-------------|---------------------------------------------------------|
-//! | `uptime`    | Time since the timer started, from the tick counter     |
-//! | `ps`        | Lists the kernel threads (`thread_commands.ign`)        |
-//! | `threads`   | Starts the demo threads (`thread_commands.ign`)         |
-//! | `run NAME`  | Runs the Limine module called NAME in ring 3            |
+//! Before the console exists, `kmain` logs to COM1 only
+//! (`Drivers::Serial::write`). `Drivers::Console::write` shows text on the
+//! framebuffer and mirrors every byte to COM1, so the serial log of a headless
+//! run contains the whole screen. The `docs/READING.md` guide annotates the
+//! complete boot log line by line.
 //!
 //! ## Panics
 //!
-//! `onPanic` is registered with `@panicHandler`, so every `@panic(...)` call in
-//! the kernel ends there. There is no unwinding: the machine stops in
-//! `Arch::Cpu::haltForever`.
+//! The panic handler is in `panic.ign`. This file imports it so the compiler
+//! includes it.
 
 import Acpi from "@acpi";
 import Apic from "@apic";
@@ -82,272 +73,14 @@ import Proc from "@proc";
 import Sched from "@sched";
 import Shell from "@shell";
 import Syscall from "@syscall";
+import Tests from "@tests";
 import Time from "@time";
 import Trap from "@trap";
-import SchedulerTest from "./scheduler_test";
-import UserTest from "./user_test";
-
-/// Set by the first panic so a second panic knows the console path already
-/// failed or is in use.
-record PanicState {
-  /// True once a panic is being reported.
-  static mut active: boolean = false;
-}
+import _ from "./panic";
 
 /// The ISA interrupt line of the PS/2 keyboard (IRQ1). The IOAPIC routes it
 /// through the GSI that ACPI assigns to it.
 const KEYBOARD_IRQ: u8 = 1;
-
-/// Reports the panic on COM1, and on the console once it is initialized, then
-/// stops the machine. A panic raised while reporting another one only reaches
-/// COM1, so a fault in the console cannot recurse.
-///
-/// The compiler routes every `@panic(...)` call here. `file` and `line` locate
-/// the call in the Ignis source. Never returns.
-///
-/// On the console the report is bright white on red. On COM1 it is the same
-/// text with `\r\n` line endings (added by `Drivers::Serial::write`).
-@panicHandler
-function onPanic(message: str, file: str, line: u32): never {
-  if (PanicState::active || !Drivers::Console::isInitialized()) {
-    Drivers::Serial::write("\npanic: ");
-    Drivers::Serial::write(message);
-    Drivers::Serial::write(" at ");
-    Drivers::Serial::write(file);
-    Drivers::Serial::write(":");
-    Drivers::Serial::writeDecimal(line);
-    Drivers::Serial::write("\n");
-
-    Arch::Cpu::haltForever();
-  }
-
-  PanicState::active = true;
-
-  Drivers::Console::setColors(Drivers::Color::BRIGHT_WHITE, Drivers::Color::RED);
-  Drivers::Console::write("\npanic: ");
-  Drivers::Console::write(message);
-  Drivers::Console::write(" at ");
-  Drivers::Console::write(file);
-  Drivers::Console::write(":");
-  Drivers::Console::writeDecimal(line);
-  Drivers::Console::write("\n");
-
-  Arch::Cpu::haltForever();
-}
-
-/// The first Limine framebuffer. Panics when the bootloader provided none,
-/// because the console has nowhere to draw.
-function requireFramebuffer(): *mut Boot::Limine::Framebuffer {
-  let framebuffer: *mut Boot::Limine::Framebuffer = Boot::Limine::firstFramebuffer();
-
-  if (framebuffer == null) {
-    @panic("Limine provided no framebuffer");
-  }
-
-  return framebuffer;
-}
-
-/// Prints the framebuffer geometry and the resulting cell grid, for example
-/// `framebuffer: 1280x800, pitch 5120, bpp 32, 160x50 cells`. The pitch is
-/// the number of bytes between two pixel rows and can exceed `width * 4`.
-function reportFramebuffer(framebuffer: *mut Boot::Limine::Framebuffer): void {
-  Drivers::Console::write("framebuffer: ");
-  Drivers::Console::writeDecimal((*framebuffer).width);
-  Drivers::Console::write("x");
-  Drivers::Console::writeDecimal((*framebuffer).height);
-  Drivers::Console::write(", pitch ");
-  Drivers::Console::writeDecimal((*framebuffer).pitch);
-  Drivers::Console::write(", bpp ");
-  Drivers::Console::writeDecimal((*framebuffer).bpp);
-  Drivers::Console::write(", ");
-  Drivers::Console::writeDecimal(Drivers::Console::columns());
-  Drivers::Console::write("x");
-  Drivers::Console::writeDecimal(Drivers::Console::rows());
-  Drivers::Console::writeLine(" cells");
-}
-
-/// Prints the number of memory-map entries and the higher half direct map
-/// offset. Panics when Limine answered neither request.
-function reportMemory(): void {
-  let memmap: *mut Boot::Limine::MemmapResponse = Boot::Limine::memmap();
-
-  if (memmap == null) {
-    @panic("Limine provided no memory map");
-  }
-
-  let hhdm: *mut Boot::Limine::HhdmResponse = Boot::Limine::hhdm();
-
-  if (hhdm == null) {
-    @panic("Limine provided no higher half direct map");
-  }
-
-  Drivers::Console::write("memory map: ");
-  Drivers::Console::writeDecimal((*memmap).entryCount);
-  Drivers::Console::write(" entries, hhdm offset ");
-  Drivers::Console::writeHex((*hhdm).offset);
-  Drivers::Console::writeLine("");
-}
-
-/// Draws the colored banner and the framebuffer and memory lines. This is the
-/// first console output of the boot.
-function printBanner(framebuffer: *mut Boot::Limine::Framebuffer): void {
-  Drivers::Console::setColors(Drivers::Color::BRIGHT_YELLOW, Drivers::Color::BLUE);
-  Drivers::Console::write(" IgniOS ");
-  Drivers::Console::setColors(Drivers::Color::BRIGHT_CYAN, Drivers::Color::BLACK);
-  Drivers::Console::writeLine(" an x86_64 kernel written in Ignis");
-  Drivers::Console::writeLine("");
-
-  Drivers::Console::setColors(Drivers::Color::WHITE, Drivers::Color::BLACK);
-  reportFramebuffer(framebuffer);
-  reportMemory();
-  Drivers::Console::writeLine("");
-}
-
-/// Brings up the PS/2 keyboard and reports the result on the console. Returns
-/// false when no controller answered, in which case `kmain` halts: without a
-/// keyboard the terminal is useless.
-function initializeKeyboard(): boolean {
-  if (!Drivers::Ps2::initialize()) {
-    Drivers::Console::writeLine("keyboard: no PS/2 controller answered");
-    return false;
-  }
-
-  Drivers::Console::writeLine("keyboard: PS/2, scancode set 1, US layout, IRQ1 through the IOAPIC");
-  return true;
-}
-
-/// Logs the code segment selector and the task register read back from the
-/// CPU. On a correct boot they are `0x8` and `0x28`, which proves the far
-/// return and `ltr` in `Arch::Gdt::initialize` took effect.
-function reportGdt(): void {
-  Drivers::Serial::write("gdt: cs=");
-  Drivers::Serial::writeHex(Arch::Gdt::currentCode() as u64);
-  Drivers::Serial::write(" tr=");
-  Drivers::Serial::writeHex(Arch::Gdt::currentTask() as u64);
-  Drivers::Serial::write("\n");
-}
-
-/// Builds the frame allocator, the kernel page tables and the heap, reports on
-/// them and runs their self-tests.
-///
-/// The order is fixed. `Mm::Vmm::initialize` takes page-table frames from the
-/// PMM, and `Mm::Modules::initialize` and the heap map their pages through the
-/// VMM. Every self-test panics on failure, so a boot that continues has
-/// passed them.
-function initializeMemory(framebuffer: *mut Boot::Limine::Framebuffer): void {
-  Mm::Pmm::initialize();
-
-  Drivers::Console::write("pmm: ");
-  Drivers::Console::writeDecimal(Mm::Pmm::totalFrames());
-  Drivers::Console::write(" usable frames, ");
-  Drivers::Console::writeDecimal(Mm::Pmm::freeFrameCount());
-  Drivers::Console::write(" free (");
-  Drivers::Console::writeDecimal(Mm::Pmm::freeFrameCount() * 4 / 1024);
-  Drivers::Console::writeLine(" MiB)");
-
-  Mm::Pmm::selfTest();
-  Drivers::Console::writeLine("pmm: self-test ok");
-
-  Mm::Vmm::initialize(framebuffer);
-
-  Drivers::Console::write("vmm: cr3 switched, cr3 ");
-  Drivers::Console::writeHex(Arch::Cpu::readCr3());
-  Drivers::Console::write(", pml4 ");
-  Drivers::Console::writeHex(Mm::Vmm::rootTable());
-  Drivers::Console::writeLine("");
-
-  Mm::Vmm::selfTest();
-  Drivers::Console::writeLine("vmm: self-test ok");
-
-  Mm::Modules::initialize();
-
-  Mm::Heap::initialize();
-  Mm::Heap::selfTest();
-
-  Drivers::Console::write("heap: self-test ok, ");
-  Drivers::Console::writeDecimal(Mm::Heap::mappedBytes() / 1024);
-  Drivers::Console::write(" KiB mapped, ");
-  Drivers::Console::writeDecimal(Mm::Heap::allocatedBytes());
-  Drivers::Console::writeLine(" bytes in use");
-
-  Mm::AddressSpace::selfTest();
-  Drivers::Console::writeLine("address space: self-test ok, private user half, shared kernel half, frames returned");
-}
-
-/// Prints the local APIC state: physical base from the `IA32_APIC_BASE` MSR,
-/// its ID and version registers, and whether it is enabled in the MSR (global
-/// enable, bit 11) and in the spurious vector register (software enable,
-/// bit 8). LINT0 is masked because the PIC is not used, LINT1 is set to NMI.
-function reportLapic(): void {
-  Drivers::Console::write("lapic: base ");
-  Drivers::Console::writeHex(Apic::Lapic::physicalBase());
-  Drivers::Console::write(", id ");
-  Drivers::Console::writeDecimal(Apic::Lapic::id() as u64);
-  Drivers::Console::write(", version ");
-  Drivers::Console::writeHex(Apic::Lapic::version() as u64);
-  Drivers::Console::write(", msr enabled ");
-  Drivers::Console::writeDecimal(Apic::Lapic::isGloballyEnabled() ? 1 : 0);
-  Drivers::Console::write(", svr enabled ");
-  Drivers::Console::writeDecimal(Apic::Lapic::isSoftwareEnabled() ? 1 : 0);
-  Drivers::Console::writeLine(", LINT0 masked, LINT1 NMI");
-}
-
-/// Prints every IOAPIC (ID, version, redirection entry count, first GSI) and
-/// the keyboard route: ISA IRQ 1, the GSI ACPI maps it to, the vector the
-/// interrupt arrives on and the raw 64-bit redirection entry. Finishes with
-/// the PIC interrupt mask register, which must read `0xffff` (all masked).
-function reportIoapic(keyboardGsi: u32): void {
-  let mut index: u64 = 0;
-
-  while (index < Acpi::Madt::ioapicCount()) {
-    Drivers::Console::write("ioapic: id ");
-    Drivers::Console::writeDecimal(Apic::Ioapic::id(index) as u64);
-    Drivers::Console::write(", version ");
-    Drivers::Console::writeHex(Apic::Ioapic::version(index) as u64);
-    Drivers::Console::write(", ");
-    Drivers::Console::writeDecimal(Apic::Ioapic::entryCount(index));
-    Drivers::Console::write(" redirection entries, gsi base ");
-    Drivers::Console::writeDecimal(Acpi::Madt::ioapicGsiBase(index) as u64);
-    Drivers::Console::writeLine("");
-    index += 1;
-  }
-
-  Drivers::Console::write("ioapic: keyboard IRQ ");
-  Drivers::Console::writeDecimal(KEYBOARD_IRQ as u64);
-  Drivers::Console::write(" -> GSI ");
-  Drivers::Console::writeDecimal(keyboardGsi as u64);
-  Drivers::Console::write(", vector ");
-  Drivers::Console::writeHex(Trap::KEYBOARD_VECTOR);
-  Drivers::Console::write(", entry ");
-  Drivers::Console::writeHex(Apic::Ioapic::redirection(keyboardGsi));
-  Drivers::Console::writeLine("");
-
-  Drivers::Console::write("pic: masked, imr ");
-  Drivers::Console::writeHex(Arch::Pic::masks() as u64);
-  Drivers::Console::writeLine("");
-}
-
-/// Calibrates the APIC timer against the PIT, starts it, checks that ticks
-/// arrive and reports the numbers. See `timer.ign`.
-function initializeTimer(): void {
-  Time::Timer::initialize(Trap::TIMER_VECTOR as u8);
-
-  Drivers::Console::write("timer: calibrated on PIT channel 2: ");
-  Drivers::Console::writeDecimal(Time::Timer::countRate());
-  Drivers::Console::write(" Hz (divide 16), initial count ");
-  Drivers::Console::writeDecimal(Time::Timer::initialCount());
-  Drivers::Console::write(", ");
-  Drivers::Console::writeDecimal(Time::Timer::FREQUENCY);
-  Drivers::Console::write(" Hz periodic, vector ");
-  Drivers::Console::writeHex(Trap::TIMER_VECTOR);
-  Drivers::Console::writeLine("");
-
-  Time::Timer::selfTest();
-
-  Drivers::Console::write("timer: self-test ok, ");
-  Drivers::Console::writeDecimal(Time::Timer::ticks());
-  Drivers::Console::writeLine(" ticks so far");
-}
 
 /// The ELF entry point. Limine jumps here in long mode on its own stack, with
 /// interrupts disabled and every request already answered. The function never
@@ -362,44 +95,45 @@ function kmain(): void {
   Drivers::Serial::writeLine("IgniOS booting");
 
   // The IDT gates installed next name the kernel's code selector, and the double
-  // fault gate names IST1 of the kernel's TSS, so the GDT comes first.
-  Arch::Gdt::initialize();
-  reportGdt();
+  // fault gate names IST1 of the kernel's TSS, so the GDT comes first. From the
+  // IDT on, every CPU exception reaches `Trap::dispatch`.
+  Trap::Setup::initializeGdt();
+  Trap::Setup::initializeIdt();
 
-  // From here every CPU exception reaches `Trap::dispatch`. The IDT state
-  // Limine leaves is not specified by the protocol, so the kernel installs its
-  // own before it does anything that can fault.
-  Arch::Idt::initialize(Apic::Lapic::spuriousVector());
-  Drivers::Serial::writeLine("idt: 50 gates loaded");
+  // Anything but the revision requested means the responses below cannot be
+  // trusted.
+  Boot::Limine::requireBaseRevision();
 
-  // Limine overwrites the third word of the base revision tag with 0 when it
-  // supports the revision requested. Anything else means the responses below
-  // cannot be trusted.
-  if (!Boot::Limine::isBaseRevisionSupported()) {
-    @panic("Limine base revision 6 is not supported");
-  }
-
-  let framebuffer: *mut Boot::Limine::Framebuffer = requireFramebuffer();
+  let framebuffer: *mut Boot::Limine::Framebuffer = Boot::Limine::requireFramebuffer();
 
   Drivers::Console::initialize(framebuffer);
-  printBanner(framebuffer);
+  Drivers::Console::printBanner(framebuffer);
+  Mm::Pmm::reportMemoryMap();
+  Drivers::Console::writeLine("");
 
-  initializeMemory(framebuffer);
+  // The order is fixed. `Mm::Vmm::initialize` takes page-table frames from the
+  // PMM, and the modules and the heap map their pages through the VMM. Every
+  // self-test panics on failure, so a boot that continues has passed them.
+  Mm::Pmm::initialize();
+  Mm::Pmm::report();
+  Tests::Pmm::run();
+
+  Mm::Vmm::initialize(framebuffer);
+  Mm::Vmm::report();
+  Tests::Vmm::run();
+
+  Mm::Modules::initialize();
+
+  Mm::Heap::initialize();
+  Tests::Heap::run();
+
+  Tests::AddressSpace::run();
 
   Sched::Scheduler::initialize();
   Proc::Process::initialize();
   Syscall::initialize();
 
-  // Sets IA32_EFER.SCE and programs IA32_STAR, IA32_LSTAR and IA32_FMASK. See
-  // `usermode.ign`. The values are logged to COM1 only.
-  Arch::UserMode::initialize();
-  Drivers::Serial::write("usermode: syscall enabled, star ");
-  Drivers::Serial::writeHex(Arch::UserMode::starValue());
-  Drivers::Serial::write(", lstar ");
-  Drivers::Serial::writeHex(Arch::UserMode::entryAddress());
-  Drivers::Serial::write(", fmask ");
-  Drivers::Serial::writeHex(Arch::UserMode::flagMask());
-  Drivers::Serial::write("\n");
+  Trap::Setup::initializeUserMode();
 
   Acpi::initialize();
   Acpi::report();
@@ -409,7 +143,7 @@ function kmain(): void {
   // IOAPIC instead.
   Arch::Pic::initialize();
   Apic::Lapic::initialize();
-  reportLapic();
+  Apic::Lapic::report();
 
   Apic::Ioapic::initialize();
 
@@ -419,37 +153,26 @@ function kmain(): void {
     @panic("no IOAPIC serves the keyboard interrupt");
   }
 
-  reportIoapic(keyboardGsi);
+  Apic::Ioapic::report(KEYBOARD_IRQ, keyboardGsi, Trap::KEYBOARD_VECTOR);
 
-  initializeTimer();
+  Time::Timer::initialize(Trap::TIMER_VECTOR as u8);
+  Time::Timer::report();
+  Tests::Timer::run();
 
-  Arch::Context::selfTest();
-  Drivers::Console::writeLine("context: self-test ok, stack switch, argument, alignment and registers checked");
-
-  SchedulerTest::runCooperative();
-
-  Drivers::Console::write("scheduler: self-test ok, round-robin, sleep and slot reuse, ");
-  Drivers::Console::writeDecimal(Sched::Scheduler::switchCount());
-  Drivers::Console::writeLine(" switches");
-
-  SchedulerTest::runAddressSpaces();
-  Drivers::Console::writeLine("scheduler: address-space self-test ok, each thread ran in its own CR3 and every frame came back");
+  Tests::Context::run();
+  Tests::Scheduler::runCooperative();
+  Tests::Scheduler::runAddressSpaces();
 
   // From here the timer tick can switch threads. The self-tests above ran
   // cooperatively because their expectations assume no preemption.
   Sched::Scheduler::enablePreemption();
 
-  let preemptions: u64 = SchedulerTest::runPreemptive();
-
-  Drivers::Console::write("scheduler: preemption self-test ok, two threads that never yield shared the processor, ");
-  Drivers::Console::writeDecimal(preemptions);
-  Drivers::Console::writeLine(" preemptions");
-
-  UserTest::run();
+  Tests::Scheduler::runPreemptive();
+  Tests::User::run();
 
   // The keyboard is initialized last: its interrupt is live from here on, and
   // the terminal is the first code that consumes it.
-  if (!initializeKeyboard()) {
+  if (!Drivers::Keyboard::initialize()) {
     Arch::Cpu::haltForever();
   }
 

@@ -1,0 +1,77 @@
+//!
+//! # Physical Memory Self-Test
+//!
+//! Allocates and frees a few frames and checks the allocator's promises.
+//!
+//! ## Overview
+//!
+//! The test takes `SELF_TEST_FRAMES` frames and checks that each is aligned
+//! and non-zero, that no frame is handed out twice, that the free count
+//! follows every step, and that a freed frame comes back first. It panics on
+//! the first violation, so a boot that continues has passed it.
+
+import Drivers from "@drivers";
+import Mm from "@mm";
+
+namespace Tests::Pmm {
+  /// Frames the self-test allocates at once. The test keeps their addresses in
+  /// an array of this size.
+  const SELF_TEST_FRAMES: u64 = 8;
+
+  /// Allocates and frees a few frames and checks the allocator's promises:
+  /// aligned non-zero frames, no frame handed out twice, the free count
+  /// following every step, and a freed frame coming back first. Panics on
+  /// the first violation.
+  function run(): void {
+    let mut frames: u64[8];
+    let before: u64 = Mm::Pmm::freeFrameCount();
+
+    let mut index: u64 = 0;
+
+    while (index < SELF_TEST_FRAMES) {
+      let frame: u64 = Mm::Pmm::allocateFrame();
+
+      if (frame == Mm::Pmm::NO_FRAME || frame % Mm::Pmm::FRAME_SIZE != 0) {
+        @panic("pmm self-test: bad frame");
+      }
+
+      let mut earlier: u64 = 0;
+
+      while (earlier < index) {
+        if (frames[earlier] == frame) {
+          @panic("pmm self-test: frame handed out twice");
+        }
+
+        earlier += 1;
+      }
+
+      frames[index] = frame;
+      index += 1;
+    }
+
+    if (Mm::Pmm::freeFrameCount() != before - SELF_TEST_FRAMES) {
+      @panic("pmm self-test: free count did not drop");
+    }
+
+    let reused: u64 = frames[3];
+
+    Mm::Pmm::freeFrame(reused);
+
+    if (Mm::Pmm::allocateFrame() != reused) {
+      @panic("pmm self-test: freed frame was not reused");
+    }
+
+    index = 0;
+
+    while (index < SELF_TEST_FRAMES) {
+      Mm::Pmm::freeFrame(frames[index]);
+      index += 1;
+    }
+
+    if (Mm::Pmm::freeFrameCount() != before) {
+      @panic("pmm self-test: free count did not recover");
+    }
+
+    Drivers::Console::writeLine("pmm: self-test ok");
+  }
+}

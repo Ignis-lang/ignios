@@ -204,140 +204,6 @@ namespace Mm::Heap {
     return HeapState::mappedEnd - BASE;
   }
 
-  /// Exercises the allocator and checks its promises: alignment, blocks that
-  /// do not overlap, reuse of freed blocks, merging of neighbours, growth,
-  /// and the compiler handlers. Panics on the first violation.
-  function selfTest(): void {
-    let baseline: u64 = HeapState::allocatedBytes;
-
-    let small: *mut u8 = allocate(1, 1);
-    let aligned64: *mut u8 = allocate(100, 64);
-    let page: *mut u8 = allocate(5000, 4096);
-    let odd: *mut u8 = allocate(33, 16);
-
-    checkAligned(small, 16);
-    checkAligned(aligned64, 64);
-    checkAligned(page, 4096);
-    checkAligned(odd, 16);
-
-    fillBlock(small, 1, 0x11);
-    fillBlock(aligned64, 100, 0x22);
-    fillBlock(page, 5000, 0x33);
-    fillBlock(odd, 33, 0x44);
-
-    expectBlock(small, 1, 0x11);
-    expectBlock(aligned64, 100, 0x22);
-    expectBlock(page, 5000, 0x33);
-    expectBlock(odd, 33, 0x44);
-
-    free(aligned64);
-
-    if (allocate(100, 64) != aligned64) {
-      @panic("heap self-test: freed block was not reused");
-    }
-
-    testMerging();
-    testGrowth();
-
-    free(small);
-    free(aligned64);
-    free(page);
-    free(odd);
-
-    if (HeapState::allocatedBytes != baseline) {
-      @panic("heap self-test: bytes leaked");
-    }
-
-    if (allocate(8, 3) != null) {
-      @panic("heap self-test: accepted an alignment that is not a power of two");
-    }
-
-    testClosureRelease();
-  }
-
-  /// Three neighbours freed middle last must merge back into one block that
-  /// a larger request then reuses from the first neighbour's address.
-  function testMerging(): void {
-    let first: *mut u8 = allocate(200, 16);
-    let second: *mut u8 = allocate(200, 16);
-    let third: *mut u8 = allocate(200, 16);
-
-    free(first);
-    free(third);
-    free(second);
-
-    let merged: *mut u8 = allocate(600, 16);
-
-    if (merged != first) {
-      @panic("heap self-test: neighbours did not merge");
-    }
-
-    free(merged);
-  }
-
-  /// A block bigger than what is mapped must grow the heap.
-  function testGrowth(): void {
-    let before: u64 = mappedBytes();
-    let size: u64 = 1048576;
-
-    let big: *mut u8 = allocate(size, 16);
-
-    if (big == null || mappedBytes() <= before) {
-      @panic("heap self-test: the heap did not grow");
-    }
-
-    fillBlock(big, size, 0x5A);
-    expectBlock(big, size, 0x5A);
-    free(big);
-  }
-
-  /// The handlers must reach the heap, both when called directly and when
-  /// the compiler calls them: a returned closure that captures a value gets
-  /// a heap environment from `onAllocate`, and dropping the closure returns
-  /// it through `onFree`.
-  function testHandlers(): void {
-    let before: u64 = HeapState::allocatedBytes;
-    let direct: *mut u8 = onAllocate(64, 16);
-
-    if (HeapState::allocatedBytes <= before) {
-      @panic("heap self-test: the allocation handler did not reach the heap");
-    }
-
-    onFree(direct);
-
-    if (HeapState::allocatedBytes != before) {
-      @panic("heap self-test: the free handler did not reach the heap");
-    }
-
-    let adder: (u64) -> u64 = makeAdder(40);
-
-    if (HeapState::allocatedBytes <= before) {
-      @panic("heap self-test: the closure did not allocate from the heap");
-    }
-
-    if (adder(2) != 42) {
-      @panic("heap self-test: the closure lost its capture");
-    }
-  }
-
-  /// Runs `testHandlers` and checks that the closure environment it created
-  /// was freed when the closure went out of scope.
-  function testClosureRelease(): void {
-    let before: u64 = HeapState::allocatedBytes;
-
-    testHandlers();
-
-    if (HeapState::allocatedBytes != before) {
-      @panic("heap self-test: a closure environment was not freed");
-    }
-  }
-
-  /// Returns a closure that captures `base`. The compiler allocates the
-  /// captured environment through `onAllocate`.
-  function makeAdder(base: u64): (u64) -> u64 {
-    return (value: u64): u64 -> value + base;
-  }
-
   /// Takes the first free block that can hold an aligned payload of
   /// `payloadSize` bytes, splits it, and returns the payload address, or 0.
   function takeFirstFit(payloadSize: u64, alignment: u64): u64 {
@@ -518,55 +384,24 @@ namespace Mm::Heap {
     *(header + 1) = tag;
   }
 
-  /// Self-test helper: panics unless `pointer` is non-null and a multiple of
-  /// `alignment`.
-  function checkAligned(pointer: *mut u8, alignment: u64): void {
-    if (pointer == null || @integerFromPointer(pointer) % alignment != 0) {
-      @panic("heap self-test: bad allocation or alignment");
+  /// The compiler's allocation hook. The compiler calls it for allocations it
+  /// makes itself, such as the environment of an escaping closure. It panics
+  /// when the heap is out of memory, because the compiler-generated code has no
+  /// way to handle a null result.
+  @allocHandler
+  function onAllocate(size: u64, align: u64): *mut u8 {
+    let pointer: *mut u8 = allocate(size, align);
+
+    if (pointer == null) {
+      @panic("heap: out of memory");
     }
+
+    return pointer;
   }
 
-  /// Self-test helper: sets `length` bytes to `value`.
-  function fillBlock(pointer: *mut u8, length: u64, value: u8): void {
-    let mut index: u64 = 0;
-
-    while (index < length) {
-      *(pointer + index) = value;
-      index += 1;
-    }
+  /// The compiler's release hook, the counterpart of `onAllocate`.
+  @freeHandler
+  function onFree(pointer: *mut u8): void {
+    free(pointer);
   }
-
-  /// Self-test helper: panics unless `length` bytes all equal `value`.
-  function expectBlock(pointer: *mut u8, length: u64, value: u8): void {
-    let mut index: u64 = 0;
-
-    while (index < length) {
-      if (*(pointer + index) != value) {
-        @panic("heap self-test: a block was overwritten");
-      }
-
-      index += 1;
-    }
-  }
-}
-
-/// The compiler's allocation hook. The compiler calls it for allocations it
-/// makes itself, such as the environment of an escaping closure. It panics
-/// when the heap is out of memory, because the compiler-generated code has no
-/// way to handle a null result.
-@allocHandler
-function onAllocate(size: u64, align: u64): *mut u8 {
-  let pointer: *mut u8 = Mm::Heap::allocate(size, align);
-
-  if (pointer == null) {
-    @panic("heap: out of memory");
-  }
-
-  return pointer;
-}
-
-/// The compiler's release hook, the counterpart of `onAllocate`.
-@freeHandler
-function onFree(pointer: *mut u8): void {
-  Mm::Heap::free(pointer);
 }

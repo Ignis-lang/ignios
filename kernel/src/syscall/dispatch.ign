@@ -41,6 +41,7 @@
 //!
 //! See concept doc 15.
 
+import Arch from "@arch";
 import Drivers from "@drivers";
 import Proc from "@proc";
 import Sched from "@sched";

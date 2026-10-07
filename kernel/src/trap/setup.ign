@@ -1,0 +1,66 @@
+//!
+//! # Trap Setup
+//!
+//! The boot steps that make the processor enter the kernel the way the
+//! kernel wants: the descriptor tables and the `SYSCALL` registers.
+//!
+//! ## Overview
+//!
+//! `Arch` holds the instructions and the tables but cannot print, because it
+//! imports nothing. Each function here calls the `Arch` initializer and then
+//! logs what it did on COM1, which works before the console is up.
+//!
+//! | Function             | Arch call                  | Log line                          |
+//! |----------------------|----------------------------|-----------------------------------|
+//! | `initializeGdt`      | `Arch::Gdt::initialize`    | `gdt: cs=... tr=...`              |
+//! | `initializeIdt`      | `Arch::Idt::initialize`    | `idt: 50 gates loaded`            |
+//! | `initializeUserMode` | `Arch::UserMode::initialize` | `usermode: syscall enabled, ...` |
+//!
+//! The order is fixed. The IDT gates name the kernel's code selector, and the
+//! double fault gate names IST1 of the kernel's TSS, so the GDT comes first.
+//! From the IDT on, every CPU exception reaches `Trap::dispatch`.
+
+import Apic from "@apic";
+import Arch from "@arch";
+import Drivers from "@drivers";
+
+/// The trap setup steps.
+namespace Trap::Setup {
+  /// Loads the kernel GDT and TSS, then logs the code segment selector and the
+  /// task register read back from the CPU. On a correct boot they are `0x8` and
+  /// `0x28`, which proves the far return and `ltr` in `Arch::Gdt::initialize`
+  /// took effect.
+  function initializeGdt(): void {
+    Arch::Gdt::initialize();
+
+    Drivers::Serial::write("gdt: cs=");
+    Drivers::Serial::writeHex(Arch::Gdt::currentCode() as u64);
+    Drivers::Serial::write(" tr=");
+    Drivers::Serial::writeHex(Arch::Gdt::currentTask() as u64);
+    Drivers::Serial::write("\n");
+  }
+
+  /// Installs the kernel IDT. The IDT state Limine leaves is not specified by
+  /// the protocol, so the kernel installs its own before it does anything that
+  /// can fault. The local APIC spurious vector has a gate of its own, which
+  /// `Arch::Idt` cannot look up, so it is passed in.
+  function initializeIdt(): void {
+    Arch::Idt::initialize(Apic::Lapic::spuriousVector());
+
+    Drivers::Serial::writeLine("idt: 50 gates loaded");
+  }
+
+  /// Sets `IA32_EFER.SCE` and programs `IA32_STAR`, `IA32_LSTAR` and
+  /// `IA32_FMASK`, then logs their values. The values go to COM1 only.
+  function initializeUserMode(): void {
+    Arch::UserMode::initialize();
+
+    Drivers::Serial::write("usermode: syscall enabled, star ");
+    Drivers::Serial::writeHex(Arch::UserMode::starValue());
+    Drivers::Serial::write(", lstar ");
+    Drivers::Serial::writeHex(Arch::UserMode::entryAddress());
+    Drivers::Serial::write(", fmask ");
+    Drivers::Serial::writeHex(Arch::UserMode::flagMask());
+    Drivers::Serial::write("\n");
+  }
+}

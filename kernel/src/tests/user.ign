@@ -18,7 +18,7 @@
 //! | isolation (9 programs) | a fault or a forbidden instruction kills only that process, no frame leaks |
 //! | hello             | a real static ELF64 loaded from a Limine module        |
 //!
-//! `main.ign` calls `UserTest::run` once, after the scheduler tests and before
+//! `main.ign` calls `Tests::User::run` once, after the scheduler tests and before
 //! it enables the keyboard.
 
 import Drivers from "@drivers";
@@ -36,7 +36,7 @@ extern UserTestAsm {
 }
 
 /// The user mode tests.
-export namespace UserTest {
+namespace Tests::User {
   /// Program index 0: `exit(42)`.
   const EXIT: u64 = 0;
 

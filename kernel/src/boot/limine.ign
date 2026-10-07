@@ -414,6 +414,16 @@ namespace Boot::Limine {
     return @readVolatile<u64>(&mut Requests::baseRevision.revision as *mut u64) == BASE_REVISION_SUPPORTED;
   }
 
+  /// Panics unless the bootloader supports the base revision this kernel
+  /// asks for. Limine overwrites the third word of the base revision tag with
+  /// 0 when it supports the revision requested. Anything else means the
+  /// responses cannot be trusted.
+  function requireBaseRevision(): void {
+    if (!isBaseRevisionSupported()) {
+      @panic("Limine base revision 6 is not supported");
+    }
+  }
+
   /// The response pointer the bootloader left in a request's `response`
   /// slot, or null when it left none. The load is volatile, so it is a real
   /// read of the slot Limine filled in.
@@ -433,6 +443,18 @@ namespace Boot::Limine {
     }
 
     return *(*response).framebuffers;
+  }
+
+  /// The first Limine framebuffer. Panics when the bootloader provided none,
+  /// because the console has nowhere to draw.
+  function requireFramebuffer(): *mut Framebuffer {
+    let framebuffer: *mut Framebuffer = firstFramebuffer();
+
+    if (framebuffer == null) {
+      @panic("Limine provided no framebuffer");
+    }
+
+    return framebuffer;
   }
 
   /// The memory map, or null when the bootloader provided none.

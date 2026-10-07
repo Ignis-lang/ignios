@@ -40,6 +40,7 @@
 
 import Apic from "@apic";
 import Arch from "@arch";
+import Drivers from "@drivers";
 
 /// Tick counter and the calibration result.
 record TimerState {
@@ -52,6 +53,9 @@ record TimerState {
 
   /// The count loaded at each period.
   static mut initialCount: u64 = 0;
+
+  /// The interrupt vector the timer raises.
+  static mut vector: u64 = 0;
 }
 
 /// The timer API.
@@ -69,9 +73,6 @@ namespace Time::Timer {
 
   /// Polls of the PIT output before the measurement is given up.
   const CALIBRATION_POLL_LIMIT: u64 = 100000000;
-
-  /// Ticks the self-test waits for: 10 ticks is 100 ms.
-  const SELF_TEST_TICKS: u64 = 10;
 
   /// Measures the APIC timer and starts it ticking `FREQUENCY` times per
   /// second on `vector`. The local APIC must be enabled and `vector` must
@@ -105,6 +106,7 @@ namespace Time::Timer {
 
     TimerState::countRate = countRate;
     TimerState::initialCount = initialCount;
+    TimerState::vector = vector as u64;
 
     Apic::Lapic::startTimerPeriodic(vector, initialCount as u32);
   }
@@ -136,19 +138,17 @@ namespace Time::Timer {
     return ticks() * 1000 / FREQUENCY;
   }
 
-  /// Sleeps with interrupts on until `SELF_TEST_TICKS` ticks have arrived,
-  /// then turns interrupts off again. It does not return when the timer
-  /// interrupt never comes. The boot log line printed just before makes that
-  /// visible.
-  function selfTest(): void {
-    let target: u64 = ticks() + SELF_TEST_TICKS;
-
-    Arch::Cpu::enableInterrupts();
-
-    while (ticks() < target) {
-      Arch::Cpu::waitForInterrupt();
-    }
-
-    Arch::Cpu::disableInterrupts();
+  /// Prints the calibration result: the counting rate, the initial count, the
+  /// tick frequency and the vector.
+  function report(): void {
+    Drivers::Console::write("timer: calibrated on PIT channel 2: ");
+    Drivers::Console::writeDecimal(countRate());
+    Drivers::Console::write(" Hz (divide 16), initial count ");
+    Drivers::Console::writeDecimal(initialCount());
+    Drivers::Console::write(", ");
+    Drivers::Console::writeDecimal(FREQUENCY);
+    Drivers::Console::write(" Hz periodic, vector ");
+    Drivers::Console::writeHex(TimerState::vector);
+    Drivers::Console::writeLine("");
   }
 }

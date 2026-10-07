@@ -48,6 +48,7 @@
 
 import Arch from "@arch";
 import Boot from "@boot";
+import Drivers from "@drivers";
 import Lib from "@lib";
 
 /// Allocator state. Every field is touched only with interrupts disabled.
@@ -83,10 +84,6 @@ namespace Mm::Pmm {
   /// 1 MiB. Memory below it is scarce on a PC (real mode, legacy devices), so
   /// the bitmap is placed above it when possible.
   const LOW_MEMORY_LIMIT: u64 = 0x100000;
-
-  /// Frames the self-test allocates at once. The test keeps their addresses in
-  /// an array of this size.
-  const SELF_TEST_FRAMES: u64 = 8;
 
   /// Returned by `allocateFrame` when no frame is free.
   const NO_FRAME: u64 = 0;
@@ -207,59 +204,37 @@ namespace Mm::Pmm {
     return PmmState::freeFrames;
   }
 
-  /// Allocates and frees a few frames and checks the allocator's promises:
-  /// aligned non-zero frames, no frame handed out twice, the free count
-  /// following every step, and a freed frame coming back first. Panics on
-  /// the first violation.
-  function selfTest(): void {
-    let mut frames: u64[8];
-    let before: u64 = PmmState::freeFrames;
+  /// Prints the frame counts: `pmm: 54015 usable frames, 54013 free (210 MiB)`.
+  function report(): void {
+    Drivers::Console::write("pmm: ");
+    Drivers::Console::writeDecimal(totalFrames());
+    Drivers::Console::write(" usable frames, ");
+    Drivers::Console::writeDecimal(freeFrameCount());
+    Drivers::Console::write(" free (");
+    Drivers::Console::writeDecimal(freeFrameCount() * 4 / 1024);
+    Drivers::Console::writeLine(" MiB)");
+  }
 
-    let mut index: u64 = 0;
+  /// Prints the number of memory-map entries and the higher half direct map
+  /// offset. Panics when Limine answered neither request.
+  function reportMemoryMap(): void {
+    let memmap: *mut Boot::Limine::MemmapResponse = Boot::Limine::memmap();
 
-    while (index < SELF_TEST_FRAMES) {
-      let frame: u64 = allocateFrame();
-
-      if (frame == NO_FRAME || frame % FRAME_SIZE != 0) {
-        @panic("pmm self-test: bad frame");
-      }
-
-      let mut earlier: u64 = 0;
-
-      while (earlier < index) {
-        if (frames[earlier] == frame) {
-          @panic("pmm self-test: frame handed out twice");
-        }
-
-        earlier += 1;
-      }
-
-      frames[index] = frame;
-      index += 1;
+    if (memmap == null) {
+      @panic("Limine provided no memory map");
     }
 
-    if (PmmState::freeFrames != before - SELF_TEST_FRAMES) {
-      @panic("pmm self-test: free count did not drop");
+    let hhdm: *mut Boot::Limine::HhdmResponse = Boot::Limine::hhdm();
+
+    if (hhdm == null) {
+      @panic("Limine provided no higher half direct map");
     }
 
-    let reused: u64 = frames[3];
-
-    freeFrame(reused);
-
-    if (allocateFrame() != reused) {
-      @panic("pmm self-test: freed frame was not reused");
-    }
-
-    index = 0;
-
-    while (index < SELF_TEST_FRAMES) {
-      freeFrame(frames[index]);
-      index += 1;
-    }
-
-    if (PmmState::freeFrames != before) {
-      @panic("pmm self-test: free count did not recover");
-    }
+    Drivers::Console::write("memory map: ");
+    Drivers::Console::writeDecimal((*memmap).entryCount);
+    Drivers::Console::write(" entries, hhdm offset ");
+    Drivers::Console::writeHex((*hhdm).offset);
+    Drivers::Console::writeLine("");
   }
 
   /// The end of the highest usable entry.
