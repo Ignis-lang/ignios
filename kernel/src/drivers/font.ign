@@ -32,10 +32,10 @@
 //! The table is a flat array. The glyph of character `c` starts at byte
 //! offset `(c - 0x20) * 16`. See concept doc 07.
 
-import FontData from "./font_8x16";
+import _ from "./font_8x16";
 
 /// The font API.
-export namespace Font {
+namespace Drivers::Font {
   /// Glyph width in pixels, which is also the width of a console cell.
   const WIDTH: u64 = 8;
 
@@ -62,6 +62,6 @@ export namespace Font {
       index = FALLBACK;
     }
 
-    return (&FontData::Glyphs::rows as *u8) + ((index - FIRST) as u64) * HEIGHT;
+    return (&Drivers::FontData::Glyphs::rows as *u8) + ((index - FIRST) as u64) * HEIGHT;
   }
 }

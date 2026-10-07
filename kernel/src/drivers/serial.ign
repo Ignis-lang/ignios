@@ -55,7 +55,7 @@ import Arch from "@arch";
 import Lib from "@lib";
 
 /// The serial port API.
-export namespace Serial {
+namespace Drivers::Serial {
   /// I/O port base of COM1. The register ports are `COM1 + offset`.
   const COM1: u16 = 0x3F8;
 

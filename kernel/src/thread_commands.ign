@@ -27,7 +27,7 @@
 //! do not start at 2.
 
 import Arch from "@arch";
-import Console from "./console";
+import Drivers from "@drivers";
 import Scheduler from "./scheduler";
 import Timer from "./timer";
 
@@ -53,22 +53,22 @@ export namespace ThreadCommands {
   function printThreads(): void {
     let saved: u64 = Arch::Cpu::saveAndDisableInterrupts();
 
-    Console::writeLine("  id  state     ticks   wake");
+    Drivers::Console::writeLine("  id  state     ticks   wake");
 
     let mut slot: u64 = 0;
 
     while (slot < Scheduler::MAX_THREADS) {
       if (Scheduler::slotInUse(slot)) {
-        Console::write("  ");
+        Drivers::Console::write("  ");
         writeNumber(Scheduler::slotId(slot), ID_WIDTH);
         writeText(Scheduler::stateName(slot), STATE_WIDTH);
         writeNumber(Scheduler::slotRunTicks(slot), TICKS_WIDTH);
 
         if (Scheduler::slotWakeTick(slot) != 0) {
-          Console::writeDecimal(Scheduler::slotWakeTick(slot));
+          Drivers::Console::writeDecimal(Scheduler::slotWakeTick(slot));
         }
 
-        Console::writeLine("");
+        Drivers::Console::writeLine("");
       }
 
       slot += 1;
@@ -122,20 +122,20 @@ export namespace ThreadCommands {
   function printTick(label: str): void {
     let saved: u64 = Arch::Cpu::saveAndDisableInterrupts();
 
-    Console::write("thread ");
-    Console::writeDecimal(Scheduler::currentId());
-    Console::write(": ");
-    Console::write(label);
-    Console::write(" at tick ");
-    Console::writeDecimal(Timer::ticks());
-    Console::writeLine("");
+    Drivers::Console::write("thread ");
+    Drivers::Console::writeDecimal(Scheduler::currentId());
+    Drivers::Console::write(": ");
+    Drivers::Console::write(label);
+    Drivers::Console::write(" at tick ");
+    Drivers::Console::writeDecimal(Timer::ticks());
+    Drivers::Console::writeLine("");
 
     Arch::Cpu::restoreInterrupts(saved);
   }
 
   /// Writes `value` in decimal, then spaces up to `width` columns.
   function writeNumber(value: u64, width: u64): void {
-    Console::writeDecimal(value);
+    Drivers::Console::writeDecimal(value);
     pad(digits(value), width);
   }
 
@@ -149,7 +149,7 @@ export namespace ThreadCommands {
       cursor = cursor + 1;
     }
 
-    Console::write(text);
+    Drivers::Console::write(text);
     pad(length, width);
   }
 
@@ -158,7 +158,7 @@ export namespace ThreadCommands {
     let mut count: u64 = used;
 
     while (count < width) {
-      Console::writeChar(0x20);
+      Drivers::Console::writeChar(0x20);
       count += 1;
     }
   }

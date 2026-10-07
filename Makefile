@@ -162,7 +162,7 @@ keytest: $(IMAGE) $(OVMF_VARS_COPY)
 # Regenerates the committed console font from the Spleen BDF in the devShell.
 font:
 	@test -n "$(SPLEEN_DIR)" || { echo "SPLEEN_DIR is not set; run inside nix develop" >&2; exit 1; }
-	python3 scripts/gen-font.py $(SPLEEN_DIR)/spleen-8x16.bdf kernel/src/font_8x16.ign
+	python3 scripts/gen-font.py $(SPLEEN_DIR)/spleen-8x16.bdf kernel/src/drivers/font_8x16.ign
 
 clean:
 	rm -rf $(BUILD)

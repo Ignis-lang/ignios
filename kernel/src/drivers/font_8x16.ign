@@ -8,10 +8,10 @@
 //! SPDX-License-Identifier: BSD-2-Clause
 //!
 //! Each glyph is 16 bytes, one per row from the top, with the most
-//! significant bit as the leftmost pixel. kernel/src/font.ign reads them.
+//! significant bit as the leftmost pixel. kernel/src/drivers/font.ign reads them.
 
 /// Holder of the generated glyph table.
-export namespace FontData {
+namespace Drivers::FontData {
   /// Record that owns the table as a public static array.
   record Glyphs {
     /// 95 glyphs of 16 bytes each, in character order from 0x20.

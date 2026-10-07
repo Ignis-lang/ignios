@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generates kernel/src/font_8x16.ign from the Spleen 8x16 BDF font.
+"""Generates kernel/src/drivers/font_8x16.ign from the Spleen 8x16 BDF font.
 
 Usage: scripts/gen-font.py <spleen-8x16.bdf> <output.ign>
 
@@ -30,10 +30,10 @@ HEADER = """\
 //! SPDX-License-Identifier: BSD-2-Clause
 //!
 //! Each glyph is {height} bytes, one per row from the top, with the most
-//! significant bit as the leftmost pixel. kernel/src/font.ign reads them.
+//! significant bit as the leftmost pixel. kernel/src/drivers/font.ign reads them.
 
 /// Holder of the generated glyph table.
-export namespace FontData {{
+namespace Drivers::FontData {{
   /// Record that owns the table as a public static array.
   record Glyphs {{
     /// {count} glyphs of {height} bytes each, in character order from 0x{first:02X}.

@@ -91,7 +91,7 @@
 //! Tables" (RSDP, XSDT, MADT).
 
 import Boot from "@boot";
-import Console from "./console";
+import Drivers from "@drivers";
 
 /// Everything `initialize` learned. The arrays are sized for the machines the
 /// kernel targets and their capacities must equal `Acpi::MAX_IOAPICS` and
@@ -278,45 +278,45 @@ export namespace Acpi {
 
   /// Prints the RSDP, the root table and the MADT contents.
   function report(): void {
-    Console::write("acpi: rsdp ");
-    Console::writeHex(AcpiState::rsdpPhysical);
-    Console::write(", revision ");
-    Console::writeDecimal(AcpiState::rsdpRevision);
-    Console::write(", oem ");
+    Drivers::Console::write("acpi: rsdp ");
+    Drivers::Console::writeHex(AcpiState::rsdpPhysical);
+    Drivers::Console::write(", revision ");
+    Drivers::Console::writeDecimal(AcpiState::rsdpRevision);
+    Drivers::Console::write(", oem ");
     writeText(AcpiState::rsdp, RSDP_OEM_OFFSET, 6);
-    Console::write(", ");
-    Console::write(AcpiState::rootUsesXsdt ? "xsdt " : "rsdt ");
-    Console::writeHex(AcpiState::rootAddress);
-    Console::write(" with ");
-    Console::writeDecimal(AcpiState::rootEntryCount);
-    Console::write(" tables, madt ");
-    Console::writeHex(AcpiState::madtAddress);
-    Console::writeLine("");
+    Drivers::Console::write(", ");
+    Drivers::Console::write(AcpiState::rootUsesXsdt ? "xsdt " : "rsdt ");
+    Drivers::Console::writeHex(AcpiState::rootAddress);
+    Drivers::Console::write(" with ");
+    Drivers::Console::writeDecimal(AcpiState::rootEntryCount);
+    Drivers::Console::write(" tables, madt ");
+    Drivers::Console::writeHex(AcpiState::madtAddress);
+    Drivers::Console::writeLine("");
 
-    Console::write("madt: lapic ");
-    Console::writeHex(AcpiState::lapicAddress);
-    Console::write(", ");
-    Console::writeDecimal(AcpiState::processorsEnabled);
-    Console::write(" of ");
-    Console::writeDecimal(AcpiState::processorsTotal);
-    Console::write(" processors enabled, ");
-    Console::write((AcpiState::madtFlags & MADT_PC_AT_COMPATIBLE) != 0 ? "8259 present" : "no 8259");
-    Console::write(", ");
-    Console::writeDecimal(AcpiState::ioapicCount);
-    Console::write(" ioapic, ");
-    Console::writeDecimal(AcpiState::overrideCount);
-    Console::writeLine(" overrides");
+    Drivers::Console::write("madt: lapic ");
+    Drivers::Console::writeHex(AcpiState::lapicAddress);
+    Drivers::Console::write(", ");
+    Drivers::Console::writeDecimal(AcpiState::processorsEnabled);
+    Drivers::Console::write(" of ");
+    Drivers::Console::writeDecimal(AcpiState::processorsTotal);
+    Drivers::Console::write(" processors enabled, ");
+    Drivers::Console::write((AcpiState::madtFlags & MADT_PC_AT_COMPATIBLE) != 0 ? "8259 present" : "no 8259");
+    Drivers::Console::write(", ");
+    Drivers::Console::writeDecimal(AcpiState::ioapicCount);
+    Drivers::Console::write(" ioapic, ");
+    Drivers::Console::writeDecimal(AcpiState::overrideCount);
+    Drivers::Console::writeLine(" overrides");
 
     let mut index: u64 = 0;
 
     while (index < AcpiState::ioapicCount) {
-      Console::write("madt: ioapic id ");
-      Console::writeDecimal(ioapicId(index) as u64);
-      Console::write(" at ");
-      Console::writeHex(ioapicAddress(index));
-      Console::write(", gsi base ");
-      Console::writeDecimal(ioapicGsiBase(index) as u64);
-      Console::writeLine("");
+      Drivers::Console::write("madt: ioapic id ");
+      Drivers::Console::writeDecimal(ioapicId(index) as u64);
+      Drivers::Console::write(" at ");
+      Drivers::Console::writeHex(ioapicAddress(index));
+      Drivers::Console::write(", gsi base ");
+      Drivers::Console::writeDecimal(ioapicGsiBase(index) as u64);
+      Drivers::Console::writeLine("");
       index += 1;
     }
 
@@ -545,15 +545,15 @@ export namespace Acpi {
     let source: u8 = *((&mut AcpiState::overrideSources as *mut u8) + index);
     let flags: u16 = *((&mut AcpiState::overrideFlags as *mut u16) + index);
 
-    Console::write("madt: override ISA IRQ ");
-    Console::writeDecimal(source as u64);
-    Console::write(" -> GSI ");
-    Console::writeDecimal(*((&mut AcpiState::overrideGsis as *mut u32) + index) as u64);
-    Console::write(", ");
-    Console::write(polarityName(flags));
-    Console::write(", ");
-    Console::write(triggerName(flags));
-    Console::writeLine("");
+    Drivers::Console::write("madt: override ISA IRQ ");
+    Drivers::Console::writeDecimal(source as u64);
+    Drivers::Console::write(" -> GSI ");
+    Drivers::Console::writeDecimal(*((&mut AcpiState::overrideGsis as *mut u32) + index) as u64);
+    Drivers::Console::write(", ");
+    Drivers::Console::write(polarityName(flags));
+    Drivers::Console::write(", ");
+    Drivers::Console::write(triggerName(flags));
+    Drivers::Console::writeLine("");
   }
 
   /// Text for the polarity bits of override flags.
@@ -613,7 +613,7 @@ export namespace Acpi {
     let mut index: u64 = 0;
 
     while (index < count) {
-      Console::writeChar(*(base + offset + index));
+      Drivers::Console::writeChar(*(base + offset + index));
       index += 1;
     }
   }

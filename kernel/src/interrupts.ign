@@ -13,7 +13,7 @@
 //!   Interrupts::dispatch(frame)
 //!   │
 //!   ├─ vector 0xFF  local APIC spurious ......... return, no EOI
-//!   ├─ vector 0x21  keyboard (IOAPIC) ........... Ps2::handleInterrupt, Lapic EOI
+//!   ├─ vector 0x21  keyboard (IOAPIC) ........... Drivers::Ps2::handleInterrupt, Lapic EOI
 //!   ├─ vector 0x30  local APIC timer ............ Timer::handleTick, Lapic EOI,
 //!   │                                             Scheduler::onTick (may switch threads)
 //!   ├─ vectors 0x20-0x2F (the rest)  8259 ....... acknowledge or absorb a spurious one
@@ -86,11 +86,9 @@
 
 import Apic from "@apic";
 import Arch from "@arch";
-import Color, Console from "./console";
+import Drivers from "@drivers";
 import Process from "./process";
-import Ps2 from "./ps2";
 import Scheduler from "./scheduler";
-import Serial from "./serial";
 import Timer from "./timer";
 
 /// Interrupt vector numbers and the dispatcher.
@@ -178,7 +176,7 @@ export namespace Interrupts {
     }
 
     if (vector == KEYBOARD_VECTOR) {
-      Ps2::handleInterrupt();
+      Drivers::Ps2::handleInterrupt();
       Apic::Lapic::endOfInterrupt();
       return;
     }
@@ -220,26 +218,26 @@ export namespace Interrupts {
   function killUserProcess(frame: *mut Arch::InterruptFrame): never {
     let vector: u64 = (*frame).vector;
 
-    Console::write("process ");
-    Console::writeDecimal(Process::currentId());
-    Console::write(" faulted: ");
-    Console::write(mnemonic(vector));
-    Console::write(" ");
-    Console::write(name(vector));
-    Console::write(" at rip ");
-    Console::writeHex((*frame).rip);
+    Drivers::Console::write("process ");
+    Drivers::Console::writeDecimal(Process::currentId());
+    Drivers::Console::write(" faulted: ");
+    Drivers::Console::write(mnemonic(vector));
+    Drivers::Console::write(" ");
+    Drivers::Console::write(name(vector));
+    Drivers::Console::write(" at rip ");
+    Drivers::Console::writeHex((*frame).rip);
 
     if (hasErrorCode(vector)) {
-      Console::write(", error ");
-      Console::writeHex((*frame).errorCode);
+      Drivers::Console::write(", error ");
+      Drivers::Console::writeHex((*frame).errorCode);
     }
 
     if (vector == PAGE_FAULT) {
-      Console::write(", address ");
-      Console::writeHex(readCr2());
+      Drivers::Console::write(", address ");
+      Drivers::Console::writeHex(readCr2());
     }
 
-    Console::writeLine("");
+    Drivers::Console::writeLine("");
 
     Process::killCurrent(EXIT_STATUS_SIGNAL_BASE + signalFor(vector));
   }
@@ -282,8 +280,8 @@ export namespace Interrupts {
   function reportException(frame: *mut Arch::InterruptFrame): void {
     let vector: u64 = (*frame).vector;
 
-    if (Console::isInitialized()) {
-      Console::setColors(Color::BRIGHT_WHITE, Color::RED);
+    if (Drivers::Console::isInitialized()) {
+      Drivers::Console::setColors(Drivers::Color::BRIGHT_WHITE, Drivers::Color::RED);
     }
 
     emitText("\nCPU exception ");
@@ -352,28 +350,28 @@ export namespace Interrupts {
   /// The console mirrors everything it prints to COM1, so COM1 is written
   /// directly only while the console is not up.
   function emitText(value: str): void {
-    if (Console::isInitialized()) {
-      Console::write(value);
+    if (Drivers::Console::isInitialized()) {
+      Drivers::Console::write(value);
     } else {
-      Serial::write(value);
+      Drivers::Serial::write(value);
     }
   }
 
   /// Like `emitText` for a hexadecimal number.
   function emitHex(value: u64): void {
-    if (Console::isInitialized()) {
-      Console::writeHex(value);
+    if (Drivers::Console::isInitialized()) {
+      Drivers::Console::writeHex(value);
     } else {
-      Serial::writeHex(value);
+      Drivers::Serial::writeHex(value);
     }
   }
 
   /// Like `emitText` for a decimal number.
   function emitDecimal(value: u64): void {
-    if (Console::isInitialized()) {
-      Console::writeDecimal(value);
+    if (Drivers::Console::isInitialized()) {
+      Drivers::Console::writeDecimal(value);
     } else {
-      Serial::writeDecimal(value);
+      Drivers::Serial::writeDecimal(value);
     }
   }
 

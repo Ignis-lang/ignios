@@ -51,7 +51,7 @@
 //!
 //! ```text
 //!   key -> keyboard -> 8042 -> IRQ1 -> IOAPIC pin 1 -> vector 0x21
-//!       -> Interrupts::dispatch -> Ps2::handleInterrupt -> Lib::ScancodeQueue::push
+//!       -> Interrupts::dispatch -> Drivers::Ps2::handleInterrupt -> Lib::ScancodeQueue::push
 //! ```
 //!
 //! See concept doc 06 and the OSDev wiki pages "I8042 PS/2 Controller" and
@@ -61,7 +61,7 @@ import Arch from "@arch";
 import Lib from "@lib";
 
 /// The PS/2 controller API.
-export namespace Ps2 {
+namespace Drivers::Ps2 {
   /// Data port. Reading it takes the byte out of the output buffer.
   const DATA: u16 = 0x60;
 

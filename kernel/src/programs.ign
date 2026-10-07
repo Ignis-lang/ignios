@@ -15,7 +15,7 @@
 //!     └─ Process::wait            sleep until the process ended, return its status
 //! ```
 
-import Console from "./console";
+import Drivers from "@drivers";
 import Modules from "./modules";
 import Process from "./process";
 
@@ -28,16 +28,16 @@ export namespace Programs {
     let index: u64 = Modules::find(name, length);
 
     if (index == Modules::NOT_FOUND) {
-      Console::write("run: no program named ");
+      Drivers::Console::write("run: no program named ");
 
       let mut position: u64 = 0;
 
       while (position < length) {
-        Console::writeChar(*(name + position));
+        Drivers::Console::writeChar(*(name + position));
         position += 1;
       }
 
-      Console::writeLine("");
+      Drivers::Console::writeLine("");
 
       return Process::NO_PROCESS;
     }

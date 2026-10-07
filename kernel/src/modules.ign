@@ -21,7 +21,7 @@
 //! ```
 
 import Boot from "@boot";
-import Console from "./console";
+import Drivers from "@drivers";
 import Vmm from "./vmm";
 
 /// The module API.
@@ -37,7 +37,7 @@ export namespace Modules {
     let response: *mut Boot::Limine::ModuleResponse = Boot::Limine::modules();
 
     if (response == null) {
-      Console::writeLine("modules: none");
+      Drivers::Console::writeLine("modules: none");
       return;
     }
 
@@ -51,15 +51,15 @@ export namespace Modules {
 
       Vmm::mapRange(start, start - Boot::Hhdm::offset(), end - start, Vmm::NO_EXECUTE);
 
-      Console::write("modules: ");
+      Drivers::Console::write("modules: ");
       writeText((*file).string);
-      Console::write(" is ");
+      Drivers::Console::write(" is ");
       writeText((*file).path);
-      Console::write(", ");
-      Console::writeDecimal((*file).size);
-      Console::write(" bytes at ");
-      Console::writeHex(@integerFromPointer((*file).address));
-      Console::writeLine("");
+      Drivers::Console::write(", ");
+      Drivers::Console::writeDecimal((*file).size);
+      Drivers::Console::write(" bytes at ");
+      Drivers::Console::writeHex(@integerFromPointer((*file).address));
+      Drivers::Console::writeLine("");
 
       index += 1;
     }
@@ -112,7 +112,7 @@ export namespace Modules {
     let mut index: u64 = 0;
 
     while (*(text + index) != 0) {
-      Console::writeChar(*(text + index));
+      Drivers::Console::writeChar(*(text + index));
       index += 1;
     }
   }

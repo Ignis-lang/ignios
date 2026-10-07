@@ -81,7 +81,7 @@ record KeyboardState {
 }
 
 /// The decoder API: `decode` is the only function the terminal needs.
-export namespace Keyboard {
+namespace Drivers::Keyboard {
   /// What `decode` returns for a byte that produces no character.
   const NONE: u8 = 0;
 

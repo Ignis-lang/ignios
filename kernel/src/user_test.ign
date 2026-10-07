@@ -21,7 +21,7 @@
 //! `main.ign` calls `UserTest::run` once, after the scheduler tests and before
 //! it enables the keyboard.
 
-import Console from "./console";
+import Drivers from "@drivers";
 import Pmm from "./pmm";
 import Process from "./process";
 import Programs from "./programs";
@@ -99,13 +99,13 @@ export namespace UserTest {
       @panic("user test: exit(42) came back with another status");
     }
 
-    Console::writeLine("user: ring 3 entered by iretq, exit(42) through SYSCALL gave status 42");
+    Drivers::Console::writeLine("user: ring 3 entered by iretq, exit(42) through SYSCALL gave status 42");
 
     if (runProgram(REGISTERS) != 0) {
       @panic("user test: SYSCALL changed a register or returned the wrong value");
     }
 
-    Console::writeLine("user: SYSCALL returned -ENOSYS by SYSRET with every other register intact");
+    Drivers::Console::writeLine("user: SYSCALL returned -ENOSYS by SYSRET with every other register intact");
 
     let ticksBefore: u64 = Timer::ticks();
 
@@ -119,9 +119,9 @@ export namespace UserTest {
       @panic("user test: no timer tick arrived while a program ran in ring 3");
     }
 
-    Console::write("user: ");
-    Console::writeDecimal(ticks);
-    Console::writeLine(" timer ticks passed while it ran in ring 3 and every one returned by iretq");
+    Drivers::Console::write("user: ");
+    Drivers::Console::writeDecimal(ticks);
+    Drivers::Console::writeLine(" timer ticks passed while it ran in ring 3 and every one returned by iretq");
 
     runSyscalls();
     runIsolation();
@@ -148,16 +148,16 @@ export namespace UserTest {
       @panic("user test: killed processes leaked frames");
     }
 
-    Console::writeLine("user: isolation ok, a null write, hlt, cli, ud2, a kernel read, port I/O, a write to code, a jump to the stack and a divide by zero each killed only their process");
+    Drivers::Console::writeLine("user: isolation ok, a null write, hlt, cli, ud2, a kernel read, port I/O, a write to code, a jump to the stack and a divide by zero each killed only their process");
   }
 
   /// Runs program `index` and panics unless the kernel killed it with
   /// `status`.
   function expectKilled(index: u64, status: u64): void {
     if (runProgram(index) != status) {
-      Console::write("user test: program ");
-      Console::writeDecimal(index);
-      Console::writeLine(" was not killed as expected");
+      Drivers::Console::write("user test: program ");
+      Drivers::Console::writeDecimal(index);
+      Drivers::Console::writeLine(" was not killed as expected");
       @panic("user test: a misbehaving program was not killed");
     }
   }
@@ -171,7 +171,7 @@ export namespace UserTest {
       @panic("user test: the hello program failed");
     }
 
-    Console::writeLine("user: hello from a static ELF64 module loaded by Limine ran and exited with status 0");
+    Drivers::Console::writeLine("user: hello from a static ELF64 module loaded by Limine ran and exited with status 0");
   }
 
   /// Runs the system call program, which prints from ring 3 and checks the
@@ -181,9 +181,9 @@ export namespace UserTest {
     let status: u64 = runProgram(SYSCALLS);
 
     if (status != 0) {
-      Console::write("user test: system call check ");
-      Console::writeDecimal(status);
-      Console::writeLine(" failed");
+      Drivers::Console::write("user test: system call check ");
+      Drivers::Console::writeDecimal(status);
+      Drivers::Console::writeLine(" failed");
       @panic("user test: a system call returned the wrong value");
     }
 
@@ -191,7 +191,7 @@ export namespace UserTest {
       @panic("user test: nanosleep returned too early");
     }
 
-    Console::writeLine("user: write, getpid, sched_yield, nanosleep, -ENOSYS, -EFAULT, -EBADF and -EINVAL behave as on Linux");
+    Drivers::Console::writeLine("user: write, getpid, sched_yield, nanosleep, -ENOSYS, -EFAULT, -EBADF and -EINVAL behave as on Linux");
   }
 
   /// Starts program `index` as a process, waits for it and returns its exit

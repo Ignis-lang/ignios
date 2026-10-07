@@ -8,7 +8,7 @@
 //! The kernel has no heap at the time it prints its first line and no string
 //! type, so formatting works through a callback. Each function produces the
 //! characters one at a time and hands every byte to `emit`. The caller decides
-//! where the byte goes: `Serial::writeByte` for COM1, `Console::writeChar` for
+//! where the byte goes: `Drivers::Serial::writeByte` for COM1, `Drivers::Console::writeChar` for
 //! the screen. No buffer is needed on either side.
 //!
 //! ```text

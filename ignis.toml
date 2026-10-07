@@ -60,3 +60,4 @@ emit = ["c"]
 "@arch" = "kernel/src/arch"
 "@apic" = "kernel/src/apic"
 "@boot" = "kernel/src/boot"
+"@drivers" = "kernel/src/drivers"

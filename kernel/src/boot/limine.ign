@@ -40,7 +40,7 @@
 //!
 //! | Request            | Used by                                  | Gives                              |
 //! |--------------------|------------------------------------------|------------------------------------|
-//! | Framebuffer        | `Console::initialize`, `Vmm`             | pixel buffer address and format    |
+//! | Framebuffer        | `Drivers::Console::initialize`, `Vmm`             | pixel buffer address and format    |
 //! | Memory map         | `Pmm`, `Vmm`                             | list of physical memory regions    |
 //! | HHDM               | `Hhdm`                                   | virtual offset of physical memory  |
 //! | Executable address | `Vmm::mapKernelImage`                    | physical and virtual kernel base   |

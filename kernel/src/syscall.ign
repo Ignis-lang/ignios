@@ -62,8 +62,8 @@
 //! x86_64 syscall table, `arch/x86/entry/syscalls/syscall_64.tbl`. See concept
 //! doc 15.
 
+import Drivers from "@drivers";
 import AddressSpace from "./address_space";
-import Console from "./console";
 import Process from "./process";
 import Scheduler from "./scheduler";
 import Timer from "./timer";
@@ -235,7 +235,7 @@ export namespace Syscall {
       let mut index: u64 = 0;
 
       while (index < piece) {
-        Console::writeChar(*(chunk + index));
+        Drivers::Console::writeChar(*(chunk + index));
         index += 1;
       }
 
@@ -299,11 +299,11 @@ export namespace Syscall {
   /// not canonical and `SYSRET` would fault in ring 0.
   @externName("ignis_syscall_bad_return")
   function badReturn(rip: u64): never {
-    Console::write("process ");
-    Console::writeDecimal(Process::currentId());
-    Console::write(": non-canonical return address ");
-    Console::writeHex(rip);
-    Console::writeLine("");
+    Drivers::Console::write("process ");
+    Drivers::Console::writeDecimal(Process::currentId());
+    Drivers::Console::write(": non-canonical return address ");
+    Drivers::Console::writeHex(rip);
+    Drivers::Console::writeLine("");
 
     Process::killCurrent(139);
   }

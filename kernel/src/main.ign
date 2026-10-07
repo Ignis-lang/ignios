@@ -24,11 +24,11 @@
 //! ```text
 //!   kmain
 //!   │
-//!   ├─ Serial::initialize ........ COM1 up, first log line      serial.ign       doc 06
+//!   ├─ Drivers::Serial::initialize ........ COM1 up, first log line      serial.ign       doc 06
 //!   ├─ Arch::Gdt::initialize ........... own GDT, TSS, CS/SS/DS       gdt.ign           doc 03
 //!   ├─ Arch::Idt::initialize ........... 50 gates (49 thunks + spur.) idt.ign           doc 04
 //!   ├─ Boot::Limine::isBaseRevisionSupported                          limine.ign        doc 01
-//!   ├─ Console::initialize ....... framebuffer text console     console.ign       doc 07
+//!   ├─ Drivers::Console::initialize ....... framebuffer text console     console.ign       doc 07
 //!   ├─ printBanner ............... banner, framebuffer, memory map
 //!   ├─ initializeMemory
 //!   │    ├─ Pmm::initialize ...... frame bitmap                 pmm.ign           doc 08
@@ -52,8 +52,8 @@
 //!
 //! ## Where Output Goes
 //!
-//! Before the console exists, `kmain` logs to COM1 only (`Serial::write`).
-//! `Console::write` shows text on the framebuffer and mirrors every byte to
+//! Before the console exists, `kmain` logs to COM1 only (`Drivers::Serial::write`).
+//! `Drivers::Console::write` shows text on the framebuffer and mirrors every byte to
 //! COM1, so the serial log of a headless run contains the whole screen. The
 //! `docs/READING.md` guide annotates the complete boot log line by line.
 //!
@@ -75,21 +75,18 @@
 import Apic from "@apic";
 import Arch from "@arch";
 import Boot from "@boot";
+import Drivers from "@drivers";
 import Lib from "@lib";
 import Acpi from "./acpi";
 import AddressSpace from "./address_space";
-import Color, Console from "./console";
 import Heap from "./heap";
 import Interrupts from "./interrupts";
-import Keyboard from "./keyboard";
 import Modules from "./modules";
 import Pmm from "./pmm";
 import Process from "./process";
 import Programs from "./programs";
-import Ps2 from "./ps2";
 import Scheduler from "./scheduler";
 import SchedulerTest from "./scheduler_test";
-import Serial from "./serial";
 import Syscall from "./syscall";
 import ThreadCommands from "./thread_commands";
 import UserTest from "./user_test";
@@ -148,31 +145,31 @@ const LINE_CAPACITY: u64 = 128;
 /// the call in the Ignis source. Never returns.
 ///
 /// On the console the report is bright white on red. On COM1 it is the same
-/// text with `\r\n` line endings (added by `Serial::write`).
+/// text with `\r\n` line endings (added by `Drivers::Serial::write`).
 @panicHandler
 function onPanic(message: str, file: str, line: u32): never {
-  if (PanicState::active || !Console::isInitialized()) {
-    Serial::write("\npanic: ");
-    Serial::write(message);
-    Serial::write(" at ");
-    Serial::write(file);
-    Serial::write(":");
-    Serial::writeDecimal(line);
-    Serial::write("\n");
+  if (PanicState::active || !Drivers::Console::isInitialized()) {
+    Drivers::Serial::write("\npanic: ");
+    Drivers::Serial::write(message);
+    Drivers::Serial::write(" at ");
+    Drivers::Serial::write(file);
+    Drivers::Serial::write(":");
+    Drivers::Serial::writeDecimal(line);
+    Drivers::Serial::write("\n");
 
     Arch::Cpu::haltForever();
   }
 
   PanicState::active = true;
 
-  Console::setColors(Color::BRIGHT_WHITE, Color::RED);
-  Console::write("\npanic: ");
-  Console::write(message);
-  Console::write(" at ");
-  Console::write(file);
-  Console::write(":");
-  Console::writeDecimal(line);
-  Console::write("\n");
+  Drivers::Console::setColors(Drivers::Color::BRIGHT_WHITE, Drivers::Color::RED);
+  Drivers::Console::write("\npanic: ");
+  Drivers::Console::write(message);
+  Drivers::Console::write(" at ");
+  Drivers::Console::write(file);
+  Drivers::Console::write(":");
+  Drivers::Console::writeDecimal(line);
+  Drivers::Console::write("\n");
 
   Arch::Cpu::haltForever();
 }
@@ -193,19 +190,19 @@ function requireFramebuffer(): *mut Boot::Limine::Framebuffer {
 /// `framebuffer: 1280x800, pitch 5120, bpp 32, 160x50 cells`. The pitch is
 /// the number of bytes between two pixel rows and can exceed `width * 4`.
 function reportFramebuffer(framebuffer: *mut Boot::Limine::Framebuffer): void {
-  Console::write("framebuffer: ");
-  Console::writeDecimal((*framebuffer).width);
-  Console::write("x");
-  Console::writeDecimal((*framebuffer).height);
-  Console::write(", pitch ");
-  Console::writeDecimal((*framebuffer).pitch);
-  Console::write(", bpp ");
-  Console::writeDecimal((*framebuffer).bpp);
-  Console::write(", ");
-  Console::writeDecimal(Console::columns());
-  Console::write("x");
-  Console::writeDecimal(Console::rows());
-  Console::writeLine(" cells");
+  Drivers::Console::write("framebuffer: ");
+  Drivers::Console::writeDecimal((*framebuffer).width);
+  Drivers::Console::write("x");
+  Drivers::Console::writeDecimal((*framebuffer).height);
+  Drivers::Console::write(", pitch ");
+  Drivers::Console::writeDecimal((*framebuffer).pitch);
+  Drivers::Console::write(", bpp ");
+  Drivers::Console::writeDecimal((*framebuffer).bpp);
+  Drivers::Console::write(", ");
+  Drivers::Console::writeDecimal(Drivers::Console::columns());
+  Drivers::Console::write("x");
+  Drivers::Console::writeDecimal(Drivers::Console::rows());
+  Drivers::Console::writeLine(" cells");
 }
 
 /// Prints the number of memory-map entries and the higher half direct map
@@ -223,38 +220,38 @@ function reportMemory(): void {
     @panic("Limine provided no higher half direct map");
   }
 
-  Console::write("memory map: ");
-  Console::writeDecimal((*memmap).entryCount);
-  Console::write(" entries, hhdm offset ");
-  Console::writeHex((*hhdm).offset);
-  Console::writeLine("");
+  Drivers::Console::write("memory map: ");
+  Drivers::Console::writeDecimal((*memmap).entryCount);
+  Drivers::Console::write(" entries, hhdm offset ");
+  Drivers::Console::writeHex((*hhdm).offset);
+  Drivers::Console::writeLine("");
 }
 
 /// Draws the colored banner and the framebuffer and memory lines. This is the
 /// first console output of the boot.
 function printBanner(framebuffer: *mut Boot::Limine::Framebuffer): void {
-  Console::setColors(Color::BRIGHT_YELLOW, Color::BLUE);
-  Console::write(" IgniOS ");
-  Console::setColors(Color::BRIGHT_CYAN, Color::BLACK);
-  Console::writeLine(" an x86_64 kernel written in Ignis");
-  Console::writeLine("");
+  Drivers::Console::setColors(Drivers::Color::BRIGHT_YELLOW, Drivers::Color::BLUE);
+  Drivers::Console::write(" IgniOS ");
+  Drivers::Console::setColors(Drivers::Color::BRIGHT_CYAN, Drivers::Color::BLACK);
+  Drivers::Console::writeLine(" an x86_64 kernel written in Ignis");
+  Drivers::Console::writeLine("");
 
-  Console::setColors(Color::WHITE, Color::BLACK);
+  Drivers::Console::setColors(Drivers::Color::WHITE, Drivers::Color::BLACK);
   reportFramebuffer(framebuffer);
   reportMemory();
-  Console::writeLine("");
+  Drivers::Console::writeLine("");
 }
 
 /// Brings up the PS/2 keyboard and reports the result on the console. Returns
 /// false when no controller answered, in which case `kmain` halts: without a
 /// keyboard the terminal is useless.
 function initializeKeyboard(): boolean {
-  if (!Ps2::initialize()) {
-    Console::writeLine("keyboard: no PS/2 controller answered");
+  if (!Drivers::Ps2::initialize()) {
+    Drivers::Console::writeLine("keyboard: no PS/2 controller answered");
     return false;
   }
 
-  Console::writeLine("keyboard: PS/2, scancode set 1, US layout, IRQ1 through the IOAPIC");
+  Drivers::Console::writeLine("keyboard: PS/2, scancode set 1, US layout, IRQ1 through the IOAPIC");
   return true;
 }
 
@@ -262,11 +259,11 @@ function initializeKeyboard(): boolean {
 /// CPU. On a correct boot they are `0x8` and `0x28`, which proves the far
 /// return and `ltr` in `Arch::Gdt::initialize` took effect.
 function reportGdt(): void {
-  Serial::write("gdt: cs=");
-  Serial::writeHex(Arch::Gdt::currentCode() as u64);
-  Serial::write(" tr=");
-  Serial::writeHex(Arch::Gdt::currentTask() as u64);
-  Serial::write("\n");
+  Drivers::Serial::write("gdt: cs=");
+  Drivers::Serial::writeHex(Arch::Gdt::currentCode() as u64);
+  Drivers::Serial::write(" tr=");
+  Drivers::Serial::writeHex(Arch::Gdt::currentTask() as u64);
+  Drivers::Serial::write("\n");
 }
 
 /// Builds the frame allocator, the kernel page tables and the heap, reports on
@@ -279,41 +276,41 @@ function reportGdt(): void {
 function initializeMemory(framebuffer: *mut Boot::Limine::Framebuffer): void {
   Pmm::initialize();
 
-  Console::write("pmm: ");
-  Console::writeDecimal(Pmm::totalFrames());
-  Console::write(" usable frames, ");
-  Console::writeDecimal(Pmm::freeFrameCount());
-  Console::write(" free (");
-  Console::writeDecimal(Pmm::freeFrameCount() * 4 / 1024);
-  Console::writeLine(" MiB)");
+  Drivers::Console::write("pmm: ");
+  Drivers::Console::writeDecimal(Pmm::totalFrames());
+  Drivers::Console::write(" usable frames, ");
+  Drivers::Console::writeDecimal(Pmm::freeFrameCount());
+  Drivers::Console::write(" free (");
+  Drivers::Console::writeDecimal(Pmm::freeFrameCount() * 4 / 1024);
+  Drivers::Console::writeLine(" MiB)");
 
   Pmm::selfTest();
-  Console::writeLine("pmm: self-test ok");
+  Drivers::Console::writeLine("pmm: self-test ok");
 
   Vmm::initialize(framebuffer);
 
-  Console::write("vmm: cr3 switched, cr3 ");
-  Console::writeHex(Arch::Cpu::readCr3());
-  Console::write(", pml4 ");
-  Console::writeHex(Vmm::rootTable());
-  Console::writeLine("");
+  Drivers::Console::write("vmm: cr3 switched, cr3 ");
+  Drivers::Console::writeHex(Arch::Cpu::readCr3());
+  Drivers::Console::write(", pml4 ");
+  Drivers::Console::writeHex(Vmm::rootTable());
+  Drivers::Console::writeLine("");
 
   Vmm::selfTest();
-  Console::writeLine("vmm: self-test ok");
+  Drivers::Console::writeLine("vmm: self-test ok");
 
   Modules::initialize();
 
   Heap::initialize();
   Heap::selfTest();
 
-  Console::write("heap: self-test ok, ");
-  Console::writeDecimal(Heap::mappedBytes() / 1024);
-  Console::write(" KiB mapped, ");
-  Console::writeDecimal(Heap::allocatedBytes());
-  Console::writeLine(" bytes in use");
+  Drivers::Console::write("heap: self-test ok, ");
+  Drivers::Console::writeDecimal(Heap::mappedBytes() / 1024);
+  Drivers::Console::write(" KiB mapped, ");
+  Drivers::Console::writeDecimal(Heap::allocatedBytes());
+  Drivers::Console::writeLine(" bytes in use");
 
   AddressSpace::selfTest();
-  Console::writeLine("address space: self-test ok, private user half, shared kernel half, frames returned");
+  Drivers::Console::writeLine("address space: self-test ok, private user half, shared kernel half, frames returned");
 }
 
 /// Prints the local APIC state: physical base from the `IA32_APIC_BASE` MSR,
@@ -321,17 +318,17 @@ function initializeMemory(framebuffer: *mut Boot::Limine::Framebuffer): void {
 /// enable, bit 11) and in the spurious vector register (software enable,
 /// bit 8). LINT0 is masked because the PIC is not used, LINT1 is set to NMI.
 function reportLapic(): void {
-  Console::write("lapic: base ");
-  Console::writeHex(Apic::Lapic::physicalBase());
-  Console::write(", id ");
-  Console::writeDecimal(Apic::Lapic::id() as u64);
-  Console::write(", version ");
-  Console::writeHex(Apic::Lapic::version() as u64);
-  Console::write(", msr enabled ");
-  Console::writeDecimal(Apic::Lapic::isGloballyEnabled() ? 1 : 0);
-  Console::write(", svr enabled ");
-  Console::writeDecimal(Apic::Lapic::isSoftwareEnabled() ? 1 : 0);
-  Console::writeLine(", LINT0 masked, LINT1 NMI");
+  Drivers::Console::write("lapic: base ");
+  Drivers::Console::writeHex(Apic::Lapic::physicalBase());
+  Drivers::Console::write(", id ");
+  Drivers::Console::writeDecimal(Apic::Lapic::id() as u64);
+  Drivers::Console::write(", version ");
+  Drivers::Console::writeHex(Apic::Lapic::version() as u64);
+  Drivers::Console::write(", msr enabled ");
+  Drivers::Console::writeDecimal(Apic::Lapic::isGloballyEnabled() ? 1 : 0);
+  Drivers::Console::write(", svr enabled ");
+  Drivers::Console::writeDecimal(Apic::Lapic::isSoftwareEnabled() ? 1 : 0);
+  Drivers::Console::writeLine(", LINT0 masked, LINT1 NMI");
 }
 
 /// Prints every IOAPIC (ID, version, redirection entry count, first GSI) and
@@ -342,31 +339,31 @@ function reportIoapic(keyboardGsi: u32): void {
   let mut index: u64 = 0;
 
   while (index < Acpi::ioapicCount()) {
-    Console::write("ioapic: id ");
-    Console::writeDecimal(Apic::Ioapic::id(index) as u64);
-    Console::write(", version ");
-    Console::writeHex(Apic::Ioapic::version(index) as u64);
-    Console::write(", ");
-    Console::writeDecimal(Apic::Ioapic::entryCount(index));
-    Console::write(" redirection entries, gsi base ");
-    Console::writeDecimal(Acpi::ioapicGsiBase(index) as u64);
-    Console::writeLine("");
+    Drivers::Console::write("ioapic: id ");
+    Drivers::Console::writeDecimal(Apic::Ioapic::id(index) as u64);
+    Drivers::Console::write(", version ");
+    Drivers::Console::writeHex(Apic::Ioapic::version(index) as u64);
+    Drivers::Console::write(", ");
+    Drivers::Console::writeDecimal(Apic::Ioapic::entryCount(index));
+    Drivers::Console::write(" redirection entries, gsi base ");
+    Drivers::Console::writeDecimal(Acpi::ioapicGsiBase(index) as u64);
+    Drivers::Console::writeLine("");
     index += 1;
   }
 
-  Console::write("ioapic: keyboard IRQ ");
-  Console::writeDecimal(KEYBOARD_IRQ as u64);
-  Console::write(" -> GSI ");
-  Console::writeDecimal(keyboardGsi as u64);
-  Console::write(", vector ");
-  Console::writeHex(Interrupts::KEYBOARD_VECTOR);
-  Console::write(", entry ");
-  Console::writeHex(Apic::Ioapic::redirection(keyboardGsi));
-  Console::writeLine("");
+  Drivers::Console::write("ioapic: keyboard IRQ ");
+  Drivers::Console::writeDecimal(KEYBOARD_IRQ as u64);
+  Drivers::Console::write(" -> GSI ");
+  Drivers::Console::writeDecimal(keyboardGsi as u64);
+  Drivers::Console::write(", vector ");
+  Drivers::Console::writeHex(Interrupts::KEYBOARD_VECTOR);
+  Drivers::Console::write(", entry ");
+  Drivers::Console::writeHex(Apic::Ioapic::redirection(keyboardGsi));
+  Drivers::Console::writeLine("");
 
-  Console::write("pic: masked, imr ");
-  Console::writeHex(Arch::Pic::masks() as u64);
-  Console::writeLine("");
+  Drivers::Console::write("pic: masked, imr ");
+  Drivers::Console::writeHex(Arch::Pic::masks() as u64);
+  Drivers::Console::writeLine("");
 }
 
 /// Calibrates the APIC timer against the PIT, starts it, checks that ticks
@@ -374,21 +371,21 @@ function reportIoapic(keyboardGsi: u32): void {
 function initializeTimer(): void {
   Timer::initialize(Interrupts::TIMER_VECTOR as u8);
 
-  Console::write("timer: calibrated on PIT channel 2: ");
-  Console::writeDecimal(Timer::countRate());
-  Console::write(" Hz (divide 16), initial count ");
-  Console::writeDecimal(Timer::initialCount());
-  Console::write(", ");
-  Console::writeDecimal(Timer::FREQUENCY);
-  Console::write(" Hz periodic, vector ");
-  Console::writeHex(Interrupts::TIMER_VECTOR);
-  Console::writeLine("");
+  Drivers::Console::write("timer: calibrated on PIT channel 2: ");
+  Drivers::Console::writeDecimal(Timer::countRate());
+  Drivers::Console::write(" Hz (divide 16), initial count ");
+  Drivers::Console::writeDecimal(Timer::initialCount());
+  Drivers::Console::write(", ");
+  Drivers::Console::writeDecimal(Timer::FREQUENCY);
+  Drivers::Console::write(" Hz periodic, vector ");
+  Drivers::Console::writeHex(Interrupts::TIMER_VECTOR);
+  Drivers::Console::writeLine("");
 
   Timer::selfTest();
 
-  Console::write("timer: self-test ok, ");
-  Console::writeDecimal(Timer::ticks());
-  Console::writeLine(" ticks so far");
+  Drivers::Console::write("timer: self-test ok, ");
+  Drivers::Console::writeDecimal(Timer::ticks());
+  Drivers::Console::writeLine(" ticks so far");
 }
 
 /// Prints seconds with three decimals, then the raw tick count. The
@@ -398,24 +395,24 @@ function printUptime(): void {
   let milliseconds: u64 = Timer::uptimeMilliseconds();
   let fraction: u64 = milliseconds % 1000;
 
-  Console::write("uptime: ");
-  Console::writeDecimal(milliseconds / 1000);
-  Console::write(".");
+  Drivers::Console::write("uptime: ");
+  Drivers::Console::writeDecimal(milliseconds / 1000);
+  Drivers::Console::write(".");
 
   if (fraction < 100) {
-    Console::write("0");
+    Drivers::Console::write("0");
   }
 
   if (fraction < 10) {
-    Console::write("0");
+    Drivers::Console::write("0");
   }
 
-  Console::writeDecimal(fraction);
-  Console::write(" s, ");
-  Console::writeDecimal(Timer::ticks());
-  Console::write(" ticks at ");
-  Console::writeDecimal(Timer::FREQUENCY);
-  Console::writeLine(" Hz");
+  Drivers::Console::writeDecimal(fraction);
+  Drivers::Console::write(" s, ");
+  Drivers::Console::writeDecimal(Timer::ticks());
+  Drivers::Console::write(" ticks at ");
+  Drivers::Console::writeDecimal(Timer::FREQUENCY);
+  Drivers::Console::writeLine(" Hz");
 }
 
 /// True when the first `length` bytes of `line` spell `text` exactly.
@@ -463,7 +460,7 @@ function runCommand(line: *mut u8, length: u64): void {
     ThreadCommands::printThreads();
   } else if (lineIs(line, length, THREADS_COMMAND)) {
     if (!ThreadCommands::startDemo()) {
-      Console::writeLine("threads: the thread table is full");
+      Drivers::Console::writeLine("threads: the thread table is full");
     }
   } else if (lineStartsWith(line, length, RUN_COMMAND)) {
     Programs::run((line + RUN_COMMAND_LENGTH) as *u8, length - RUN_COMMAND_LENGTH);
@@ -473,9 +470,9 @@ function runCommand(line: *mut u8, length: u64): void {
 /// Prints the green `> ` prompt, then switches to bright white for the text
 /// the user types.
 function printPrompt(): void {
-  Console::setColors(Color::BRIGHT_GREEN, Color::BLACK);
-  Console::write("> ");
-  Console::setColors(Color::BRIGHT_WHITE, Color::BLACK);
+  Drivers::Console::setColors(Drivers::Color::BRIGHT_GREEN, Drivers::Color::BLACK);
+  Drivers::Console::write("> ");
+  Drivers::Console::setColors(Drivers::Color::BRIGHT_WHITE, Drivers::Color::BLACK);
 }
 
 /// Drains the scancode queue forever and edits one line at a time: printable
@@ -516,10 +513,10 @@ function runTerminal(): void {
 
     Arch::Cpu::enableInterrupts();
 
-    let character: u8 = Keyboard::decode(Lib::ScancodeQueue::pop());
+    let character: u8 = Drivers::Keyboard::decode(Lib::ScancodeQueue::pop());
 
     if (character == NEWLINE) {
-      Console::writeChar(NEWLINE);
+      Drivers::Console::writeChar(NEWLINE);
 
       runCommand(&mut line as *mut u8, length);
 
@@ -528,12 +525,12 @@ function runTerminal(): void {
     } else if (character == BACKSPACE) {
       if (length > 0) {
         length -= 1;
-        Console::writeChar(BACKSPACE);
+        Drivers::Console::writeChar(BACKSPACE);
       }
     } else if (character >= FIRST_PRINTABLE && character <= LAST_PRINTABLE && length < LINE_CAPACITY) {
       line[length] = character;
       length += 1;
-      Console::writeChar(character);
+      Drivers::Console::writeChar(character);
     }
   }
 }
@@ -547,8 +544,8 @@ function runTerminal(): void {
 /// name `ENTRY(kmain)` in `kernel/linker.ld` refers to.
 @externName("kmain")
 function kmain(): void {
-  Serial::initialize();
-  Serial::writeLine("IgniOS booting");
+  Drivers::Serial::initialize();
+  Drivers::Serial::writeLine("IgniOS booting");
 
   // The IDT gates installed next name the kernel's code selector, and the double
   // fault gate names IST1 of the kernel's TSS, so the GDT comes first.
@@ -559,7 +556,7 @@ function kmain(): void {
   // Limine leaves is not specified by the protocol, so the kernel installs its
   // own before it does anything that can fault.
   Arch::Idt::initialize(Apic::Lapic::spuriousVector());
-  Serial::writeLine("idt: 50 gates loaded");
+  Drivers::Serial::writeLine("idt: 50 gates loaded");
 
   // Limine overwrites the third word of the base revision tag with 0 when it
   // supports the revision requested. Anything else means the responses below
@@ -570,7 +567,7 @@ function kmain(): void {
 
   let framebuffer: *mut Boot::Limine::Framebuffer = requireFramebuffer();
 
-  Console::initialize(framebuffer);
+  Drivers::Console::initialize(framebuffer);
   printBanner(framebuffer);
 
   initializeMemory(framebuffer);
@@ -582,13 +579,13 @@ function kmain(): void {
   // Sets IA32_EFER.SCE and programs IA32_STAR, IA32_LSTAR and IA32_FMASK. See
   // `usermode.ign`. The values are logged to COM1 only.
   Arch::UserMode::initialize();
-  Serial::write("usermode: syscall enabled, star ");
-  Serial::writeHex(Arch::UserMode::starValue());
-  Serial::write(", lstar ");
-  Serial::writeHex(Arch::UserMode::entryAddress());
-  Serial::write(", fmask ");
-  Serial::writeHex(Arch::UserMode::flagMask());
-  Serial::write("\n");
+  Drivers::Serial::write("usermode: syscall enabled, star ");
+  Drivers::Serial::writeHex(Arch::UserMode::starValue());
+  Drivers::Serial::write(", lstar ");
+  Drivers::Serial::writeHex(Arch::UserMode::entryAddress());
+  Drivers::Serial::write(", fmask ");
+  Drivers::Serial::writeHex(Arch::UserMode::flagMask());
+  Drivers::Serial::write("\n");
 
   Acpi::initialize();
   Acpi::report();
@@ -613,16 +610,16 @@ function kmain(): void {
   initializeTimer();
 
   Arch::Context::selfTest();
-  Console::writeLine("context: self-test ok, stack switch, argument, alignment and registers checked");
+  Drivers::Console::writeLine("context: self-test ok, stack switch, argument, alignment and registers checked");
 
   SchedulerTest::runCooperative();
 
-  Console::write("scheduler: self-test ok, round-robin, sleep and slot reuse, ");
-  Console::writeDecimal(Scheduler::switchCount());
-  Console::writeLine(" switches");
+  Drivers::Console::write("scheduler: self-test ok, round-robin, sleep and slot reuse, ");
+  Drivers::Console::writeDecimal(Scheduler::switchCount());
+  Drivers::Console::writeLine(" switches");
 
   SchedulerTest::runAddressSpaces();
-  Console::writeLine("scheduler: address-space self-test ok, each thread ran in its own CR3 and every frame came back");
+  Drivers::Console::writeLine("scheduler: address-space self-test ok, each thread ran in its own CR3 and every frame came back");
 
   // From here the timer tick can switch threads. The self-tests above ran
   // cooperatively because their expectations assume no preemption.
@@ -630,9 +627,9 @@ function kmain(): void {
 
   let preemptions: u64 = SchedulerTest::runPreemptive();
 
-  Console::write("scheduler: preemption self-test ok, two threads that never yield shared the processor, ");
-  Console::writeDecimal(preemptions);
-  Console::writeLine(" preemptions");
+  Drivers::Console::write("scheduler: preemption self-test ok, two threads that never yield shared the processor, ");
+  Drivers::Console::writeDecimal(preemptions);
+  Drivers::Console::writeLine(" preemptions");
 
   UserTest::run();
 

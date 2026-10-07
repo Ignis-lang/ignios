@@ -56,9 +56,9 @@
 
 import Arch from "@arch";
 import Boot from "@boot";
+import Drivers from "@drivers";
 import Lib from "@lib";
 import AddressSpace from "./address_space";
-import Console from "./console";
 import Elf, LoadedImage from "./elf";
 import Pmm from "./pmm";
 import Scheduler from "./scheduler";
@@ -178,27 +178,27 @@ export namespace Process {
     let error: u64 = Elf::load(image, size, root, &mut loaded as *mut LoadedImage);
 
     if (error != Elf::OK) {
-      Console::write("elf: ");
-      Console::writeLine(Elf::describe(error));
+      Drivers::Console::write("elf: ");
+      Drivers::Console::writeLine(Elf::describe(error));
       AddressSpace::destroy(root);
       return NO_PROCESS;
     }
 
     if (!mapStack(root)) {
-      Console::writeLine("elf: out of memory for the stack");
+      Drivers::Console::writeLine("elf: out of memory for the stack");
       AddressSpace::destroy(root);
       return NO_PROCESS;
     }
 
-    Console::write("elf: ");
-    Console::writeDecimal(loaded.segments);
-    Console::write(" segments, ");
-    Console::writeDecimal(loaded.pages);
-    Console::write(" pages, entry ");
-    Console::writeHex(loaded.entry);
-    Console::write(", stack top ");
-    Console::writeHex(STACK_TOP);
-    Console::writeLine("");
+    Drivers::Console::write("elf: ");
+    Drivers::Console::writeDecimal(loaded.segments);
+    Drivers::Console::write(" segments, ");
+    Drivers::Console::writeDecimal(loaded.pages);
+    Drivers::Console::write(" pages, entry ");
+    Drivers::Console::writeHex(loaded.entry);
+    Drivers::Console::write(", stack top ");
+    Drivers::Console::writeHex(STACK_TOP);
+    Drivers::Console::writeLine("");
 
     return launch(root, loaded.entry);
   }
@@ -346,17 +346,17 @@ export namespace Process {
     (*process).status = status;
     (*process).state = EXITED;
 
-    Console::write("process ");
-    Console::writeDecimal((*process).id);
+    Drivers::Console::write("process ");
+    Drivers::Console::writeDecimal((*process).id);
 
     if (killed) {
-      Console::write(" killed, status ");
+      Drivers::Console::write(" killed, status ");
     } else {
-      Console::write(" exited with status ");
+      Drivers::Console::write(" exited with status ");
     }
 
-    Console::writeDecimal(status);
-    Console::writeLine("");
+    Drivers::Console::writeDecimal(status);
+    Drivers::Console::writeLine("");
 
     Scheduler::exitCurrent();
   }

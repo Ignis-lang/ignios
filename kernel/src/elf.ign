@@ -73,8 +73,8 @@
 //!
 //! See concept doc 15 and the System V ABI, "ELF-64 Object File Format".
 
+import Drivers from "@drivers";
 import AddressSpace from "./address_space";
-import Console from "./console";
 import Pmm from "./pmm";
 import Vmm from "./vmm";
 
@@ -399,16 +399,16 @@ export namespace Elf {
     (*result).segments += 1;
     (*result).pages += (end - first) / PAGE_SIZE;
 
-    Console::write("elf: PT_LOAD ");
-    Console::writeHex(address);
-    Console::write(" file ");
-    Console::writeDecimal(fileSize);
-    Console::write(" mem ");
-    Console::writeDecimal(memorySize);
-    Console::write(" ");
-    Console::write("r");
-    Console::write((flags & FLAG_WRITE) != 0 ? "w" : "-");
-    Console::writeLine((flags & FLAG_EXECUTE) != 0 ? "x" : "-");
+    Drivers::Console::write("elf: PT_LOAD ");
+    Drivers::Console::writeHex(address);
+    Drivers::Console::write(" file ");
+    Drivers::Console::writeDecimal(fileSize);
+    Drivers::Console::write(" mem ");
+    Drivers::Console::writeDecimal(memorySize);
+    Drivers::Console::write(" ");
+    Drivers::Console::write("r");
+    Drivers::Console::write((flags & FLAG_WRITE) != 0 ? "w" : "-");
+    Drivers::Console::writeLine((flags & FLAG_EXECUTE) != 0 ? "x" : "-");
 
     return OK;
   }

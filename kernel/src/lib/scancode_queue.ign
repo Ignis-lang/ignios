@@ -7,7 +7,7 @@
 //! ## Overview
 //!
 //! There is exactly one producer, the keyboard interrupt handler
-//! (`Ps2::handleInterrupt`), and exactly one consumer, `runTerminal` in
+//! (`Drivers::Ps2::handleInterrupt`), and exactly one consumer, `runTerminal` in
 //! `main.ign`. Each side writes only its own index and reads the other's, so
 //! no lock is needed. Every access to the indices and the slots is volatile,
 //! which keeps the compiler from caching them across the interrupt and from

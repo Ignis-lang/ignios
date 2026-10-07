@@ -64,7 +64,7 @@
 //! | `\r` (0x0D) | column 0                                                |
 //! | `\t` (0x09) | advance to the next multiple of `TAB_WIDTH` (8)         |
 //! | `\b` (0x08) | move back one cell and blank it                         |
-//! | other non-printable | drawn as `?` (see `Font::glyph`)                |
+//! | other non-printable | drawn as `?` (see `Drivers::Font::glyph`)                |
 //!
 //! ## Concurrency
 //!
@@ -83,12 +83,12 @@
 import Arch from "@arch";
 import Boot from "@boot";
 import Lib from "@lib";
-import Font from "./font";
-import Serial from "./serial";
+import _ from "./font";
+import _ from "./serial";
 
 /// Palette indices, in ANSI order, with the classic VGA text-mode colors.
 /// The indices 8 to 15 are the bright variants of 0 to 7.
-export namespace Color {
+namespace Drivers::Color {
   /// Palette index 0, `0x000000`.
   const BLACK: u8 = 0;
 
@@ -163,7 +163,7 @@ export namespace Color {
 /// The console state, one `static mut` per field. The fields are globals
 /// because the console is a singleton and runs before the heap exists.
 record ConsoleState {
-  /// False until `Console::initialize`. Before that, output goes to COM1 only.
+  /// False until `Drivers::Console::initialize`. Before that, output goes to COM1 only.
   static mut initialized: boolean = false;
 
   /// True while the cursor is painted on the screen. Painting and erasing are
@@ -202,8 +202,8 @@ record ConsoleState {
   /// Bit position of the lowest bit of the blue channel.
   static mut blueShift: u8 = 0;
 
-  /// Size of the text grid in cells, at most `Console::MAX_COLUMNS` by
-  /// `Console::MAX_ROWS`.
+  /// Size of the text grid in cells, at most `Drivers::Console::MAX_COLUMNS` by
+  /// `Drivers::Console::MAX_ROWS`.
   static mut columns: u64 = 0;
 
   /// Height of the text grid in cells.
@@ -231,7 +231,7 @@ record ConsoleState {
   /// The character and the palette colors of each cell, row by row. The
   /// foreground index is in the high nibble of a color byte and the
   /// background index in the low one. The sizes must equal
-  /// `Console::MAX_COLUMNS * Console::MAX_ROWS`, and have to be integer
+  /// `Drivers::Console::MAX_COLUMNS * Drivers::Console::MAX_ROWS`, and have to be integer
   /// literals.
   static mut cellCharacters: u8[64800];
 
@@ -240,7 +240,7 @@ record ConsoleState {
 }
 
 /// The console API. Every function is safe to call from any thread.
-export namespace Console {
+namespace Drivers::Console {
   /// The only pixel size the console draws: 32 bits.
   const BITS_PER_PIXEL: u16 = 32;
 
@@ -297,8 +297,8 @@ export namespace Console {
     ConsoleState::blueSize = (*framebuffer).blueMaskSize;
     ConsoleState::blueShift = (*framebuffer).blueMaskShift;
 
-    ConsoleState::columns = ConsoleState::width / Font::WIDTH;
-    ConsoleState::rows = ConsoleState::height / Font::HEIGHT;
+    ConsoleState::columns = ConsoleState::width / Drivers::Font::WIDTH;
+    ConsoleState::rows = ConsoleState::height / Drivers::Font::HEIGHT;
 
     if (ConsoleState::columns > MAX_COLUMNS) {
       ConsoleState::columns = MAX_COLUMNS;
@@ -312,7 +312,7 @@ export namespace Console {
       @panic("framebuffer is smaller than one console cell");
     }
 
-    setColors(Color::WHITE, Color::BLACK);
+    setColors(Drivers::Color::WHITE, Drivers::Color::BLACK);
     ConsoleState::initialized = true;
     clear();
   }
@@ -431,14 +431,14 @@ export namespace Console {
   /// a serial terminal erases the character as well.
   function mirror(character: u8): void {
     if (character == NEWLINE) {
-      Serial::writeByte(CARRIAGE_RETURN);
-      Serial::writeByte(NEWLINE);
+      Drivers::Serial::writeByte(CARRIAGE_RETURN);
+      Drivers::Serial::writeByte(NEWLINE);
     } else if (character == BACKSPACE) {
-      Serial::writeByte(BACKSPACE);
-      Serial::writeByte(SPACE);
-      Serial::writeByte(BACKSPACE);
+      Drivers::Serial::writeByte(BACKSPACE);
+      Drivers::Serial::writeByte(SPACE);
+      Drivers::Serial::writeByte(BACKSPACE);
     } else {
-      Serial::writeByte(character);
+      Drivers::Serial::writeByte(character);
     }
   }
 
@@ -503,16 +503,16 @@ export namespace Console {
 
   /// Moves every text row but the first up by one row and blanks the last.
   function scrollUp(): void {
-    let rowBytes: u64 = ConsoleState::pitch * Font::HEIGHT;
+    let rowBytes: u64 = ConsoleState::pitch * Drivers::Font::HEIGHT;
     let screen: *mut u8 = @pointerFromInteger<*mut u8>(ConsoleState::base);
 
     // The destination starts one text row above the source and the ranges
     // overlap, so this has to be a memmove.
     Lib::Mem::move(screen, (screen + rowBytes) as *u8, rowBytes * (ConsoleState::rows - 1));
 
-    let lastRowTop: u64 = (ConsoleState::rows - 1) * Font::HEIGHT;
+    let lastRowTop: u64 = (ConsoleState::rows - 1) * Drivers::Font::HEIGHT;
 
-    fillPixels(0, lastRowTop, ConsoleState::width, Font::HEIGHT, ConsoleState::background);
+    fillPixels(0, lastRowTop, ConsoleState::width, Drivers::Font::HEIGHT, ConsoleState::background);
 
     let cellRowBytes: u64 = ConsoleState::columns;
     let cellBytes: u64 = cellRowBytes * (ConsoleState::rows - 1);
@@ -556,7 +556,7 @@ export namespace Console {
     *cellCharacterAddress(index) = character;
     *cellColorAddress(index) = (ConsoleState::foregroundIndex << 4) | ConsoleState::backgroundIndex;
 
-    drawCellLines(column, row, 0, Font::HEIGHT, false);
+    drawCellLines(column, row, 0, Drivers::Font::HEIGHT, false);
   }
 
   /// Draws pixel rows `firstLine` up to `firstLine + lineCount` of the cell
@@ -571,7 +571,7 @@ export namespace Console {
   ): void {
     let index: u64 = row * ConsoleState::columns + column;
     let colors: u8 = *cellColorAddress(index);
-    let glyph: *u8 = Font::glyph(*cellCharacterAddress(index));
+    let glyph: *u8 = Drivers::Font::glyph(*cellCharacterAddress(index));
     let foreground: u32 = packColor(colors >> 4);
     let background: u32 = packColor(colors & 0xF);
     let ink: u32 = inverted ? background : foreground;
@@ -580,11 +580,11 @@ export namespace Console {
 
     while (line < firstLine + lineCount) {
       let bits: u8 = *(glyph + line);
-      let pixels: *mut u32 = pixelAddress(column * Font::WIDTH, row * Font::HEIGHT + line);
+      let pixels: *mut u32 = pixelAddress(column * Drivers::Font::WIDTH, row * Drivers::Font::HEIGHT + line);
       let mut mask: u8 = 0x80;
       let mut x: u64 = 0;
 
-      while (x < Font::WIDTH) {
+      while (x < Drivers::Font::WIDTH) {
         *(pixels + x) = (bits & mask) != 0 ? ink : paper;
         mask >>= 1;
         x += 1;
@@ -636,13 +636,13 @@ export namespace Console {
   /// cell copy, with the colors swapped for the cursor and as they are to
   /// erase it. It never reads the framebuffer.
   function drawCursorLines(inverted: boolean): void {
-    drawCellLines(ConsoleState::column, ConsoleState::row, Font::HEIGHT - CURSOR_HEIGHT, CURSOR_HEIGHT, inverted);
+    drawCellLines(ConsoleState::column, ConsoleState::row, Drivers::Font::HEIGHT - CURSOR_HEIGHT, CURSOR_HEIGHT, inverted);
   }
 
   /// The framebuffer pixel for a palette index, with each 8-bit channel
   /// scaled to its mask size and moved to its mask shift.
   function packColor(index: u8): u32 {
-    let rgb: u32 = Color::rgb(index);
+    let rgb: u32 = Drivers::Color::rgb(index);
     let red: u32 = scaleChannel((rgb >> 16) & 0xFF, ConsoleState::redSize) << (ConsoleState::redShift as u32);
     let green: u32 = scaleChannel((rgb >> 8) & 0xFF, ConsoleState::greenSize) << (ConsoleState::greenShift as u32);
     let blue: u32 = scaleChannel(rgb & 0xFF, ConsoleState::blueSize) << (ConsoleState::blueShift as u32);
