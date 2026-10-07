@@ -16,6 +16,8 @@ import Limine from "./limine";
 import Pmm from "./pmm";
 import Ps2 from "./ps2";
 import ScancodeQueue from "./scancode_queue";
+import Scheduler from "./scheduler";
+import SchedulerTest from "./scheduler_test";
 import Serial from "./serial";
 import Timer from "./timer";
 import Vmm from "./vmm";
@@ -372,6 +374,8 @@ function kmain(): void {
 
   initializeMemory(framebuffer);
 
+  Scheduler::initialize();
+
   Acpi::initialize();
   Acpi::report();
 
@@ -393,6 +397,12 @@ function kmain(): void {
 
   Context::selfTest();
   Console::writeLine("context: self-test ok, stack switch, argument, alignment and registers checked");
+
+  SchedulerTest::runCooperative();
+
+  Console::write("scheduler: self-test ok, round-robin, sleep and slot reuse, ");
+  Console::writeDecimal(Scheduler::switchCount());
+  Console::writeLine(" switches");
 
   if (!initializeKeyboard()) {
     Cpu::haltForever();

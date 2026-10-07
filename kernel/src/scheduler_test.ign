@@ -1,0 +1,166 @@
+//! Boot-time checks of the scheduler. They run with the timer ticking and
+//! report by panicking on the first violation.
+//!
+//! A thread function can only be turned into the address `Scheduler::spawn`
+//! takes where it is named, so every `spawn` here names its function.
+
+import ContextAsm from "./arch/x86_64/context";
+import Cpu from "./arch/x86_64/cpu";
+import Scheduler from "./scheduler";
+import Timer from "./timer";
+
+record SchedulerTestState {
+  static mut counter: u64;
+  static mut trace: u8[16];
+  static mut traceLength: u64;
+  static mut sleptTicks: u64;
+}
+
+export namespace SchedulerTest {
+  const WORKERS: u64 = 3;
+  const STEPS: u64 = 3;
+  const SLEEP_TICKS: u64 = 5;
+
+  /// Runs the cooperative checks: round-robin order, exit and reuse of
+  /// slots, sleeping, and a full table. The scheduler must be initialized
+  /// and the timer running. Interrupts are left as they were found.
+  function runCooperative(): void {
+    let saved: u64 = Cpu::saveAndDisableInterrupts();
+
+    testRoundRobin();
+    testSleep();
+    testFullTable();
+
+    Cpu::restoreInterrupts(saved);
+  }
+
+  /// Three workers that yield after every step must interleave in the order
+  /// they were spawned, and each must add its own weight to the shared
+  /// counter every step.
+  function testRoundRobin(): void {
+    SchedulerTestState::counter = 0;
+    SchedulerTestState::traceLength = 0;
+
+    let threadsBefore: u64 = Scheduler::threadCount();
+    let first: u64 = Scheduler::spawn(ContextAsm::ignis_function_address(roundRobinWorker), 0);
+    let second: u64 = Scheduler::spawn(ContextAsm::ignis_function_address(roundRobinWorker), 1);
+    let third: u64 = Scheduler::spawn(ContextAsm::ignis_function_address(roundRobinWorker), 2);
+
+    if (second != first + 1 || third != second + 1) {
+      @panic("scheduler self-test: thread ids are not sequential");
+    }
+
+    joinRange(first, third);
+
+    if (SchedulerTestState::traceLength != WORKERS * STEPS) {
+      @panic("scheduler self-test: a worker did not finish all its steps");
+    }
+
+    let mut index: u64 = 0;
+
+    while (index < WORKERS * STEPS) {
+      if ((SchedulerTestState::trace[index] as u64) != index % WORKERS) {
+        @panic("scheduler self-test: the workers did not run round-robin");
+      }
+
+      index += 1;
+    }
+
+    if (SchedulerTestState::counter != STEPS * (1 + 2 + 3)) {
+      @panic("scheduler self-test: the shared counter is wrong");
+    }
+
+    if (Scheduler::threadCount() != threadsBefore) {
+      @panic("scheduler self-test: exited threads were not freed");
+    }
+  }
+
+  /// A sleeper must stay blocked for the ticks it asked for and then run
+  /// again.
+  function testSleep(): void {
+    SchedulerTestState::sleptTicks = 0;
+
+    let id: u64 = Scheduler::spawn(ContextAsm::ignis_function_address(sleepWorker), SLEEP_TICKS);
+
+    joinRange(id, id);
+
+    if (SchedulerTestState::sleptTicks < SLEEP_TICKS || SchedulerTestState::sleptTicks > SLEEP_TICKS + 2) {
+      @panic("scheduler self-test: a sleeper woke at the wrong time");
+    }
+  }
+
+  /// Filling every slot must make the next `spawn` fail cleanly, and the
+  /// slots must be usable again once their threads are gone.
+  function testFullTable(): void {
+    let free: u64 = Scheduler::MAX_THREADS - Scheduler::threadCount();
+    let mut first: u64 = Scheduler::NO_THREAD;
+    let mut last: u64 = Scheduler::NO_THREAD;
+    let mut spawned: u64 = 0;
+
+    while (true) {
+      let id: u64 = Scheduler::spawn(ContextAsm::ignis_function_address(sleepWorker), 2);
+
+      if (id == Scheduler::NO_THREAD) {
+        break;
+      }
+
+      if (first == Scheduler::NO_THREAD) {
+        first = id;
+      }
+
+      last = id;
+      spawned += 1;
+    }
+
+    if (spawned != free || spawned == 0) {
+      @panic("scheduler self-test: the table did not fill up exactly");
+    }
+
+    joinRange(first, last);
+
+    let again: u64 = Scheduler::spawn(ContextAsm::ignis_function_address(sleepWorker), 1);
+
+    if (again == Scheduler::NO_THREAD) {
+      @panic("scheduler self-test: a freed slot could not be reused");
+    }
+
+    joinRange(again, again);
+  }
+
+  /// Sleeps one tick at a time until no thread with an id from `first` to
+  /// `last` is left. Sleeping rather than yielding lets the idle thread run
+  /// and the tick count advance when every other thread is asleep.
+  function joinRange(first: u64, last: u64): void {
+    let mut id: u64 = first;
+
+    while (id <= last) {
+      while (Scheduler::isAlive(id)) {
+        Scheduler::sleep(1);
+      }
+
+      id += 1;
+    }
+  }
+
+  /// Adds its weight to the counter and records its index, `STEPS` times,
+  /// yielding after each.
+  function roundRobinWorker(index: u64): void {
+    let mut step: u64 = 0;
+
+    while (step < STEPS) {
+      SchedulerTestState::trace[SchedulerTestState::traceLength] = index as u8;
+      SchedulerTestState::traceLength += 1;
+      SchedulerTestState::counter += index + 1;
+      Scheduler::yield();
+      step += 1;
+    }
+  }
+
+  /// Sleeps `ticks` ticks and records how long that took.
+  function sleepWorker(ticks: u64): void {
+    let start: u64 = Timer::ticks();
+
+    Scheduler::sleep(ticks);
+    SchedulerTestState::sleptTicks = Timer::ticks() - start;
+  }
+}

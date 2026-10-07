@@ -158,15 +158,3 @@ export namespace Context {
     }
   }
 }
-
-/// Called by the trampoline before it enables interrupts and runs the thread
-/// function. Nothing to do until threads exist.
-@externName("ignis_thread_begin")
-function threadBegin(): void {
-}
-
-/// Called by the trampoline when a thread function returns.
-@externName("ignis_thread_exit")
-function threadExit(): never {
-  @panic("context: a thread function returned and nothing reaps it");
-}
