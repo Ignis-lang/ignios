@@ -20,7 +20,8 @@ Early, and only tested in QEMU with OVMF.
 | Threads | Kernel threads with their own stacks and a guard page, a round-robin run queue, `yield`, `sleep` and `exit`, an idle thread, and preemption by the timer tick with 100 ms time slices; `ps` lists the threads and `threads` starts a demo; the boot thread runs the terminal |
 | Input | PS/2 keyboard, scancode set 1, US layout, Shift and Caps Lock, line editing at a `>` prompt |
 | Memory | Bitmap frame allocator over the Limine memory map; own 4-level page tables (kernel image per segment with W^X, direct map with 2 MiB pages, write-combining framebuffer, NX and write protection on); kernel heap in the higher half behind the compiler's allocation handlers |
-| Next | syscalls, userland |
+| User mode | Per-process address spaces (own PML4, shared kernel half, U/S pages, frames freed on exit); ring 3 entered with `iretq`, left through `SYSCALL`/`SYSRET` or an interrupt (TSS.RSP0 follows the running thread); a Linux x86_64 syscall subset (`write`, `exit`, `exit_group`, `getpid`, `sched_yield`, `nanosleep`, `-ENOSYS` for the rest) behind a per-process ABI table; every user pointer validated before use; a static ELF64 loader fed by Limine modules; a fault, privileged instruction or undefined instruction in ring 3 kills only that process |
+| Next | a filesystem and a native IgniOS system call ABI |
 
 ## Quick start
 
@@ -40,7 +41,8 @@ The build also needs an Ignis compiler with freestanding support (Ignis `main` f
 | Target | What it does |
 |---|---|
 | `kernel` | Builds `build/kernel.elf` |
-| `image` | Builds `build/ignios.img`, a FAT32 EFI system partition with Limine and the kernel |
+| `user` | Builds the user program `build/hello.elf` from `user/hello` and `user/lib` |
+| `image` | Builds `build/ignios.img`, a FAT32 EFI system partition with Limine, the kernel and the user program |
 | `run` | Boots in QEMU with the serial console on stdio |
 | `run-headless` | Boots without a display and checks the banner and prompt in `build/serial.log` |
 | `screenshot` | Boots headless and saves the screen to `build/screen.png` |
@@ -50,7 +52,9 @@ The build also needs an Ignis compiler with freestanding support (Ignis `main` f
 
 ## How it is built
 
-Ignis compiles the whole kernel to one C unit, which clang compiles for `x86_64-unknown-none` with kernel flags (no red zone, no SSE, `-mcmodel=kernel`). The few routines that cannot be written in Ignis are small `.S` files under `kernel/src/arch/x86_64/`: interrupt entry stubs, the code segment reload and the stack switch. `ld.lld` links everything with `kernel/linker.ld`, and `mtools` writes the boot image. No cross GCC is involved.
+Ignis compiles the whole kernel to one C unit, which clang compiles for `x86_64-unknown-none` with kernel flags (no red zone, no SSE, `-mcmodel=kernel`). The few routines that cannot be written in Ignis are small `.S` files under `kernel/src/arch/x86_64/`: interrupt entry stubs, the code segment reload, the stack switch, the ring 3 entry and the `SYSCALL` stub, and the throwaway user programs of the boot self-tests. `ld.lld` links everything with `kernel/linker.ld`, and `mtools` writes the boot image. No cross GCC is involved.
+
+User programs are Ignis projects under `user/` built with `std = false` and the small user standard library in `user/lib` (`std::sys` wraps the system calls in inline asm, `std::io` prints). The Makefile links each one with `user/user.ld` into a static ELF64 at `0x400000`, copies it into the boot image and `boot/limine.conf` lists it as a Limine module. The kernel runs `hello` at boot, before the keyboard line, and `run hello` at the prompt runs it again.
 
 ## Layout
 
@@ -64,7 +68,14 @@ kernel/src/interrupts.ign      exception reports and interrupt dispatch
 kernel/src/acpi.ign            RSDP, XSDT and MADT parsing
 kernel/src/timer.ign           APIC timer calibration and tick counter
 kernel/src/pmm.ign             physical frame allocator
-kernel/src/vmm.ign             kernel page tables: map, unmap, translate, flush
+kernel/src/vmm.ign             page tables: map, unmap, translate, flush, in the kernel's or any address space
+kernel/src/address_space.ign   per-process PML4, user pages, user-pointer copies, destroy
+kernel/src/process.ign         process table, start from code or ELF, exit, kill, wait
+kernel/src/syscall.ign         ABI tables and the Linux syscall handlers
+kernel/src/elf.ign             static ELF64 loader
+kernel/src/modules.ign         Limine modules, mapped read only
+kernel/src/programs.ign        run a module by name
+kernel/src/user_test.ign       boot-time user mode and isolation tests
 kernel/src/heap.ign            kernel heap: first-fit allocator over PMM-backed pages
 kernel/src/hhdm.ign            physical memory through the higher half direct map
 kernel/src/scheduler.ign       kernel threads, run queue, sleep and timer preemption
@@ -72,7 +83,10 @@ kernel/src/scheduler_test.ign  boot-time scheduler self-tests
 kernel/src/thread_commands.ign the `ps` and `threads` terminal commands
 kernel/src/arch/x86_64/        GDT, IDT, PIC, local APIC, IOAPIC, PIT, port I/O, CPU helpers and stack switching, .S stubs
 kernel/linker.ld               higher-half layout
-boot/limine.conf               boot entry
+user/lib/                      the user standard library (syscalls, text output)
+user/hello/                    the first user program
+user/user.ld                   user program layout
+boot/limine.conf               boot entry and the user program module
 scripts/                       font generator, screenshot and key test drivers
 ```
 

@@ -226,11 +226,86 @@ user_test_syscalls_message:
 user_test_syscalls_message_end:
 user_test_syscalls_end:
 
+
+/* Indexes 4 to 12: programs that do something a user program must not. Each
+ * one is killed by the kernel and the kernel keeps running. */
+
+/* Index 4: a write to page zero, which is never mapped. */
+user_test_null_write_start:
+    mov byte ptr [0], 1
+    ud2
+user_test_null_write_end:
+
+/* Index 5: hlt, a privileged instruction. */
+user_test_hlt_start:
+    hlt
+    ud2
+user_test_hlt_end:
+
+/* Index 6: cli, which needs IOPL 3. */
+user_test_cli_start:
+    cli
+    ud2
+user_test_cli_end:
+
+/* Index 7: an undefined instruction. */
+user_test_undefined_start:
+    ud2
+user_test_undefined_end:
+
+/* Index 8: a read of kernel memory, mapped but without the user bit. */
+user_test_kernel_read_start:
+    mov rbx, 0xFFFF800000000000
+    mov rax, [rbx]
+    ud2
+user_test_kernel_read_end:
+
+/* Index 9: port input and output, which the TSS I/O permission bitmap
+ * (there is none) forbids. */
+user_test_port_start:
+    mov dx, 0x3F8
+    mov al, 0x58
+    out dx, al
+    ud2
+user_test_port_end:
+
+/* Index 10: a write to the program's own code page, which is read and
+ * execute. */
+user_test_code_write_start:
+    lea rax, [rip]
+    mov byte ptr [rax], 0
+    ud2
+user_test_code_write_end:
+
+/* Index 11: a jump to the stack, which is no-execute. */
+user_test_stack_jump_start:
+    mov rax, rsp
+    jmp rax
+user_test_stack_jump_end:
+
+/* Index 12: division by zero. */
+user_test_divide_start:
+    xor edx, edx
+    xor ecx, ecx
+    mov eax, 1
+    div ecx
+    ud2
+user_test_divide_end:
+
 .balign 8
 ignis_user_test_table:
     .quad user_test_exit_start, user_test_exit_end
     .quad user_test_registers_start, user_test_registers_end
     .quad user_test_spin_start, user_test_spin_end
     .quad user_test_syscalls_start, user_test_syscalls_end
+    .quad user_test_null_write_start, user_test_null_write_end
+    .quad user_test_hlt_start, user_test_hlt_end
+    .quad user_test_cli_start, user_test_cli_end
+    .quad user_test_undefined_start, user_test_undefined_end
+    .quad user_test_kernel_read_start, user_test_kernel_read_end
+    .quad user_test_port_start, user_test_port_end
+    .quad user_test_code_write_start, user_test_code_write_end
+    .quad user_test_stack_jump_start, user_test_stack_jump_end
+    .quad user_test_divide_start, user_test_divide_end
 
 .section .note.GNU-stack,"",@progbits

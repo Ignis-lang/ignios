@@ -1,8 +1,10 @@
 //! The Ignis side of interrupt handling. `interrupt_asm.S` saves the
 //! registers and calls `dispatch` with a pointer to the saved frame.
 //!
-//! Every CPU exception is fatal for now: it is reported on COM1 and on the
-//! console, then the processor halts. Device interrupts come from the IOAPIC
+//! A CPU exception in the kernel is fatal: it is reported on COM1 and on the
+//! console, then the processor halts. An exception taken in ring 3 (the saved
+//! code selector has RPL 3) is the process's own fault: it is reported and the
+//! process is killed while the kernel keeps running. Device interrupts come from the IOAPIC
 //! and are acknowledged at the local APIC: the keyboard arrives at vector
 //! 0x21 and the local APIC timer at vector 0x30, whose handler may switch to
 //! another thread after acknowledging the interrupt. The 8259 is fully
@@ -14,6 +16,7 @@ import Cpu from "./arch/x86_64/cpu";
 import Lapic from "./arch/x86_64/lapic";
 import Pic from "./arch/x86_64/pic";
 import Color, Console from "./console";
+import Process from "./process";
 import Ps2 from "./ps2";
 import Scheduler from "./scheduler";
 import Serial from "./serial";
@@ -62,6 +65,25 @@ export namespace Interrupts {
   const TIMER_VECTOR: u64 = 0x30;
   const PAGE_FAULT: u64 = 14;
 
+  const DIVIDE_ERROR: u64 = 0;
+  const DEBUG: u64 = 1;
+  const NMI: u64 = 2;
+  const BREAKPOINT: u64 = 3;
+  const INVALID_OPCODE: u64 = 6;
+  const X87_FAULT: u64 = 16;
+  const ALIGNMENT_CHECK: u64 = 17;
+  const MACHINE_CHECK: u64 = 18;
+  const SIMD_FAULT: u64 = 19;
+
+  /// Signal numbers of Linux x86_64, and the 128 a shell adds to report a
+  /// process that died of one.
+  const SIGILL: u64 = 4;
+  const SIGTRAP: u64 = 5;
+  const SIGBUS: u64 = 7;
+  const SIGFPE: u64 = 8;
+  const SIGSEGV: u64 = 11;
+  const EXIT_STATUS_SIGNAL_BASE: u64 = 128;
+
   /// Called by the common stub for every vector, on the interrupted stack.
   @externName("ignis_interrupt_dispatch")
   function dispatch(frame: *mut InterruptFrame): void {
@@ -89,9 +111,74 @@ export namespace Interrupts {
       return;
     }
 
+    if (isUserFault(frame)) {
+      killUserProcess(frame);
+    }
+
     reportException(frame);
 
     Cpu::haltForever();
+  }
+
+  /// True for a processor exception that interrupted ring 3 and that a
+  /// process can cause on its own. NMI and machine check are the machine's
+  /// business, not the process's, and stay fatal.
+  function isUserFault(frame: *mut InterruptFrame): boolean {
+    let vector: u64 = (*frame).vector;
+
+    return ((*frame).cs & 3) == 3 && vector < FIRST_IRQ_VECTOR && vector != NMI && vector != MACHINE_CHECK;
+  }
+
+  /// Reports what the process did and ends it. Never returns: the thread
+  /// ends on its own kernel stack, which holds this frame, and the next
+  /// thread frees the process's memory.
+  function killUserProcess(frame: *mut InterruptFrame): never {
+    let vector: u64 = (*frame).vector;
+
+    Console::write("process ");
+    Console::writeDecimal(Process::currentId());
+    Console::write(" faulted: ");
+    Console::write(mnemonic(vector));
+    Console::write(" ");
+    Console::write(name(vector));
+    Console::write(" at rip ");
+    Console::writeHex((*frame).rip);
+
+    if (hasErrorCode(vector)) {
+      Console::write(", error ");
+      Console::writeHex((*frame).errorCode);
+    }
+
+    if (vector == PAGE_FAULT) {
+      Console::write(", address ");
+      Console::writeHex(readCr2());
+    }
+
+    Console::writeLine("");
+
+    Process::killCurrent(EXIT_STATUS_SIGNAL_BASE + signalFor(vector));
+  }
+
+  /// The signal Linux sends for an exception, which a shell reports as
+  /// 128 plus its number.
+  function signalFor(vector: u64): u64 {
+    if (vector == DIVIDE_ERROR || vector == X87_FAULT || vector == SIMD_FAULT) {
+      return SIGFPE;
+    }
+
+    if (vector == INVALID_OPCODE) {
+      return SIGILL;
+    }
+
+    if (vector == DEBUG || vector == BREAKPOINT) {
+      return SIGTRAP;
+    }
+
+    if (vector == ALIGNMENT_CHECK) {
+      return SIGBUS;
+    }
+
+    return SIGSEGV;
   }
 
   /// Absorbs an interrupt that came from the 8259, which is fully masked.

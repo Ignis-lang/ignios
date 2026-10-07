@@ -3,6 +3,7 @@
 //! sees with what the program is supposed to do. A mismatch panics.
 
 import Console from "./console";
+import Pmm from "./pmm";
 import Process from "./process";
 import Programs from "./programs";
 import Timer from "./timer";
@@ -17,6 +18,23 @@ export namespace UserTest {
   const REGISTERS: u64 = 1;
   const SPIN: u64 = 2;
   const SYSCALLS: u64 = 3;
+
+  /// The programs that misbehave, in the order of `user_test_asm.S`.
+  const NULL_WRITE: u64 = 4;
+  const HLT: u64 = 5;
+  const CLI: u64 = 6;
+  const UNDEFINED: u64 = 7;
+  const KERNEL_READ: u64 = 8;
+  const PORT: u64 = 9;
+  const CODE_WRITE: u64 = 10;
+  const STACK_JUMP: u64 = 11;
+  const DIVIDE: u64 = 12;
+
+  /// What the shell shows for a process that died of SIGSEGV, SIGILL and
+  /// SIGFPE: 128 plus 11, 4 and 8.
+  const KILLED_BY_SEGV: u64 = 139;
+  const KILLED_BY_ILL: u64 = 132;
+  const KILLED_BY_FPE: u64 = 136;
 
   /// The program sleeps 20 ms, which is two timer ticks.
   const SYSCALLS_SLEEP_TICKS: u64 = 2;
@@ -54,7 +72,42 @@ export namespace UserTest {
     Console::writeLine(" timer ticks passed while it ran in ring 3 and every one returned by iretq");
 
     runSyscalls();
+    runIsolation();
     runHello();
+  }
+
+  /// Runs every program that does something a user program must not and
+  /// checks that each one is killed with the status of the matching signal,
+  /// that the kernel is still running afterwards and that no frame leaked.
+  function runIsolation(): void {
+    let freeBefore: u64 = Pmm::freeFrameCount();
+
+    expectKilled(NULL_WRITE, KILLED_BY_SEGV);
+    expectKilled(HLT, KILLED_BY_SEGV);
+    expectKilled(CLI, KILLED_BY_SEGV);
+    expectKilled(UNDEFINED, KILLED_BY_ILL);
+    expectKilled(KERNEL_READ, KILLED_BY_SEGV);
+    expectKilled(PORT, KILLED_BY_SEGV);
+    expectKilled(CODE_WRITE, KILLED_BY_SEGV);
+    expectKilled(STACK_JUMP, KILLED_BY_SEGV);
+    expectKilled(DIVIDE, KILLED_BY_FPE);
+
+    if (Pmm::freeFrameCount() != freeBefore) {
+      @panic("user test: killed processes leaked frames");
+    }
+
+    Console::writeLine("user: isolation ok, a null write, hlt, cli, ud2, a kernel read, port I/O, a write to code, a jump to the stack and a divide by zero each killed only their process");
+  }
+
+  /// Runs program `index` and panics unless the kernel killed it with
+  /// `status`.
+  function expectKilled(index: u64, status: u64): void {
+    if (runProgram(index) != status) {
+      Console::write("user test: program ");
+      Console::writeDecimal(index);
+      Console::writeLine(" was not killed as expected");
+      @panic("user test: a misbehaving program was not killed");
+    }
   }
 
   /// Runs `hello`, the ELF program the bootloader loaded as a module. It
