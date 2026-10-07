@@ -8,7 +8,8 @@
 //! the spurious interrupt vector register, leaves LINT0 as a masked external
 //! interrupt input and routes LINT1 as a non-maskable interrupt, which is the
 //! wiring a PC expects. Handlers acknowledge an interrupt with
-//! `endOfInterrupt`.
+//! `endOfInterrupt`. The APIC timer registers are exposed as start and stop
+//! helpers for `timer.ign`.
 
 import Cpu from "./cpu";
 import Vmm from "../../vmm";
@@ -33,13 +34,24 @@ export namespace Lapic {
   const TASK_PRIORITY_REGISTER: u64 = 0x80;
   const END_OF_INTERRUPT_REGISTER: u64 = 0xB0;
   const SPURIOUS_REGISTER: u64 = 0xF0;
+  const TIMER_REGISTER: u64 = 0x320;
   const LINT0_REGISTER: u64 = 0x350;
   const LINT1_REGISTER: u64 = 0x360;
+  const TIMER_INITIAL_COUNT_REGISTER: u64 = 0x380;
+  const TIMER_CURRENT_COUNT_REGISTER: u64 = 0x390;
+  const TIMER_DIVIDE_REGISTER: u64 = 0x3E0;
 
   const SOFTWARE_ENABLE: u32 = 0x100;
   const DELIVERY_EXTINT: u32 = 0x700;
   const DELIVERY_NMI: u32 = 0x400;
   const LVT_MASKED: u32 = 0x10000;
+
+  /// Bit 17 of the timer LVT entry selects periodic mode; clear is one-shot.
+  const TIMER_PERIODIC: u32 = 0x20000;
+
+  /// Divide configuration value for "divide by 16". The timer counts at the
+  /// APIC input clock divided by this.
+  const TIMER_DIVIDE_BY_16: u32 = 0x3;
 
   /// Maps the APIC page, enables the APIC, masks LINT0 and wires LINT1. The
   /// kernel page tables must be active. Panics when the APIC is in x2APIC
@@ -70,6 +82,33 @@ export namespace Lapic {
   /// the APIC needs it except the spurious one.
   function endOfInterrupt(): void {
     writeRegister(END_OF_INTERRUPT_REGISTER, 0);
+  }
+
+  /// Starts the timer counting down from `initialCount` once, with its
+  /// interrupt masked, at the input clock divided by 16. For measurements.
+  function startTimerOneShotMasked(initialCount: u32): void {
+    writeRegister(TIMER_DIVIDE_REGISTER, TIMER_DIVIDE_BY_16);
+    writeRegister(TIMER_REGISTER, LVT_MASKED);
+    writeRegister(TIMER_INITIAL_COUNT_REGISTER, initialCount);
+  }
+
+  /// Starts the timer in periodic mode: it raises `vector` every time the
+  /// count runs down from `initialCount` and reloads it, at the input clock
+  /// divided by 16.
+  function startTimerPeriodic(vector: u8, initialCount: u32): void {
+    writeRegister(TIMER_DIVIDE_REGISTER, TIMER_DIVIDE_BY_16);
+    writeRegister(TIMER_REGISTER, TIMER_PERIODIC | (vector as u32));
+    writeRegister(TIMER_INITIAL_COUNT_REGISTER, initialCount);
+  }
+
+  /// The count still to run down.
+  function timerCurrentCount(): u32 {
+    return readRegister(TIMER_CURRENT_COUNT_REGISTER);
+  }
+
+  /// Stops the timer by writing a zero initial count.
+  function stopTimer(): void {
+    writeRegister(TIMER_INITIAL_COUNT_REGISTER, 0);
   }
 
   /// The vector the APIC raises for spurious interrupts.

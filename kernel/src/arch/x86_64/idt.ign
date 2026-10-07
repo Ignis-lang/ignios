@@ -26,9 +26,10 @@ export namespace Idt {
   const GATE_COUNT: u64 = 256;
   const GATE_SIZE: u64 = 16;
 
-  /// Vectors 0-31 are exceptions and 32-47 the remapped PIC lines. Those and
-  /// the local APIC spurious vector are the only vectors that have a thunk.
-  const THUNK_COUNT: u64 = 48;
+  /// Vectors 0-31 are exceptions, 32-47 the remapped PIC lines and the IOAPIC
+  /// keyboard, and 48 the local APIC timer. Those and the local APIC spurious
+  /// vector are the only vectors that have a thunk.
+  const THUNK_COUNT: u64 = 49;
 
   const DOUBLE_FAULT: u64 = 8;
 

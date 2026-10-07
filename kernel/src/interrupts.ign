@@ -4,7 +4,7 @@
 //! Every CPU exception is fatal for now: it is reported on COM1 and on the
 //! console, then the processor halts. Device interrupts come from the IOAPIC
 //! and are acknowledged at the local APIC: the keyboard arrives at vector
-//! 0x21. The 8259 is fully masked, but its vectors 0x20-0x2F stay mapped to
+//! 0x21 and the local APIC timer at vector 0x30. The 8259 is fully masked, but its vectors 0x20-0x2F stay mapped to
 //! thunks so a spurious 8259 interrupt is absorbed. The local APIC's
 //! spurious vector is ignored without any acknowledgement.
 
@@ -14,6 +14,7 @@ import Pic from "./arch/x86_64/pic";
 import Color, Console from "./console";
 import Ps2 from "./ps2";
 import Serial from "./serial";
+import Timer from "./timer";
 
 /// The state `interrupt_asm.S` leaves on the stack, lowest address first.
 /// The registers are pushed by the common stub, `vector` by the thunk, and
@@ -52,6 +53,10 @@ export namespace Interrupts {
   /// The vector the IOAPIC raises for the keyboard. It equals the vector of
   /// 8259 line 1, which is harmless because that line is masked.
   const KEYBOARD_VECTOR: u64 = 0x21;
+
+  /// The vector of the local APIC timer tick. It is just above the 8259
+  /// vectors so nothing legacy shares it.
+  const TIMER_VECTOR: u64 = 0x30;
   const PAGE_FAULT: u64 = 14;
 
   /// Called by the common stub for every vector, on the interrupted stack.
@@ -65,6 +70,12 @@ export namespace Interrupts {
 
     if (vector == KEYBOARD_VECTOR) {
       Ps2::handleInterrupt();
+      Lapic::endOfInterrupt();
+      return;
+    }
+
+    if (vector == TIMER_VECTOR) {
+      Timer::handleTick();
       Lapic::endOfInterrupt();
       return;
     }

@@ -16,6 +16,7 @@ import Pmm from "./pmm";
 import Ps2 from "./ps2";
 import ScancodeQueue from "./scancode_queue";
 import Serial from "./serial";
+import Timer from "./timer";
 import Vmm from "./vmm";
 import _ from "./lib/mem";
 
@@ -30,6 +31,10 @@ const LAST_PRINTABLE: u8 = 0x7E;
 
 /// The ISA interrupt line of the PS/2 keyboard.
 const KEYBOARD_IRQ: u8 = 1;
+
+/// The one command the terminal knows. It prints the time since the timer
+/// started.
+const UPTIME_COMMAND: str = "uptime";
 
 /// Bytes one input line can hold. It must equal the array size in
 /// `runTerminal`, which has to be an integer literal.
@@ -226,6 +231,69 @@ function reportIoapic(keyboardGsi: u32): void {
   Console::writeLine("");
 }
 
+/// Calibrates the APIC timer, starts it and checks that ticks arrive.
+function initializeTimer(): void {
+  Timer::initialize(Interrupts::TIMER_VECTOR as u8);
+
+  Console::write("timer: calibrated on PIT channel 2: ");
+  Console::writeDecimal(Timer::countRate());
+  Console::write(" Hz (divide 16), initial count ");
+  Console::writeDecimal(Timer::initialCount());
+  Console::write(", ");
+  Console::writeDecimal(Timer::FREQUENCY);
+  Console::write(" Hz periodic, vector ");
+  Console::writeHex(Interrupts::TIMER_VECTOR);
+  Console::writeLine("");
+
+  Timer::selfTest();
+
+  Console::write("timer: self-test ok, ");
+  Console::writeDecimal(Timer::ticks());
+  Console::writeLine(" ticks so far");
+}
+
+/// Prints seconds with three decimals, then the raw tick count.
+function printUptime(): void {
+  let milliseconds: u64 = Timer::uptimeMilliseconds();
+  let fraction: u64 = milliseconds % 1000;
+
+  Console::write("uptime: ");
+  Console::writeDecimal(milliseconds / 1000);
+  Console::write(".");
+
+  if (fraction < 100) {
+    Console::write("0");
+  }
+
+  if (fraction < 10) {
+    Console::write("0");
+  }
+
+  Console::writeDecimal(fraction);
+  Console::write(" s, ");
+  Console::writeDecimal(Timer::ticks());
+  Console::write(" ticks at ");
+  Console::writeDecimal(Timer::FREQUENCY);
+  Console::writeLine(" Hz");
+}
+
+/// True when the first `length` bytes of `line` spell `text` exactly.
+function lineIs(line: *mut u8, length: u64, text: str): boolean {
+  let mut cursor: *u8 = text as *u8;
+  let mut index: u64 = 0;
+
+  while (*cursor != 0) {
+    if (index == length || *(line + index) != *cursor) {
+      return false;
+    }
+
+    index += 1;
+    cursor = cursor + 1;
+  }
+
+  return index == length;
+}
+
 function printPrompt(): void {
   Console::setColors(Color::BRIGHT_GREEN, Color::BLACK);
   Console::write("> ");
@@ -234,7 +302,8 @@ function printPrompt(): void {
 
 /// Drains the scancode queue forever and edits one line at a time: printable
 /// characters are echoed and stored, Backspace erases the last stored
-/// character but never the prompt, and Enter starts a new prompt. Input past
+/// character but never the prompt, and Enter runs the line when it is
+/// `uptime` and starts a new prompt. Input past
 /// LINE_CAPACITY and Tab are ignored. The queue is checked with interrupts
 /// off, so an IRQ1 cannot land between the check and the `sti; hlt` that
 /// sleeps until the next one.
@@ -258,6 +327,11 @@ function runTerminal(): void {
 
     if (character == NEWLINE) {
       Console::writeChar(NEWLINE);
+
+      if (lineIs(&mut line as *mut u8, length, UPTIME_COMMAND)) {
+        printUptime();
+      }
+
       length = 0;
       printPrompt();
     } else if (character == BACKSPACE) {
@@ -284,7 +358,7 @@ function kmain(): void {
   reportGdt();
 
   Idt::initialize();
-  Serial::writeLine("idt: 48 gates loaded");
+  Serial::writeLine("idt: 50 gates loaded");
 
   if (!Limine::isBaseRevisionSupported()) {
     @panic("Limine base revision 6 is not supported");
@@ -313,6 +387,8 @@ function kmain(): void {
   }
 
   reportIoapic(keyboardGsi);
+
+  initializeTimer();
 
   if (!initializeKeyboard()) {
     Cpu::haltForever();

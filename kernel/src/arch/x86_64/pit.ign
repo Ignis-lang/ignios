@@ -1,0 +1,49 @@
+//! The legacy 8254 programmable interval timer, used only as a reference
+//! clock. Its input runs at 1193182 Hz on every PC, which makes it the
+//! simplest way to measure the local APIC timer, whose frequency is not
+//! written down anywhere.
+//!
+//! Channel 2 is used because its gate and output are visible through port
+//! 0x61 and it has no interrupt line: the kernel loads a count, opens the
+//! gate and polls the output. In mode 0 (interrupt on terminal count) the
+//! output goes low when the count is loaded and high when it reaches zero.
+
+import Port from "./io";
+
+export namespace Pit {
+  /// The frequency of the PIT input clock in Hz.
+  const FREQUENCY: u64 = 1193182;
+
+  const CHANNEL_2_DATA: u16 = 0x42;
+  const COMMAND: u16 = 0x43;
+  const CONTROL: u16 = 0x61;
+
+  /// Channel 2, low byte then high byte, mode 0, binary counting.
+  const CHANNEL_2_MODE_0: u8 = 0xB0;
+
+  const GATE_ENABLE: u8 = 0x01;
+  const SPEAKER_ENABLE: u8 = 0x02;
+  const OUTPUT_HIGH: u8 = 0x20;
+
+  /// Loads `count` into channel 2 and starts it counting down. The speaker
+  /// stays off. The countdown takes `count / FREQUENCY` seconds.
+  function startCountdown(count: u16): void {
+    let control: u8 = Port::readByte(CONTROL) & ~(GATE_ENABLE | SPEAKER_ENABLE);
+
+    Port::writeByte(CONTROL, control);
+    Port::writeByte(COMMAND, CHANNEL_2_MODE_0);
+    Port::writeByte(CHANNEL_2_DATA, (count & 0xFF) as u8);
+    Port::writeByte(CHANNEL_2_DATA, (count >> 8) as u8);
+    Port::writeByte(CONTROL, control | GATE_ENABLE);
+  }
+
+  /// True once the countdown started by `startCountdown` reached zero.
+  function hasExpired(): boolean {
+    return (Port::readByte(CONTROL) & OUTPUT_HIGH) != 0;
+  }
+
+  /// Closes the channel 2 gate again.
+  function stop(): void {
+    Port::writeByte(CONTROL, Port::readByte(CONTROL) & ~GATE_ENABLE);
+  }
+}

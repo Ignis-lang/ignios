@@ -1,0 +1,117 @@
+//! The periodic tick, driven by the local APIC timer.
+//!
+//! The local APIC timer counts down from an initial count at a rate that
+//! depends on the processor's bus or core crystal clock, and ACPI does not say
+//! what that rate is. `initialize` therefore measures it against the PIT: it
+//! lets the APIC timer run free while PIT channel 2 counts a known 50 ms, and
+//! reads how far the APIC timer got. From that it derives the rate and the
+//! initial count that gives `FREQUENCY` interrupts per second, and starts the
+//! timer in periodic mode. The interrupt handler only increments a counter;
+//! `ticks` and `uptimeMilliseconds` read it.
+
+import Cpu from "./arch/x86_64/cpu";
+import Lapic from "./arch/x86_64/lapic";
+import Pit from "./arch/x86_64/pit";
+
+record TimerState {
+  static mut ticks: u64 = 0;
+  static mut countRate: u64 = 0;
+  static mut initialCount: u64 = 0;
+}
+
+export namespace Timer {
+  /// Ticks per second.
+  const FREQUENCY: u64 = 100;
+
+  /// The PIT count used for the measurement: 59659 / 1193182 Hz = 50 ms. It
+  /// is close to the longest a 16-bit count can run.
+  const CALIBRATION_COUNT: u64 = 59659;
+
+  /// The initial count the free-running APIC timer starts from. Its
+  /// distance from the current count is the number of timer ticks elapsed.
+  const CALIBRATION_START: u32 = 0xFFFFFFFF;
+
+  /// Polls of the PIT output before the measurement is given up.
+  const CALIBRATION_POLL_LIMIT: u64 = 100000000;
+
+  const SELF_TEST_TICKS: u64 = 10;
+
+  /// Measures the APIC timer and starts it ticking `FREQUENCY` times per
+  /// second on `vector`. The local APIC must be enabled and `vector` must
+  /// have an IDT gate. Panics when the PIT never finishes counting or the
+  /// result does not fit a 32-bit initial count.
+  function initialize(vector: u8): void {
+    Lapic::startTimerOneShotMasked(CALIBRATION_START);
+    Pit::startCountdown(CALIBRATION_COUNT as u16);
+
+    let mut polls: u64 = 0;
+
+    while (!Pit::hasExpired()) {
+      if (polls == CALIBRATION_POLL_LIMIT) {
+        @panic("timer: the PIT did not finish counting");
+      }
+
+      polls += 1;
+    }
+
+    let elapsed: u64 = (CALIBRATION_START - Lapic::timerCurrentCount()) as u64;
+
+    Lapic::stopTimer();
+    Pit::stop();
+
+    let countRate: u64 = elapsed * Pit::FREQUENCY / CALIBRATION_COUNT;
+    let initialCount: u64 = countRate / FREQUENCY;
+
+    if (initialCount == 0 || initialCount > 0xFFFFFFFF) {
+      @panic("timer: the calibrated initial count does not fit the APIC timer");
+    }
+
+    TimerState::countRate = countRate;
+    TimerState::initialCount = initialCount;
+
+    Lapic::startTimerPeriodic(vector, initialCount as u32);
+  }
+
+  /// The APIC timer counting rate in Hz at the divide setting in use.
+  function countRate(): u64 {
+    return TimerState::countRate;
+  }
+
+  /// The count loaded at each period.
+  function initialCount(): u64 {
+    return TimerState::initialCount;
+  }
+
+  /// Called from the timer interrupt, which cannot nest with itself.
+  function handleTick(): void {
+    let current: u64 = @readVolatile<u64>(&mut TimerState::ticks as *mut u64);
+
+    @writeVolatile<u64>(&mut TimerState::ticks as *mut u64, current + 1);
+  }
+
+  /// Ticks since the timer started.
+  function ticks(): u64 {
+    return @readVolatile<u64>(&mut TimerState::ticks as *mut u64);
+  }
+
+  /// Milliseconds since the timer started, in steps of one tick.
+  function uptimeMilliseconds(): u64 {
+    return ticks() * 1000 / FREQUENCY;
+  }
+
+  /// Sleeps with interrupts on until `SELF_TEST_TICKS` ticks have arrived,
+  /// then turns interrupts off again. It does not return when the timer
+  /// interrupt never comes. The boot log line printed just before makes that
+  /// visible.
+  function selfTest(): void {
+    let target: u64 = ticks() + SELF_TEST_TICKS;
+
+    Cpu::enableInterrupts();
+
+    while (ticks() < target) {
+      Cpu::waitForInterrupt();
+    }
+
+    Cpu::disableInterrupts();
+  }
+}

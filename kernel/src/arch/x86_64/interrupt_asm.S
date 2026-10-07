@@ -28,6 +28,8 @@ ignis_interrupt_thunk_\vector:
     THUNK \vector
 .endr
 
+    THUNK 48
+
     THUNK 255
 
 ignis_interrupt_common:
@@ -70,8 +72,8 @@ ignis_interrupt_common:
     add rsp, 16
     iretq
 
-/* u64 ignis_interrupt_thunk(u64 vector): the entry address of a vector 0-47,
- * or of vector 255, the local APIC spurious vector. */
+/* u64 ignis_interrupt_thunk(u64 vector): the entry address of a vector 0-48
+ * (48 is the APIC timer) or of vector 255, the local APIC spurious vector. */
 .global ignis_interrupt_thunk
 ignis_interrupt_thunk:
     cmp rdi, 255
@@ -93,5 +95,6 @@ ignis_interrupt_thunk_table:
 .irp vector, 32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47
     .quad ignis_interrupt_thunk_\vector
 .endr
+    .quad ignis_interrupt_thunk_48
 
 .section .note.GNU-stack,"",@progbits
