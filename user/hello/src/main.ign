@@ -1,12 +1,43 @@
+//!
+//! # hello
+//!
 //! The first user program of IgniOS. It says hello with its pid, shows that
 //! initialized data and zeroed data were loaded, and tries the error paths of
 //! the kernel's system call interface before it exits.
+//!
+//! ## What It Checks
+//!
+//! | Step                     | Proves                                           |
+//! |--------------------------|--------------------------------------------------|
+//! | prints its pid           | `getpid` and `write` work                        |
+//! | `seed` is 41, then 42    | `.data` was copied from the ELF file             |
+//! | `counter` is 0, then 1   | `.bss` was zeroed (file size 8, memory size 16)  |
+//! | `write(1, 0x1, 5)`       | a bad pointer returns `-EFAULT` (-14)            |
+//! | `write(7, ...)`          | a closed descriptor returns `-EBADF` (-9)        |
+//! | syscall 9999             | an unknown call returns `-ENOSYS` (-38)          |
+//! | `sleep(0.05 s)`          | `nanosleep` returns 0                            |
+//! | `yield()`                | `sched_yield` returns 0                          |
+//!
+//! The exit status says which check failed (2 to 7), and 0 means all passed.
+//! The kernel runs it at boot (`UserTest::runHello`) and on `run hello`.
+//!
+//! ## Layout in Memory
+//!
+//! `user/user.ld` places the sections at fixed user addresses (the program is
+//! not position independent) and starts each segment on its own page. For the
+//! current build `.text` is at `0x400000`, `.rodata` at `0x401000` and `.data`
+//! with `.bss` at `0x402000`. The kernel gives it an 8-page stack that ends at
+//! `0x7FFFFFFFF000`.
 
 import Io from "std::io";
 import Sys from "std::sys";
 
+/// The program's global data.
 record Hello {
+  /// Uninitialized, so it lives in `.bss` and must read as 0.
   static mut counter: u64;
+
+  /// Initialized to 41, so it lives in `.data` and is copied from the file.
   static mut seed: u64 = 41;
 }
 
@@ -26,6 +57,8 @@ function expect(label: str, got: i64, wanted: i64, status: u64): void {
   Io::print("\n");
 }
 
+/// The body of the program. Returns the exit status: 0 when every check
+/// passed, otherwise a number that names the first check that failed.
 function run(): u64 {
   Io::print("hello from user mode, pid ");
   Io::printNumber(Sys::getPid());
@@ -67,6 +100,8 @@ function start(): never {
   Sys::exit(run());
 }
 
+/// The user program's panic handler: prints the message and exits with
+/// status 101. There is no kernel panic path in ring 3.
 @panicHandler
 function onPanic(message: str, file: str, line: u32): never {
   Io::print("panic: ");

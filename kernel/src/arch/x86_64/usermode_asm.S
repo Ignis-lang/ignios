@@ -11,7 +11,24 @@
  * ignis_set_syscall_kernel_stack and the stub use. The kernel has one CPU, so
  * a plain global is enough. With several CPUs this becomes per-CPU data
  * reached through the GS base: the stub starts with "swapgs", loads the
- * kernel stack from "gs:" and saves the user GS base on the way out. */
+ * kernel stack from "gs:" and saves the user GS base on the way out.
+ *
+ * The SYSCALL and SYSRET instructions (Intel SDM Vol. 2B, "SYSCALL" and
+ * "SYSRET"):
+ *
+ *   SYSCALL   RCX <- RIP of the next instruction
+ *             R11 <- RFLAGS
+ *             RFLAGS <- RFLAGS & ~IA32_FMASK
+ *             CS <- IA32_STAR[47:32], SS <- that + 8, CPL 0
+ *             RIP <- IA32_LSTAR
+ *             RSP is NOT changed: it still holds the user stack pointer.
+ *
+ *   SYSRETQ   RIP <- RCX
+ *             RFLAGS <- R11
+ *             CS <- IA32_STAR[63:48] + 16, SS <- IA32_STAR[63:48] + 8, CPL 3
+ *             RSP is NOT changed: the stub must load the user stack first.
+ *
+ * See concept doc 14. */
 
 .intel_syntax noprefix
 
@@ -22,16 +39,32 @@
  * Leaves ring 0 for good through an iretq frame: SS, RSP, RFLAGS with IF set,
  * CS, RIP. Every general register is zeroed first so no kernel value leaks to
  * the program. Called with interrupts off, on the thread's kernel stack, which
- * TSS.RSP0 already names; the frames above it are abandoned. */
+ * TSS.RSP0 already names; the frames above it are abandoned.
+ *
+ * rdi = user entry point, rsi = user stack pointer.
+ *
+ * The iretq frame built on the kernel stack (lowest address first, which is
+ * the order iretq pops it):
+ *
+ *   rsp ->  rip      user entry point       rdi
+ *           cs       0x23   user code, RPL 3
+ *           rflags   0x202  IF (bit 9) set, plus the always-one bit 1
+ *           rsp      user stack pointer     rsi
+ *           ss       0x1B   user data, RPL 3
+ */
 .global ignis_enter_user
 ignis_enter_user:
     cli
+
+    /* Build the frame, last field first (a push moves rsp down). */
     push 0x1B
     push rsi
     push 0x202
     push 0x23
     push rdi
 
+    /* Zero every general purpose register. Writing a 32-bit register clears
+     * the upper half, so "xor r32, r32" is enough and shorter. */
     xor eax, eax
     xor ebx, ebx
     xor ecx, ecx
@@ -48,6 +81,7 @@ ignis_enter_user:
     xor r14d, r14d
     xor r15d, r15d
 
+    /* Pops rip, cs, rflags, rsp, ss and continues in ring 3. */
     iretq
 
 /* The SYSCALL target (IA32_LSTAR). On entry the processor has put the return
@@ -58,6 +92,18 @@ ignis_enter_user:
  * iretq frame, a zero error code, vector 256, then the 15 registers. The
  * dispatcher gets a pointer to it, writes the result into the rax slot, and
  * may change nothing else the user program can see.
+ *
+ * The frame, highest address first (the kernel stack top is where it starts):
+ *
+ *   ss        0x1B                    pushed by the stub (SYSCALL saves none)
+ *   rsp       user stack pointer
+ *   rflags    from R11
+ *   cs        0x23
+ *   rip       from RCX
+ *   errorCode 0
+ *   vector    256 (above any hardware vector: marks a system call)
+ *   r15 ... rax
+ *             ^ rsp, passed to ignis_syscall_dispatch as an InterruptFrame
  *
  * RCX and R11 hold the return address and RFLAGS, so the user's own values of
  * those two are gone: that is the Linux convention, user code declares them
@@ -73,9 +119,13 @@ ignis_enter_user:
  * from a "syscall" instruction in the first place. */
 .global ignis_syscall_entry
 ignis_syscall_entry:
+    /* Interrupts are off (FMASK cleared IF). Park the user rsp in a global
+     * and switch to the kernel stack of the running thread. The global is
+     * read again within a few instructions, before anything could run. */
     mov [rip + ignis_syscall_user_rsp], rsp
     mov rsp, [rip + ignis_syscall_kernel_rsp]
 
+    /* The processor part of the frame, by hand. */
     push 0x1B
     push qword ptr [rip + ignis_syscall_user_rsp]
     push r11
@@ -84,6 +134,7 @@ ignis_syscall_entry:
     push 0
     push 256
 
+    /* The registers, same order as ignis_interrupt_common. */
     push r15
     push r14
     push r13
@@ -100,10 +151,14 @@ ignis_syscall_entry:
     push rbx
     push rax
 
+    /* The ABI wants DF clear at a call. rdi = the frame. The rax slot holds
+     * the call number and rdi, rsi, rdx, r10, r8, r9 the arguments. */
     cld
     mov rdi, rsp
     call ignis_syscall_dispatch
 
+    /* Reload everything from the frame, so the result the dispatcher stored
+     * in the rax slot becomes the return value. */
     pop rax
     pop rbx
     pop rcx
@@ -120,6 +175,7 @@ ignis_syscall_entry:
     pop r14
     pop r15
 
+    /* Skip the vector and the error code. */
     add rsp, 16
 
     /* rsp -> rip, cs, rflags, user rsp, ss. Canonical means bits 63:47 all
@@ -132,11 +188,17 @@ ignis_syscall_entry:
     cmp r11, rcx
     jne 1f
 
+    /* Canonical: set up what SYSRETQ consumes. RCX already holds the return
+     * RIP. R11 gets the saved RFLAGS, and RSP becomes the user stack pointer
+     * as the very last step before the return, since the kernel stack is not
+     * needed any more. */
     mov r11, [rsp + 16]
     mov rsp, [rsp + 24]
     sysretq
 
 1:
+    /* Non-canonical return address: report it and end the process, never
+     * return. The call needs a 16-byte aligned rsp. */
     mov rdi, rcx
     and rsp, -16
     call ignis_syscall_bad_return
@@ -149,7 +211,7 @@ ignis_set_syscall_kernel_stack:
     mov [rip + ignis_syscall_kernel_rsp], rdi
     ret
 
-/* u64 ignis_syscall_entry_address(void) */
+/* u64 ignis_syscall_entry_address(void): the value for IA32_LSTAR. */
 .global ignis_syscall_entry_address
 ignis_syscall_entry_address:
     lea rax, [rip + ignis_syscall_entry]
@@ -157,9 +219,12 @@ ignis_syscall_entry_address:
 
 .section .bss
 
+/* Scratch for the user stack pointer between "syscall" and the pushes. */
 .balign 8
 ignis_syscall_user_rsp:
     .skip 8
+
+/* Top of the kernel stack the next "syscall" runs on. */
 ignis_syscall_kernel_rsp:
     .skip 8
 

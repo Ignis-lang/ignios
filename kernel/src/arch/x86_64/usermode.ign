@@ -1,4 +1,9 @@
-//! Entering and leaving ring 3.
+//!
+//! # Entering and Leaving Ring 3
+//!
+//! The mechanisms that move the processor between kernel and user mode.
+//!
+//! ## Overview
 //!
 //! A process enters user mode once, through an `iretq` frame built by
 //! `ignis_enter_user`: user data and code selectors with RPL 3, the user
@@ -8,6 +13,18 @@
 //! hold the kernel stack of the thread that is running. `SYSCALL` does not
 //! switch stacks: the entry stub in `usermode_asm.S` loads the kernel stack
 //! from a global slot that `setKernelStack` keeps in step with RSP0.
+//!
+//! ```text
+//!                 iretq (ignis_enter_user)
+//!        ring 0 ─────────────────────────────► ring 3
+//!          ▲  ▲                                  │  │
+//!          │  └── SYSCALL ───────────────────────┘  │  system call:
+//!          │      stub loads the stack from the     │  stack = ignis_syscall_kernel_rsp
+//!          │      global slot                       │
+//!          └───── interrupt or exception ───────────┘  stack = TSS.RSP0
+//! ```
+//!
+//! ## The MSRs
 //!
 //! `SYSCALL` and `SYSRET` need four model specific registers set up once:
 //!
@@ -19,30 +36,80 @@
 //! - IA32_FMASK lists the RFLAGS bits `SYSCALL` clears: IF, so the stub runs
 //!   with interrupts off until it has a stack, DF so string instructions
 //!   run forward, TF, NT and AC.
+//!
+//! ```text
+//!   IA32_STAR (0xC0000081)
+//!   63          48 47          32 31                         0
+//!   ┌─────────────┬──────────────┬────────────────────────────┐
+//!   │ SYSRET base │ SYSCALL CS   │ legacy 32-bit target (not  │
+//!   │   0x0010    │   0x0008     │ used in 64-bit mode)       │
+//!   └─────────────┴──────────────┴────────────────────────────┘
+//!
+//!   SYSCALL:  CS = 0x08          SS = 0x08 + 8  = 0x10
+//!   SYSRET:   SS = 0x10 + 8 | 3  = 0x1B         CS = 0x10 + 16 | 3 = 0x23
+//!
+//!   value written: 0x0010000800000000 (shown in the boot log as "star")
+//!
+//!   IA32_FMASK = 0x44700 = TF (bit 8) | IF (9) | DF (10) | NT (14) | AC (18)
+//! ```
+//!
+//! This is why the GDT order is kernel code, kernel data, user data, user
+//! code: `SYSRET` derives both user selectors from one base, so user data
+//! must sit 8 below user code. `initialize` panics if the order is wrong.
+//!
+//! See concept doc 14.
 
 import Cpu from "./cpu";
 import Gdt from "./gdt";
 
+/// Functions implemented in `usermode_asm.S`.
 extern UserModeAsm {
+  /// Builds an `iretq` frame and drops to ring 3 at `rip` with stack `rsp`.
+  /// Never returns.
   function ignis_enter_user(rip: u64, rsp: u64): void;
+
+  /// Stores `top` in the slot the `SYSCALL` entry stub loads its stack from.
   function ignis_set_syscall_kernel_stack(top: u64): void;
+
+  /// The address of the `SYSCALL` entry stub, the value for IA32_LSTAR.
   function ignis_syscall_entry_address(): u64;
 }
 
+/// The user mode API.
 export namespace UserMode {
+  /// MSR number of IA32_EFER.
   const EFER_MSR: u32 = 0xC0000080;
+
+  /// MSR number of IA32_STAR: the segment selectors for `SYSCALL` and `SYSRET`.
   const STAR_MSR: u32 = 0xC0000081;
+
+  /// MSR number of IA32_LSTAR: the 64-bit `SYSCALL` target address.
   const LSTAR_MSR: u32 = 0xC0000082;
+
+  /// MSR number of IA32_FMASK: the RFLAGS bits `SYSCALL` clears.
   const FMASK_MSR: u32 = 0xC0000084;
 
+  /// IA32_EFER bit 0 (SCE): `SYSCALL` and `SYSRET` are valid instructions.
   const EFER_SYSTEM_CALL_ENABLE: u64 = 1;
 
+  /// RFLAGS bit 8 (TF): single-step trap.
   const FLAG_TRAP: u64 = 0x100;
+
+  /// RFLAGS bit 9 (IF): maskable interrupts enabled.
   const FLAG_INTERRUPT_ENABLE: u64 = 0x200;
+
+  /// RFLAGS bit 10 (DF): string instructions run backward.
   const FLAG_DIRECTION: u64 = 0x400;
+
+  /// RFLAGS bit 14 (NT): legacy nested task flag.
   const FLAG_NESTED_TASK: u64 = 0x4000;
+
+  /// RFLAGS bit 18 (AC): alignment check, also gates supervisor access to user
+  /// pages with SMAP.
   const FLAG_ALIGNMENT_CHECK: u64 = 0x40000;
 
+  /// The bits `SYSCALL` clears in RFLAGS, so the kernel entry does not inherit a
+  /// user-chosen trap flag, string direction or alignment mode.
   const SYSCALL_FLAG_MASK: u64 = FLAG_TRAP | FLAG_INTERRUPT_ENABLE | FLAG_DIRECTION | FLAG_NESTED_TASK | FLAG_ALIGNMENT_CHECK;
 
   /// Enables `SYSCALL` and points it at the entry stub. The GDT must be

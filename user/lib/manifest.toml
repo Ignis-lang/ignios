@@ -2,9 +2,12 @@
 # kernel and nothing else. A program names it with `std_path` in its
 # ignis.toml and imports `std::sys` and `std::io`.
 
+# Import name to source file: `import Sys from "std::sys"` reads sys.ign.
 [modules]
 sys = "sys.ign"
 io = "io.ign"
 
+# Modules loaded implicitly into every program: none. A program imports what
+# it uses.
 [auto_load]
 modules = []

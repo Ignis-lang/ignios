@@ -1,20 +1,39 @@
+# Ignis project file of the kernel: `ignis build` reads it (see the Makefile).
 [package]
 name = "kernel"
 version = "0.1.0"
 description = "IgniOS kernel"
 
+# No standard library: the kernel is freestanding and has no allocator or
+# operating system under it. Everything it needs is in kernel/src.
 [ignis]
 std = false
 
 [build]
+# A library object, not an executable: the Makefile links it with the assembly
+# objects and kernel/linker.ld.
 bin = false
 source_dir = "kernel/src"
 entry = "main.ign"
 out_dir = "build/ignis"
 opt_level = 2
 debug = false
+
+# Ignis translates the program to one C file and clang compiles it.
 target = "c"
 cc = "clang"
+
+# Flags for a freestanding x86_64 kernel (concept doc 02):
+#   -mno-red-zone       interrupts push their frame below rsp
+#   -mcmodel=kernel     all symbols in the top 2 GiB (matches kernel/linker.ld)
+#   -mno-sse -mno-sse2 -mno-mmx -mno-80387
+#                       the interrupt code saves general registers only, so the
+#                       compiler must not use vector or x87 registers
+#   -fno-pic -fno-pie   fixed link address, no relocation
+#   -fno-stack-protector -fno-stack-check
+#                       no runtime to provide the canary or the probe
+#   -fno-omit-frame-pointer
+#                       keep rbp chains (the thread stacks end with rbp = 0)
 cflags = [
   "--target=x86_64-unknown-none",
   "-mno-red-zone",
@@ -29,4 +48,6 @@ cflags = [
   "-fno-stack-check",
   "-fno-omit-frame-pointer",
 ]
+
+# Keep the generated C file (build/ignis/user/src/kernel.c) for inspection.
 emit = ["c"]

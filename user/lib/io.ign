@@ -1,7 +1,18 @@
-//! Text output on top of `write`.
+//!
+//! # Text Output (user side)
+//!
+//! Printing built on `Sys::write`.
+//!
+//! ## Overview
+//!
+//! There is no buffering: every call is one or more `write` system calls to
+//! standard output, which the kernel prints on the console. `printNumber`
+//! writes digit by digit, so a number can be interleaved with output from
+//! another process.
 
 import Sys from "std::sys";
 
+/// The text output functions.
 export namespace Io {
   /// Writes a NUL-terminated string to standard output.
   function print(text: str): void {
@@ -14,12 +25,15 @@ export namespace Io {
     Sys::write(Sys::STDOUT, text as *u8, length);
   }
 
+  /// Writes `text` followed by a newline.
   function printLine(text: str): void {
     print(text);
     print("\n");
   }
 
-  /// Writes a signed number in decimal.
+  /// Writes a signed number in decimal. Digits are produced least significant
+  /// first into a local buffer of 24 bytes (an `i64` has at most 20 characters)
+  /// and written most significant first.
   function printNumber(value: i64): void {
     let mut digits: u8[24];
     let mut length: u64 = 0;

@@ -1,10 +1,25 @@
+//!
+//! # Running Programs
+//!
 //! Running the programs the bootloader loaded: look a module up by name,
 //! start it as a process and wait for it.
+//!
+//! ## Overview
+//!
+//! `run hello` at the terminal ends up in `Programs::run`:
+//!
+//! ```text
+//!   Programs::run(name, length)
+//!     ├─ Modules::find            match the module string
+//!     ├─ Process::startElf        build the address space, load, launch
+//!     └─ Process::wait            sleep until the process ended, return its status
+//! ```
 
 import Console from "./console";
 import Modules from "./modules";
 import Process from "./process";
 
+/// The program API.
 export namespace Programs {
   /// Runs the module whose configuration string is the `length` bytes at
   /// `name`, waits for the process and returns its exit status. Returns

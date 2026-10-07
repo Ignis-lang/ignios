@@ -1,6 +1,25 @@
-//! Boot-time checks of user mode. Each test runs a throwaway ring 3 program
-//! from `user_test_asm.S` as a real process and compares what the kernel
-//! sees with what the program is supposed to do. A mismatch panics.
+//!
+//! # User Mode Self-Tests
+//!
+//! Boot-time checks of ring 3, system calls and process isolation.
+//!
+//! ## Overview
+//!
+//! Each test runs a throwaway ring 3 program from `user_test_asm.S` as a real
+//! process and compares what the kernel sees with what the program is
+//! supposed to do. A mismatch panics.
+//!
+//! | Step              | What it proves                                          |
+//! |-------------------|---------------------------------------------------------|
+//! | exit(42)          | `iretq` to ring 3, `SYSCALL` in, status delivered by `wait` |
+//! | registers         | `SYSRET` returns `-ENOSYS` and preserves every register but RAX, RCX, R11 |
+//! | spin              | timer interrupts arrive while in ring 3 and return by `iretq` |
+//! | syscalls          | `write`, `getpid`, `sched_yield`, `nanosleep` and their errors |
+//! | isolation (9 programs) | a fault or a forbidden instruction kills only that process, no frame leaks |
+//! | hello             | a real static ELF64 loaded from a Limine module        |
+//!
+//! `main.ign` calls `UserTest::run` once, after the scheduler tests and before
+//! it enables the keyboard.
 
 import Console from "./console";
 import Pmm from "./pmm";
@@ -8,32 +27,65 @@ import Process from "./process";
 import Programs from "./programs";
 import Timer from "./timer";
 
+/// Functions implemented in `user_test_asm.S`.
 extern UserTestAsm {
+  /// Address of the machine code of program `index`.
   function ignis_user_test_start(index: u64): u64;
+
+  /// Length in bytes of program `index`.
   function ignis_user_test_size(index: u64): u64;
 }
 
+/// The user mode tests.
 export namespace UserTest {
+  /// Program index 0: `exit(42)`.
   const EXIT: u64 = 0;
+
+  /// Program index 1: checks that a system call preserves the registers.
   const REGISTERS: u64 = 1;
+
+  /// Program index 2: a long loop in ring 3 that timer interrupts interrupt.
   const SPIN: u64 = 2;
+
+  /// Program index 3: exercises every implemented system call and its errors.
   const SYSCALLS: u64 = 3;
 
-  /// The programs that misbehave, in the order of `user_test_asm.S`.
+  /// Program index 4: writes to page 0. Indexes 4 to 12 are the misbehaving
+  /// programs.
   const NULL_WRITE: u64 = 4;
+
+  /// Index 5: executes `hlt`.
   const HLT: u64 = 5;
+
+  /// Index 6: executes `cli`.
   const CLI: u64 = 6;
+
+  /// Index 7: executes an undefined instruction (`ud2`).
   const UNDEFINED: u64 = 7;
+
+  /// Index 8: reads kernel memory.
   const KERNEL_READ: u64 = 8;
+
+  /// Index 9: writes to I/O port 0x3F8.
   const PORT: u64 = 9;
+
+  /// Index 10: writes to its own read-only code page.
   const CODE_WRITE: u64 = 10;
+
+  /// Index 11: jumps to its no-execute stack.
   const STACK_JUMP: u64 = 11;
+
+  /// Index 12: divides by zero.
   const DIVIDE: u64 = 12;
 
   /// What the shell shows for a process that died of SIGSEGV, SIGILL and
   /// SIGFPE: 128 plus 11, 4 and 8.
   const KILLED_BY_SEGV: u64 = 139;
+
+  /// 128 + 4 (SIGILL).
   const KILLED_BY_ILL: u64 = 132;
+
+  /// 128 + 8 (SIGFPE).
   const KILLED_BY_FPE: u64 = 136;
 
   /// The program sleeps 20 ms, which is two timer ticks.

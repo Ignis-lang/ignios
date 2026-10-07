@@ -1,5 +1,10 @@
+//!
+//! # Processes
+//!
 //! User processes: an address space, a thread that runs in it, and the
 //! bookkeeping that outlives the thread.
+//!
+//! ## Overview
 //!
 //! A process is a slot in a fixed table next to a kernel thread that owns the
 //! address space (`Scheduler::spawnIn`). The thread starts in `userMain`,
@@ -12,6 +17,42 @@
 //!
 //! The process id is not the thread id. Syscalls find the calling process
 //! by looking for the slot whose thread is the running one.
+//!
+//! ## Lifetime
+//!
+//! ```text
+//!   Programs::run("hello")
+//!     └─ Process::startElf(image)
+//!          ├─ AddressSpace::create            new PML4, kernel half shared
+//!          ├─ Elf::load                       map and fill PT_LOAD segments
+//!          ├─ mapStack                        8 zeroed no-execute pages
+//!          └─ launch
+//!               ├─ slot := RUNNING, id := nextId++
+//!               └─ Scheduler::spawnIn(userMain, slot, root)   thread owns `root`
+//!
+//!   the new thread:  userMain ─► UserMode::enter ─► ring 3 ...
+//!                                    ... syscall exit(n) or a fault ...
+//!   finishCurrent:   status := n, state := EXITED, print "process N exited"
+//!                      └─ Scheduler::exitCurrent   thread DEAD
+//!   next thread:     reapZombie frees the kernel stack and destroys the
+//!                    address space (every frame goes back to the PMM)
+//!   Process::wait:   sleeps until EXITED and the thread is gone,
+//!                    returns the status, slot := FREE
+//! ```
+//!
+//! ## User Address Space of a Process
+//!
+//! ```text
+//!   0x0000000000400000  program segments (text r-x, rodata r--, data rw-)
+//!   0x00007FFFFFFF7000  ┐
+//!                       │ stack: 8 pages, read/write, no-execute, zeroed
+//!   0x00007FFFFFFFF000  ┘ STACK_TOP = AddressSpace::USER_LIMIT, the first
+//!                         byte past the stack and the page that stays unmapped
+//!   initial RSP = STACK_TOP - 8, as if a `call` had just pushed a return
+//!   address, so the System V ABI alignment holds at the first instruction
+//! ```
+//!
+//! See concept doc 14.
 
 import AddressSpace from "./address_space";
 import ContextAsm from "./arch/x86_64/context";
@@ -28,34 +69,59 @@ import Vmm from "./vmm";
 /// One entry of the process table.
 @cLayout
 record ProcessEntry {
+  /// The process id, from a counter that starts at 1 and never repeats.
   public id: u64;
+
+  /// `FREE`, `RUNNING` or `EXITED`.
   public state: u64;
+
+  /// Id of the kernel thread that runs the process.
   public thread: u64;
+
+  /// User address the program starts at.
   public entry: u64;
+
+  /// User stack pointer the program starts with.
   public stackPointer: u64;
+
+  /// The exit status, valid once the state is `EXITED`.
   public status: u64;
+
+  /// The system call convention of the process, `ABI_LINUX`.
   public abi: u64;
 }
 
+/// The process table and the id counter.
 record ProcessState {
+  /// The process slots.
   static mut table: ProcessEntry[8];
+
+  /// The id the next process gets.
   static mut nextId: u64;
 }
 
+/// The process API.
 export namespace Process {
+  /// Size of the process table.
   const MAX_PROCESSES: u64 = 8;
 
   /// Returned instead of a process id or a slot when there is none.
   const NO_PROCESS: u64 = 0xFFFFFFFFFFFFFFFF;
 
+  /// Slot state: not in use.
   const FREE: u64 = 0;
+
+  /// Slot state: the process was started and has not ended.
   const RUNNING: u64 = 1;
+
+  /// Slot state: the process ended and its status waits for `wait`.
   const EXITED: u64 = 2;
 
   /// The system call convention the process speaks: Linux x86_64 numbers and
   /// errno values.
   const ABI_LINUX: u64 = 0;
 
+  /// 4 KiB.
   const PAGE_SIZE: u64 = 4096;
 
   /// Where raw test programs are loaded.
@@ -64,6 +130,9 @@ export namespace Process {
   /// The user stack is `STACK_PAGES` pages that end at the user limit minus
   /// the unmapped last page, so running off its bottom faults.
   const STACK_PAGES: u64 = 8;
+
+  /// The first address past the user stack: `AddressSpace::USER_LIMIT`. The
+  /// stack grows down from here and the page at this address stays unmapped.
   const STACK_TOP: u64 = AddressSpace::USER_LIMIT;
 
   /// Process ids start at 1.
@@ -320,6 +389,7 @@ export namespace Process {
     return NO_PROCESS;
   }
 
+  /// The slot of the process with this id that is not free, or `NO_PROCESS`.
   function findSlot(id: u64): u64 {
     let mut slot: u64 = 0;
 
@@ -336,6 +406,7 @@ export namespace Process {
     return NO_PROCESS;
   }
 
+  /// The first free slot, or `NO_PROCESS` when the table is full.
   function findFreeSlot(): u64 {
     let mut slot: u64 = 0;
 
@@ -350,10 +421,12 @@ export namespace Process {
     return NO_PROCESS;
   }
 
+  /// A pointer to the table entry of `slot`.
   function slotPointer(slot: u64): *mut ProcessEntry {
     return tableBase() + slot;
   }
 
+  /// A pointer to the first entry of the process table.
   function tableBase(): *mut ProcessEntry {
     return &mut ProcessState::table as *mut ProcessEntry;
   }

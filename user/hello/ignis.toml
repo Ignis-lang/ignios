@@ -1,8 +1,12 @@
+# Ignis project file of the `hello` user program, built from user/hello by the
+# Makefile and linked with user/user.ld.
 [package]
 name = "hello"
 version = "0.1.0"
 description = "The first IgniOS user program"
 
+# The standard library is the small user library in user/lib (sys and io),
+# not the Ignis one.
 [ignis]
 std = false
 std_path = "../lib"
@@ -16,6 +20,12 @@ opt_level = 2
 debug = false
 target = "c"
 cc = "clang"
+
+# Like the kernel's flags without the kernel code model (the program is linked
+# at 0x400000) and without -mno-red-zone (interrupts from ring 3 switch to the
+# kernel stack, so the red zone below rsp is safe). SSE, MMX and x87 stay off
+# because the kernel does not save or restore their state when it switches
+# between processes.
 cflags = [
   "--target=x86_64-unknown-none",
   "-mno-sse",

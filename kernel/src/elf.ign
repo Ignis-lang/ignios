@@ -1,4 +1,9 @@
+//!
+//! # ELF64 Loader
+//!
 //! A loader for static ELF64 executables.
+//!
+//! ## Overview
 //!
 //! The accepted file is what the user linker script produces: a 64-bit
 //! little-endian `ET_EXEC` for x86-64 that needs no relocation, with its
@@ -14,80 +19,229 @@
 //! The loader trusts nothing in the file: every offset, size and address is
 //! checked against the file size and the user range before it is used, with
 //! comparisons that cannot overflow.
+//!
+//! ## From File to Address Space
+//!
+//! The `hello` program as `user.ld` lays it out (`readelf -l build/hello.elf`):
+//!
+//! ```text
+//!   ELF file (hello.elf)                      user address space of the process
+//!   ┌─────────────────────┐ 0x0000
+//!   │ ELF header (64 B)   │
+//!   │ program headers     │ 3 x 56 B
+//!   ├─────────────────────┤ 0x1000            0x400000 ┌─────────────────────┐
+//!   │ .text   0x692 bytes │ ─ PT_LOAD R+X ──────────►  │ r-x  1 page        │
+//!   ├─────────────────────┤ 0x2000            0x401000 ├─────────────────────┤
+//!   │ .rodata 0xA7 bytes  │ ─ PT_LOAD R ────────────►  │ r--  1 page        │
+//!   ├─────────────────────┤ 0x3000            0x402000 ├─────────────────────┤
+//!   │ .data   8 bytes     │ ─ PT_LOAD R+W ──────────►  │ rw-  1 page        │
+//!   │ (.bss 8 bytes is    │   filesz 8, memsz 16       │ 8 bytes from file,  │
+//!   │  not in the file)   │                            │ 8 bytes zero (.bss) │
+//!   ├─────────────────────┤                            └─────────────────────┘
+//!   │ symbols, sections   │ not loaded
+//!   └─────────────────────┘
+//!
+//!   entry point 0x400000 must lie in an executable user page (checkEntry)
+//! ```
+//!
+//! A segment's file offset and virtual address must agree modulo the page size
+//! (`offset % 4096 == address % 4096`), which the linker script guarantees by
+//! starting every segment on its own page.
+//!
+//! ## ELF Structures
+//!
+//! ```text
+//!   Elf64_Ehdr (64 bytes)                    Elf64_Phdr (56 bytes)
+//!    0  e_ident[16]  7F 'E' 'L' 'F',          0  p_type    u32   1 = PT_LOAD
+//!                    class 2 (64-bit),         4  p_flags   u32   1 X, 2 W, 4 R
+//!                    data 1 (little endian),   8  p_offset  u64
+//!                    version 1                16  p_vaddr   u64
+//!   16  e_type      u16  2 = ET_EXEC          24  p_paddr   u64
+//!   18  e_machine   u16  62 = x86-64          32  p_filesz  u64
+//!   20  e_version   u32                       40  p_memsz   u64
+//!   24  e_entry     u64                       48  p_align   u64
+//!   32  e_phoff     u64
+//!   40  e_shoff     u64
+//!   48  e_flags     u32
+//!   52  e_ehsize    u16
+//!   54  e_phentsize u16  must be 56
+//!   56  e_phnum     u16  1 to 32
+//!   58  e_shentsize u16
+//!   60  e_shnum     u16
+//!   62  e_shstrndx  u16
+//! ```
+//!
+//! See concept doc 15 and the System V ABI, "ELF-64 Object File Format".
 
 import AddressSpace from "./address_space";
 import Console from "./console";
 import Pmm from "./pmm";
 import Vmm from "./vmm";
 
-/// `Elf64_Ehdr`, 64 bytes.
+/// `Elf64_Ehdr`, 64 bytes. The field names follow the Ignis convention; each
+/// matches the `e_*` field of the same meaning.
 @cLayout
 record ElfHeader {
+  /// `e_ident`: the magic bytes `7F 45 4C 46`, the class (2 = 64-bit), the data
+  /// encoding (1 = little endian) and the version (1).
   public ident: u8[16];
+
+  /// `e_type`: 2 for an executable at fixed addresses.
   public kind: u16;
+
+  /// `e_machine`: 62 for x86-64.
   public machine: u16;
+
+  /// `e_version`: 1.
   public version: u32;
+
+  /// `e_entry`: the virtual address where execution starts.
   public entry: u64;
+
+  /// `e_phoff`: file offset of the program header table.
   public programHeaderOffset: u64;
+
+  /// `e_shoff`: file offset of the section header table. Not used by the loader.
   public sectionHeaderOffset: u64;
+
+  /// `e_flags`: processor-specific flags, 0 on x86-64. Not used.
   public flags: u32;
+
+  /// `e_ehsize`: size of this header, 64. Not used.
   public headerSize: u16;
+
+  /// `e_phentsize`: size of one program header, 56.
   public programHeaderSize: u16;
+
+  /// `e_phnum`: number of program headers.
   public programHeaderCount: u16;
+
+  /// `e_shentsize`: size of one section header. Not used.
   public sectionHeaderSize: u16;
+
+  /// `e_shnum`: number of section headers. Not used.
   public sectionHeaderCount: u16;
+
+  /// `e_shstrndx`: index of the section name string table. Not used.
   public sectionNameIndex: u16;
 }
 
-/// `Elf64_Phdr`, 56 bytes.
+/// `Elf64_Phdr`, 56 bytes: describes one segment.
 @cLayout
 record ProgramHeader {
+  /// `p_type`: 1 for a loadable segment (`PT_LOAD`).
   public kind: u32;
+
+  /// `p_flags`: bit 0 execute, bit 1 write, bit 2 read.
   public flags: u32;
+
+  /// `p_offset`: where the segment's bytes start in the file.
   public offset: u64;
+
+  /// `p_vaddr`: where the segment starts in the process.
   public virtualAddress: u64;
+
+  /// `p_paddr`: physical address, ignored for a user program.
   public physicalAddress: u64;
+
+  /// `p_filesz`: bytes to copy from the file.
   public fileSize: u64;
+
+  /// `p_memsz`: bytes the segment occupies in memory. The part beyond
+  /// `fileSize` is zero.
   public memorySize: u64;
+
+  /// `p_align`: alignment of the segment. Not used; the loader checks page
+  /// agreement of `offset` and `virtualAddress` directly.
   public alignment: u64;
 }
 
 /// What `Elf::load` reports about a loaded image.
 @cLayout
 export record LoadedImage {
+  /// The entry point, taken from the header.
   public entry: u64;
+
+  /// Loadable segments mapped.
   public segments: u64;
+
+  /// Pages mapped across all segments.
   public pages: u64;
 }
 
+/// The loader API.
 export namespace Elf {
+  /// Size of `Elf64_Ehdr`.
   const HEADER_SIZE: u64 = 64;
+
+  /// Size of `Elf64_Phdr`.
   const PROGRAM_HEADER_SIZE: u64 = 56;
+
+  /// The most program headers the loader accepts.
   const MAX_PROGRAM_HEADERS: u64 = 32;
+
+  /// 4 KiB.
   const PAGE_SIZE: u64 = 4096;
 
+  /// `e_ident[4]`: ELFCLASS64.
   const CLASS_64: u8 = 2;
+
+  /// `e_ident[5]`: ELFDATA2LSB.
   const DATA_LITTLE_ENDIAN: u8 = 1;
+
+  /// `e_ident[6]`: EV_CURRENT.
   const VERSION_CURRENT: u8 = 1;
+
+  /// `e_type` ET_EXEC.
   const TYPE_EXECUTABLE: u16 = 2;
+
+  /// `e_machine` EM_X86_64.
   const MACHINE_X86_64: u16 = 62;
 
+  /// `p_type` PT_LOAD.
   const SEGMENT_LOAD: u32 = 1;
+
+  /// `p_flags` PF_X.
   const FLAG_EXECUTE: u32 = 1;
+
+  /// `p_flags` PF_W.
   const FLAG_WRITE: u32 = 2;
 
   /// `Elf::load` results: 0 is success, anything else names what was wrong.
   const OK: u64 = 0;
+
+  /// The file is shorter than an ELF header.
   const ERR_TOO_SMALL: u64 = 1;
+
+  /// The file does not start with the ELF magic.
   const ERR_MAGIC: u64 = 2;
+
+  /// Not a static little-endian x86-64 ELF64 executable.
   const ERR_FORMAT: u64 = 3;
+
+  /// The program header table is empty, too big or outside the file.
   const ERR_PROGRAM_HEADERS: u64 = 4;
+
+  /// The file has no `PT_LOAD` segment.
   const ERR_NO_SEGMENTS: u64 = 5;
+
+  /// A segment lies outside the user address space or at page 0.
   const ERR_SEGMENT_RANGE: u64 = 6;
+
+  /// A segment's bytes lie outside the file, or its offset and address do not
+  /// agree modulo the page size.
   const ERR_SEGMENT_FILE: u64 = 7;
+
+  /// A segment is both writable and executable.
   const ERR_WRITE_EXECUTE: u64 = 8;
+
+  /// Two segments share a page.
   const ERR_OVERLAP: u64 = 9;
+
+  /// No frame was left for a page.
   const ERR_MEMORY: u64 = 10;
+
+  /// The entry point is not in an executable user page.
   const ERR_ENTRY: u64 = 11;
 
   /// Loads the executable in the `size` bytes at `image` into the address

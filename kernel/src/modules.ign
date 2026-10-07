@@ -1,5 +1,10 @@
+//!
+//! # Limine Modules
+//!
 //! Files the bootloader loaded next to the kernel, the Limine modules named
 //! in `boot/limine.conf`.
+//!
+//! ## Overview
 //!
 //! The protocol reports each module's address and size in the higher half
 //! direct map. Modules live in memory of type "executable and modules", which
@@ -7,13 +12,22 @@
 //! written through it. `initialize` therefore maps the pages of every module,
 //! read only and no-execute, before anything reads a module. A module is
 //! found by the string the configuration associates with it.
+//!
+//! ```text
+//!   boot/limine.conf                         limine.ign / modules.ign
+//!   module_path:   boot():/hello.elf   ──►   File.path    "/hello.elf"
+//!   module_string: hello               ──►   File.string  "hello"   <- `run hello`
+//!                                            File.address, File.size
+//! ```
 
 import Console from "./console";
 import Hhdm from "./hhdm";
 import Limine from "./limine";
 import Vmm from "./vmm";
 
+/// The module API.
 export namespace Modules {
+  /// 4 KiB.
   const PAGE_SIZE: u64 = 4096;
 
   /// Returned by `find` when no module has the name.
@@ -52,6 +66,7 @@ export namespace Modules {
     }
   }
 
+  /// The number of modules the bootloader loaded, 0 when it gave no response.
   function count(): u64 {
     let response: *mut Limine::ModuleResponse = Limine::modules();
 
@@ -83,10 +98,12 @@ export namespace Modules {
     return (*moduleAt(index)).address as *u8;
   }
 
+  /// The size in bytes of module `index`.
   function size(index: u64): u64 {
     return (*moduleAt(index)).size;
   }
 
+  /// The Limine file record of module `index`.
   function moduleAt(index: u64): *mut Limine::File {
     return Limine::moduleFile(Limine::modules(), index);
   }
