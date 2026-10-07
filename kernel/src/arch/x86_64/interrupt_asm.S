@@ -47,7 +47,7 @@
  * in the ".if" is those vectors: 8 (#DF), 10 (#TS), 11 (#NP), 12 (#SS),
  * 13 (#GP), 14 (#PF), 17 (#AC), 21 (#CP), 29 (#VC), 30 (#SX). For every other
  * vector a dummy 0 stands in for the error code. This list has to match
- * Interrupts::hasErrorCode. */
+ * Trap::Exception::hasErrorCode. */
 .macro THUNK vector
 ignis_interrupt_thunk_\vector:
 .if \vector != 8 && \vector != 10 && \vector != 11 && \vector != 12 && \vector != 13 && \vector != 14 && \vector != 17 && \vector != 21 && \vector != 29 && \vector != 30
@@ -128,7 +128,7 @@ ignis_interrupt_common:
 /* u64 ignis_interrupt_thunk(u64 vector): the entry address of a vector 0-48
  * (48 is the APIC timer) or of vector 255, the local APIC spurious vector.
  * The vector comes in rdi and the address goes out in rax. Any other value
- * indexes past the table, so the caller (Idt::initialize) only passes valid
+ * indexes past the table, so the caller (Arch::Idt::initialize) only passes valid
  * ones. */
 .global ignis_interrupt_thunk
 ignis_interrupt_thunk:

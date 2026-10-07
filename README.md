@@ -47,7 +47,7 @@ The build also needs an Ignis compiler with freestanding support (Ignis `main` f
 | `run-headless` | Boots without a display and checks the banner and prompt in `build/serial.log` |
 | `screenshot` | Boots headless and saves the screen to `build/screen.png` |
 | `keytest` | Types keys through the QEMU monitor and checks the echo |
-| `font` | Regenerates `kernel/src/font_8x16.ign` from the Spleen package |
+| `font` | Regenerates `kernel/src/drivers/font_8x16.ign` from the Spleen package |
 | `clean` | Removes `build/` |
 
 ## How it is built
@@ -60,36 +60,36 @@ User programs are Ignis projects under `user/` built with `std = false` and the 
 
 New to the code? [docs/READING.md](docs/READING.md) is a reading guide in the order the code runs, with a virtual address space map and the boot log explained line by line.
 
+The kernel is split into subsystems. Each one is a directory under `kernel/src/` with a `mod.ign` facade, a namespace with the same name, and an import alias in `ignis.toml` (`import Mm from "@mm"`). Other subsystems import only the facade and call `Mm::Pmm::allocateFrame()`. The `//!` header of every `mod.ign` has the public API and the dependencies of its subsystem.
+
+| Directory | Namespace | Alias | What is in it |
+|---|---|---|---|
+| `kernel/src/lib/` | `Lib` | `@lib` | `memcpy` and friends, integer formatting, the scancode ring buffer |
+| `kernel/src/arch/` | `Arch` | `@arch` | CPU instructions, port I/O, GDT, IDT, PIC, PIT, context switch, ring 3 entry, the interrupt frame, all `.S` files (in `arch/x86_64/`) |
+| `kernel/src/boot/` | `Boot` | `@boot` | Limine requests and responses, the higher half direct map |
+| `kernel/src/drivers/` | `Drivers` | `@drivers` | COM1, the framebuffer console and its font, the PS/2 controller, the keyboard decoder |
+| `kernel/src/acpi/` | `Acpi` | `@acpi` | RSDP, XSDT/RSDT and MADT parsing |
+| `kernel/src/mm/` | `Mm` | `@mm` | physical frames, page tables, address spaces, the kernel heap, Limine modules |
+| `kernel/src/apic/` | `Apic` | `@apic` | local APIC and IOAPIC |
+| `kernel/src/time/` | `Time` | `@time` | APIC timer calibration, the tick counter, uptime |
+| `kernel/src/sched/` | `Sched` | `@sched` | the thread table and stacks, the run queue, sleep and timer preemption |
+| `kernel/src/proc/` | `Proc` | `@proc` | process table, ELF loader, program registry |
+| `kernel/src/syscall/` | `Syscall` | `@syscall` | dispatch, the kernel operations, the Linux ABI table and handlers |
+| `kernel/src/trap/` | `Trap` | `@trap` | the interrupt dispatcher, exception reports, GDT/IDT/`SYSCALL` setup with their log lines |
+| `kernel/src/shell/` | `Shell` | `@shell` | the terminal loop and its commands |
+| `kernel/src/tests/` | `Tests` | `@tests` | boot self-tests |
+| `kernel/src/main.ign` | | | `kmain`: the boot order, one call per step |
+| `kernel/src/panic.ign` | | | the panic handler |
+
+The dependencies run one way, and the compiler rejects an import cycle. `Lib`, `Arch` and `Boot` import nothing else in the kernel, and each later subsystem imports only the ones before it. The table in [docs/READING.md](docs/READING.md) lists what every subsystem imports and why.
+
 ```
-kernel/src/main.ign            kmain, banner, panic handler, terminal loop
-kernel/src/limine.ign          Limine requests and responses
-kernel/src/console.ign         framebuffer text console
-kernel/src/keyboard.ign        scancode set 1 decoder
-kernel/src/ps2.ign             PS/2 controller
-kernel/src/interrupts.ign      exception reports and interrupt dispatch
-kernel/src/acpi.ign            RSDP, XSDT and MADT parsing
-kernel/src/timer.ign           APIC timer calibration and tick counter
-kernel/src/pmm.ign             physical frame allocator
-kernel/src/vmm.ign             page tables: map, unmap, translate, flush, in the kernel's or any address space
-kernel/src/address_space.ign   per-process PML4, user pages, user-pointer copies, destroy
-kernel/src/process.ign         process table, start from code or ELF, exit, kill, wait
-kernel/src/syscall.ign         ABI tables and the Linux syscall handlers
-kernel/src/elf.ign             static ELF64 loader
-kernel/src/modules.ign         Limine modules, mapped read only
-kernel/src/programs.ign        run a module by name
-kernel/src/user_test.ign       boot-time user mode and isolation tests
-kernel/src/heap.ign            kernel heap: first-fit allocator over PMM-backed pages
-kernel/src/hhdm.ign            physical memory through the higher half direct map
-kernel/src/scheduler.ign       kernel threads, run queue, sleep and timer preemption
-kernel/src/scheduler_test.ign  boot-time scheduler self-tests
-kernel/src/thread_commands.ign the `ps` and `threads` terminal commands
-kernel/src/arch/x86_64/        GDT, IDT, PIC, local APIC, IOAPIC, PIT, port I/O, CPU helpers and stack switching, .S stubs
 kernel/linker.ld               higher-half layout
 user/lib/                      the user standard library (syscalls, text output)
 user/hello/                    the first user program
 user/user.ld                   user program layout
 boot/limine.conf               boot entry and the user program module
-docs/READING.md                reading guide: file by file, address space map, annotated boot log
+docs/READING.md                reading guide: subsystem by subsystem, address space map, annotated boot log
 scripts/                       font generator, screenshot and key test drivers
 ```
 

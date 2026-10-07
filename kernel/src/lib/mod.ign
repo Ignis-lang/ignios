@@ -6,11 +6,11 @@
 //!
 //! ## Public API
 //!
-//! | Namespace            | File                | Purpose                                           |
-//! |----------------------|---------------------|---------------------------------------------------|
-//! | `Lib::Mem`           | `mem.ign`           | `memcpy`, `memset`, `memmove`, `memcmp`           |
-//! | `Lib::Format`        | `format.ign`        | decimal and hexadecimal text through a callback   |
-//! | `Lib::ScancodeQueue` | `scancode_queue.ign`| lock-free ring buffer between IRQ1 and the shell  |
+//! | Namespace            | File                 | Purpose                                          |
+//! |----------------------|----------------------|--------------------------------------------------|
+//! | `Lib::Mem`           | `mem.ign`            | `memcpy`, `memset`, `memmove`, `memcmp`          |
+//! | `Lib::Format`        | `format.ign`         | decimal and hexadecimal text through a callback  |
+//! | `Lib::ScancodeQueue` | `scancode_queue.ign` | lock-free ring buffer between IRQ1 and the shell |
 //!
 //! ## Dependencies
 //!

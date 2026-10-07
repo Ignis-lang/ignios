@@ -14,7 +14,7 @@
  *   rcx, r11     destroyed by the SYSCALL instruction itself
  *   all others   preserved by the kernel
  *
- * Index  Program               Expected outcome (see kernel/src/user_test.ign)
+ * Index  Program               Expected outcome (see kernel/src/tests/user.ign)
  *   0    exit                  exit status 42
  *   1    registers             exit status 0
  *   2    spin                  exit status 7, timer ticks arrive in ring 3

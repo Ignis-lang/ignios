@@ -14,7 +14,7 @@
 //! found by the string the configuration associates with it.
 //!
 //! ```text
-//!   boot/limine.conf                         limine.ign / modules.ign
+//!   boot/limine.conf                         boot/limine.ign / mm/modules.ign
 //!   module_path:   boot():/hello.elf   ──►   File.path    "/hello.elf"
 //!   module_string: hello               ──►   File.string  "hello"   <- `run hello`
 //!                                            File.address, File.size

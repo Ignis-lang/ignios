@@ -6,10 +6,10 @@
 //!
 //! ## Public API
 //!
-//! | Name               | File            | Purpose                                                   |
-//! |--------------------|-----------------|-----------------------------------------------------------|
+//! | Name               | File            | Purpose                                                             |
+//! |--------------------|-----------------|---------------------------------------------------------------------|
 //! | `Sched::Scheduler` | `scheduler.ign` | `spawn`, `yield`, `sleep`, `exitCurrent`, preemption, the run queue |
-//! | `Sched::Thread`    | `thread.ign`    | the thread table, thread states and the thread stacks     |
+//! | `Sched::Thread`    | `thread.ign`    | the thread table, thread states and the thread stacks               |
 //!
 //! Sleeping and waking are part of `Sched::Scheduler`: `sleep` and the wake-up
 //! scan call `switchToNext`, and `switchToNext` calls the wake-up scan, so
@@ -17,11 +17,11 @@
 //!
 //! ## Dependencies
 //!
-//! | Imports | Why                                                                  |
-//! |---------|----------------------------------------------------------------------|
-//! | `Arch`  | context switch, TSS and `SYSCALL` kernel stack, interrupt flag       |
-//! | `Mm`    | stack frames, stack mappings, the page tables a thread runs in       |
-//! | `Time`  | the tick counter that sleeping threads wait for                      |
+//! | Imports | Why                                                            |
+//! |---------|----------------------------------------------------------------|
+//! | `Arch`  | context switch, TSS and `SYSCALL` kernel stack, interrupt flag |
+//! | `Mm`    | stack frames, stack mappings, the page tables a thread runs in |
+//! | `Time`  | the tick counter that sleeping threads wait for                |
 //!
 //! `Proc` and `Syscall` import `Sched`, and `Trap` calls
 //! `Sched::Scheduler::onTick` from the timer interrupt.

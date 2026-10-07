@@ -6,16 +6,17 @@
 //!
 //! ## Public API
 //!
-//! | Name          | File         | Purpose                                                      |
-//! |---------------|--------------|--------------------------------------------------------------|
-//! | `Time::Timer` | `timer.ign`  | `initialize` (calibrate and start), `ticks`, `uptimeMilliseconds` |
+//! | Name          | File        | Purpose                                                                     |
+//! |---------------|-------------|-----------------------------------------------------------------------------|
+//! | `Time::Timer` | `timer.ign` | `initialize` (calibrate and start), `report`, `ticks`, `uptimeMilliseconds` |
 //!
 //! ## Dependencies
 //!
-//! | Imports | Why                                                                  |
-//! |---------|----------------------------------------------------------------------|
-//! | `Arch`  | the PIT is the reference clock, `Cpu` enables interrupts             |
-//! | `Apic`  | the local APIC timer is the tick source                              |
+//! | Imports   | Why                                                      |
+//! |-----------|----------------------------------------------------------|
+//! | `Arch`    | the PIT is the reference clock, `Cpu` enables interrupts |
+//! | `Apic`    | the local APIC timer is the tick source                  |
+//! | `Drivers` | `Timer::report` prints the calibration                   |
 //!
 //! `Sched` imports `Time` to sleep for a number of ticks, and `Trap` calls
 //! `Time::Timer::handleTick` from the timer interrupt.

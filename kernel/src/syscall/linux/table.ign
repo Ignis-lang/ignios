@@ -6,14 +6,14 @@
 //!
 //! ## Calls Implemented
 //!
-//! | Linux no | Name          | Operation              | Notes                          |
-//! |----------|---------------|------------------------|--------------------------------|
-//! | 1        | `write`       | `Operation::WRITE`     | fd 1 and 2 only, to the console |
-//! | 24       | `sched_yield` | `Operation::YIELD`     | returns 0                      |
-//! | 35       | `nanosleep`   | `Operation::SLEEP`     | rounded up to 10 ms ticks      |
-//! | 39       | `getpid`      | `Operation::GET_PID`   | the process id                 |
-//! | 60       | `exit`        | `Operation::EXIT`      | status & 0xFF                  |
-//! | 231      | `exit_group`  | `Operation::EXIT`      | same as `exit`                 |
+//! | Linux no | Name          | Operation            | Notes                           |
+//! |----------|---------------|----------------------|---------------------------------|
+//! | 1        | `write`       | `Operation::WRITE`   | fd 1 and 2 only, to the console |
+//! | 24       | `sched_yield` | `Operation::YIELD`   | returns 0                       |
+//! | 35       | `nanosleep`   | `Operation::SLEEP`   | rounded up to 10 ms ticks       |
+//! | 39       | `getpid`      | `Operation::GET_PID` | the process id                  |
+//! | 60       | `exit`        | `Operation::EXIT`    | status & 0xFF                   |
+//! | 231      | `exit_group`  | `Operation::EXIT`    | same as `exit`                  |
 //!
 //! Every other number maps to `Operation::NONE` and fails with `-ENOSYS` (-38).
 //! The numbers come from the Linux x86_64 syscall table,

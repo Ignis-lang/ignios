@@ -24,7 +24,7 @@
  * there. In the page tables this is PML4 entry 511, PDPT entry 510.
  *
  * The __*_start and __*_end symbols have an address and no value. The kernel
- * reads them through `extern LinkerSymbols` in vmm.ign.
+ * reads them through `extern LinkerSymbols` in mm/vmm.ign.
  *
  * See concept doc 01. */
 
@@ -68,7 +68,7 @@ SECTIONS
     __data_start = .;
 
     /* Includes the Limine request records, which Limine finds by scanning the
-     * loaded image (see kernel/src/limine.ign). */
+     * loaded image (see kernel/src/boot/limine.ign). */
     .data : {
         *(.data .data.*)
     } :data

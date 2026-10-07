@@ -6,23 +6,23 @@
 //!
 //! ## Public API
 //!
-//! | Name                | File           | Purpose                                                   |
-//! |---------------------|----------------|-----------------------------------------------------------|
-//! | `Drivers::Serial`   | `serial.ign`   | COM1 output, the kernel's first and last-resort log        |
-//! | `Drivers::Console`  | `console.ign`  | framebuffer text console that mirrors every byte to COM1  |
-//! | `Drivers::Color`    | `console.ign`  | the 16 palette indices                                    |
-//! | `Drivers::Font`     | `font.ign`     | glyph lookup in the 8x16 bitmap font                      |
-//! | `Drivers::FontData` | `font_8x16.ign`| the generated glyph table (`make font`)                   |
-//! | `Drivers::Ps2`      | `ps2.ign`      | 8042 controller setup and the IRQ1 handler                |
-//! | `Drivers::Keyboard` | `keyboard.ign` | scancode set 1 to ASCII decoding                          |
+//! | Name                | File            | Purpose                                                  |
+//! |---------------------|-----------------|----------------------------------------------------------|
+//! | `Drivers::Serial`   | `serial.ign`    | COM1 output, the kernel's first and last-resort log      |
+//! | `Drivers::Console`  | `console.ign`   | framebuffer text console that mirrors every byte to COM1 |
+//! | `Drivers::Color`    | `console.ign`   | the 16 palette indices                                   |
+//! | `Drivers::Font`     | `font.ign`      | glyph lookup in the 8x16 bitmap font                     |
+//! | `Drivers::FontData` | `font_8x16.ign` | the generated glyph table (`make font`)                  |
+//! | `Drivers::Ps2`      | `ps2.ign`       | 8042 controller setup and the IRQ1 handler               |
+//! | `Drivers::Keyboard` | `keyboard.ign`  | scancode set 1 to ASCII decoding                         |
 //!
 //! ## Dependencies
 //!
-//! | Imports | Why                                                                |
-//! |---------|--------------------------------------------------------------------|
-//! | `Arch`  | port I/O, interrupt flag handling                                  |
-//! | `Lib`   | integer formatting, `memmove`, the scancode ring buffer            |
-//! | `Boot`  | `Console::initialize` takes the Limine framebuffer record          |
+//! | Imports | Why                                                       |
+//! |---------|-----------------------------------------------------------|
+//! | `Arch`  | port I/O, interrupt flag handling                         |
+//! | `Lib`   | integer formatting, `memmove`, the scancode ring buffer   |
+//! | `Boot`  | `Console::initialize` takes the Limine framebuffer record |
 //!
 //! Every other subsystem may import `Drivers` to print. `Drivers` imports
 //! nothing above `Boot`.

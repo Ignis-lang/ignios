@@ -6,10 +6,10 @@
 //!
 //! ## Public API
 //!
-//! | Name           | File          | Purpose                                                   |
-//! |----------------|---------------|-----------------------------------------------------------|
-//! | `Boot::Limine` | `limine.ign`  | the requests the kernel makes, the response layouts, typed readers |
-//! | `Boot::Hhdm`   | `hhdm.ign`    | physical address to direct-map pointer                    |
+//! | Name           | File         | Purpose                                                            |
+//! |----------------|--------------|--------------------------------------------------------------------|
+//! | `Boot::Limine` | `limine.ign` | the requests the kernel makes, the response layouts, typed readers |
+//! | `Boot::Hhdm`   | `hhdm.ign`   | physical address to direct-map pointer                             |
 //!
 //! ## Dependencies
 //!

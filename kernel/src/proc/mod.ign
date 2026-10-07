@@ -6,23 +6,23 @@
 //!
 //! ## Public API
 //!
-//! | Name             | File           | Purpose                                                    |
-//! |------------------|----------------|------------------------------------------------------------|
-//! | `Proc::Process`  | `process.ign`  | create, start, wait for, exit and kill processes           |
-//! | `Proc::Elf`      | `elf.ign`      | map the `PT_LOAD` segments of a static ELF64 into a space  |
-//! | `Proc::Programs` | `programs.ign` | find a Limine module by name and run it as a process       |
-//! | `Proc::LoadedImage` | `elf.ign`   | what the loader reports: entry point, segments, pages      |
+//! | Name                | File           | Purpose                                                   |
+//! |---------------------|----------------|-----------------------------------------------------------|
+//! | `Proc::Process`     | `process.ign`  | create, start, wait for, exit and kill processes          |
+//! | `Proc::Elf`         | `elf.ign`      | map the `PT_LOAD` segments of a static ELF64 into a space |
+//! | `Proc::Programs`    | `programs.ign` | find a Limine module by name and run it as a process      |
+//! | `Proc::LoadedImage` | `elf.ign`      | what the loader reports: entry point, segments, pages     |
 //!
 //! ## Dependencies
 //!
-//! | Imports   | Why                                                                |
-//! |-----------|--------------------------------------------------------------------|
-//! | `Sched`   | each process runs in a kernel thread that owns its address space   |
-//! | `Mm`      | address spaces, frames, and the modules that hold the programs     |
-//! | `Arch`    | the entry into ring 3                                              |
-//! | `Boot`    | the direct map offset                                              |
-//! | `Lib`     | `memcpy`, `memset`                                                 |
-//! | `Drivers` | the loader and `Programs::run` report on the console               |
+//! | Imports   | Why                                                              |
+//! |-----------|------------------------------------------------------------------|
+//! | `Sched`   | each process runs in a kernel thread that owns its address space |
+//! | `Mm`      | address spaces, frames, and the modules that hold the programs   |
+//! | `Arch`    | the entry into ring 3                                            |
+//! | `Boot`    | the direct map offset                                            |
+//! | `Lib`     | `memcpy`, `memset`                                               |
+//! | `Drivers` | the loader and `Programs::run` report on the console             |
 //!
 //! `Syscall` and `Trap` import `Proc`: system calls act on the current
 //! process, and a fault in ring 3 kills it.

@@ -37,7 +37,7 @@
 //!
 //! | Vectors      | Source                                              |
 //! |--------------|-----------------------------------------------------|
-//! | 0-31         | CPU exceptions (see `interrupts.ign`)               |
+//! | 0-31         | CPU exceptions (see `trap/exception.ign`)           |
 //! | 32-47        | the 8259 range `0x20-0x2F`, which includes the keyboard at `0x21` through the IOAPIC |
 //! | 48 (`0x30`)  | local APIC timer                                    |
 //! | 255 (`0xFF`) | local APIC spurious interrupt                       |

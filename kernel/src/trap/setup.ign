@@ -10,10 +10,10 @@
 //! imports nothing. Each function here calls the `Arch` initializer and then
 //! logs what it did on COM1, which works before the console is up.
 //!
-//! | Function             | Arch call                  | Log line                          |
-//! |----------------------|----------------------------|-----------------------------------|
-//! | `initializeGdt`      | `Arch::Gdt::initialize`    | `gdt: cs=... tr=...`              |
-//! | `initializeIdt`      | `Arch::Idt::initialize`    | `idt: 50 gates loaded`            |
+//! | Function             | Arch call                    | Log line                         |
+//! |----------------------|------------------------------|----------------------------------|
+//! | `initializeGdt`      | `Arch::Gdt::initialize`      | `gdt: cs=... tr=...`             |
+//! | `initializeIdt`      | `Arch::Idt::initialize`      | `idt: 50 gates loaded`           |
 //! | `initializeUserMode` | `Arch::UserMode::initialize` | `usermode: syscall enabled, ...` |
 //!
 //! The order is fixed. The IDT gates name the kernel's code selector, and the

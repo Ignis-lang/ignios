@@ -16,7 +16,8 @@
  *
  * Reloads CS through a far return, then the data segment registers.
  * System V ABI arguments: di = code selector, si = data selector. It runs
- * with interrupts off: Gdt::initialize is called that way from kmain.
+ * with interrupts off: Arch::Gdt::initialize is called that way, from
+ * Trap::Setup::initializeGdt.
  *
  * Stack at the "retfq":
  *

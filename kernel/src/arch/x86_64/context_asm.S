@@ -41,7 +41,7 @@
  *                 rbx
  *                 rbp
  *                 return address: the instruction after the "call" to
- *                                 ignis_switch_context in Context::switchTo
+ *                                 ignis_switch_context in Arch::Context::switchTo
  *
  * Both shapes are the same, which is why a new thread can be resumed by the
  * same code that resumes a thread that was switched out. See concept doc 13. */
@@ -84,7 +84,7 @@ ignis_switch_context:
  * function and r13 its argument. Interrupts are off until the "sti": the
  * switch that got here ran with them disabled. */
 ignis_thread_trampoline:
-    /* Scheduler::threadBegin: frees the stack of the thread that died just
+    /* Sched::Scheduler::threadBegin: frees the stack of the thread that died just
      * before this one was switched in, if any. Needs interrupts off. */
     call ignis_thread_begin
 

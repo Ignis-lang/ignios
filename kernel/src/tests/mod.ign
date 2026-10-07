@@ -7,16 +7,16 @@
 //!
 //! ## Public API
 //!
-//! | Name                  | File               | Checks                                              |
-//! |-----------------------|--------------------|-----------------------------------------------------|
-//! | `Tests::Pmm`          | `pmm.ign`          | frame allocation, uniqueness, reuse, the free count  |
-//! | `Tests::Vmm`          | `vmm.ign`          | `map`, `unmap` and `translate` against the direct map |
-//! | `Tests::Heap`         | `heap.ign`         | alignment, reuse, merging, growth, the compiler handlers |
-//! | `Tests::AddressSpace` | `address_space.ign`| private user half, shared kernel half, no leaked frames |
-//! | `Tests::Timer`        | `timer.ign`        | ticks arrive                                        |
-//! | `Tests::Context`      | `context.ign`      | the stack switch, the argument, alignment, registers |
-//! | `Tests::Scheduler`    | `scheduler.ign`    | round-robin, sleep, slot reuse, CR3 per thread, preemption |
-//! | `Tests::User`         | `user.ign`         | ring 3, `SYSCALL`, process isolation, an ELF module  |
+//! | Name                  | File                | Checks                                                     |
+//! |-----------------------|---------------------|------------------------------------------------------------|
+//! | `Tests::Pmm`          | `pmm.ign`           | frame allocation, uniqueness, reuse, the free count        |
+//! | `Tests::Vmm`          | `vmm.ign`           | `map`, `unmap` and `translate` against the direct map      |
+//! | `Tests::Heap`         | `heap.ign`          | alignment, reuse, merging, growth, the compiler handlers   |
+//! | `Tests::AddressSpace` | `address_space.ign` | private user half, shared kernel half, no leaked frames    |
+//! | `Tests::Timer`        | `timer.ign`         | ticks arrive                                               |
+//! | `Tests::Context`      | `context.ign`       | the stack switch, the argument, alignment, registers       |
+//! | `Tests::Scheduler`    | `scheduler.ign`     | round-robin, sleep, slot reuse, CR3 per thread, preemption |
+//! | `Tests::User`         | `user.ign`          | ring 3, `SYSCALL`, process isolation, an ELF module        |
 //!
 //! ## Dependencies
 //!

@@ -15,13 +15,13 @@
 //!
 //! The ports this kernel uses:
 //!
-//! | Ports        | Device                    | File                     |
-//! |--------------|---------------------------|--------------------------|
-//! | `0x20-0x21`, `0xA0-0xA1` | 8259 PIC pair | `pic.ign`                |
-//! | `0x3F8-0x3FD`| COM1 16550 UART           | `serial.ign`             |
-//! | `0x42-0x43`, `0x61` | PIT channel 2      | `pit.ign`                |
-//! | `0x60`, `0x64` | 8042 PS/2 controller    | `ps2.ign`                |
-//! | `0x80`       | POST diagnostic port, used as a short delay | `pic.ign` |
+//! | Ports                    | Device                                      | File                 |
+//! |--------------------------|---------------------------------------------|----------------------|
+//! | `0x20-0x21`, `0xA0-0xA1` | 8259 PIC pair                               | `pic.ign`            |
+//! | `0x3F8-0x3FD`            | COM1 16550 UART                             | `drivers/serial.ign` |
+//! | `0x42-0x43`, `0x61`      | PIT channel 2                               | `pit.ign`            |
+//! | `0x60`, `0x64`           | 8042 PS/2 controller                        | `drivers/ps2.ign`    |
+//! | `0x80`                   | POST diagnostic port, used as a short delay | `pic.ign`            |
 //!
 //! Inline `asm` blocks are opaque to the optimizer, so the compiler neither
 //! drops nor reorders these accesses and no `volatile` qualifier is needed.

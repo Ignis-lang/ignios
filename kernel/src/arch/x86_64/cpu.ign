@@ -26,7 +26,7 @@
 //! | RFLAGS             | bit 9 (`0x200`) | IF, maskable interrupts enabled            |
 //! | MSR                | number in ECX | read with `rdmsr` into EDX:EAX, write with `wrmsr` |
 //! | CR0                | -            | protection and paging control (WP is bit 16)   |
-//! | CR2                | -            | faulting address of a page fault (read in `interrupts.ign`) |
+//! | CR2                | -            | faulting address of a page fault (read in `trap/exception.ign`) |
 //! | CR3                | -            | physical address of the PML4 in bits 12-51     |
 //!
 //! The MSRs used elsewhere: `IA32_APIC_BASE` (`0x1B`), `IA32_PAT` (`0x277`),

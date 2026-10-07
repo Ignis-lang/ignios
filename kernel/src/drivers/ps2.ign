@@ -51,7 +51,7 @@
 //!
 //! ```text
 //!   key -> keyboard -> 8042 -> IRQ1 -> IOAPIC pin 1 -> vector 0x21
-//!       -> Interrupts::dispatch -> Drivers::Ps2::handleInterrupt -> Lib::ScancodeQueue::push
+//!       -> Trap::dispatch -> Drivers::Ps2::handleInterrupt -> Lib::ScancodeQueue::push
 //! ```
 //!
 //! See concept doc 06 and the OSDev wiki pages "I8042 PS/2 Controller" and

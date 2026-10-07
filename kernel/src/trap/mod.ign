@@ -6,23 +6,23 @@
 //!
 //! ## Public API
 //!
-//! | Name              | File            | Purpose                                                  |
-//! |-------------------|-----------------|----------------------------------------------------------|
-//! | `Trap::dispatch`  | `dispatch.ign`  | called by `interrupt_asm.S` for every vector             |
-//! | `Trap::KEYBOARD_VECTOR`, `Trap::TIMER_VECTOR` | `dispatch.ign` | the two device vectors the kernel uses |
-//! | `Trap::Exception` | `exception.ign` | exception names, the fatal report, killing a faulting process |
-//! | `Trap::Setup`     | `setup.ign`     | GDT, IDT and `SYSCALL` setup, with their boot log lines  |
+//! | Name                                          | File            | Purpose                                                       |
+//! |-----------------------------------------------|-----------------|---------------------------------------------------------------|
+//! | `Trap::dispatch`                              | `dispatch.ign`  | called by `interrupt_asm.S` for every vector                  |
+//! | `Trap::KEYBOARD_VECTOR`, `Trap::TIMER_VECTOR` | `dispatch.ign`  | the two device vectors the kernel uses                        |
+//! | `Trap::Exception`                             | `exception.ign` | exception names, the fatal report, killing a faulting process |
+//! | `Trap::Setup`                                 | `setup.ign`     | GDT, IDT and `SYSCALL` setup, with their boot log lines       |
 //!
 //! ## Dependencies
 //!
-//! | Imports   | Why                                                                |
-//! |-----------|--------------------------------------------------------------------|
+//! | Imports   | Why                                                                          |
+//! |-----------|------------------------------------------------------------------------------|
 //! | `Arch`    | the 8259, the GDT, the IDT, `Arch::Cpu::haltForever`, `Arch::InterruptFrame` |
-//! | `Apic`    | the end-of-interrupt write and the spurious vector                 |
-//! | `Drivers` | the PS/2 interrupt handler and the exception report                |
-//! | `Time`    | `Time::Timer::handleTick` on every timer interrupt                 |
-//! | `Sched`   | `Sched::Scheduler::onTick` may switch threads                      |
-//! | `Proc`    | a fault in ring 3 kills the current process                        |
+//! | `Apic`    | the end-of-interrupt write and the spurious vector                           |
+//! | `Drivers` | the PS/2 interrupt handler and the exception report                          |
+//! | `Time`    | `Time::Timer::handleTick` on every timer interrupt                           |
+//! | `Sched`   | `Sched::Scheduler::onTick` may switch threads                                |
+//! | `Proc`    | a fault in ring 3 kills the current process                                  |
 //!
 //! `Trap` sits near the top of the dependency order because the dispatcher
 //! reaches into the drivers, the clock, the scheduler and the processes. It

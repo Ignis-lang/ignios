@@ -35,7 +35,7 @@ namespace Shell::Terminal {
   const LAST_PRINTABLE: u8 = 0x7E;
 
   /// Bytes one input line can hold. It must equal the array size in
-  /// `runTerminal`, which has to be an integer literal.
+  /// `Shell::Terminal::run`, which has to be an integer literal.
   const LINE_CAPACITY: u64 = 128;
 
   /// Prints the green `> ` prompt, then switches to bright white for the text

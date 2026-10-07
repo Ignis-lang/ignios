@@ -27,21 +27,21 @@
 //!
 //! ## Public API
 //!
-//! | Name              | File          | Purpose                                                    |
-//! |-------------------|---------------|------------------------------------------------------------|
-//! | `Acpi::initialize`| `mod.ign`     | RSDP, root table, MADT; panics when any of them is bad     |
-//! | `Acpi::report`    | `mod.ign`     | the `acpi:` and `madt:` boot log lines                     |
-//! | `Acpi::Rsdp`      | `rsdp.ign`    | the Root System Description Pointer                        |
-//! | `Acpi::Xsdt`      | `xsdt.ign`    | the XSDT or RSDT and the search for a table by signature   |
-//! | `Acpi::Madt`      | `madt.ign`    | local APIC address, IOAPICs, interrupt source overrides    |
-//! | `Acpi::Table`     | `table.ign`   | the table header, checksums and little-endian readers      |
+//! | Name               | File        | Purpose                                                  |
+//! |--------------------|-------------|----------------------------------------------------------|
+//! | `Acpi::initialize` | `mod.ign`   | RSDP, root table, MADT; panics when any of them is bad   |
+//! | `Acpi::report`     | `mod.ign`   | the `acpi:` and `madt:` boot log lines                   |
+//! | `Acpi::Rsdp`       | `rsdp.ign`  | the Root System Description Pointer                      |
+//! | `Acpi::Xsdt`       | `xsdt.ign`  | the XSDT or RSDT and the search for a table by signature |
+//! | `Acpi::Madt`       | `madt.ign`  | local APIC address, IOAPICs, interrupt source overrides  |
+//! | `Acpi::Table`      | `table.ign` | the table header, checksums and little-endian readers    |
 //!
 //! ## Dependencies
 //!
-//! | Imports   | Why                                                          |
-//! |-----------|--------------------------------------------------------------|
-//! | `Boot`    | the RSDP response and the direct map                         |
-//! | `Drivers` | the reports go to the console                                |
+//! | Imports   | Why                                  |
+//! |-----------|--------------------------------------|
+//! | `Boot`    | the RSDP response and the direct map |
+//! | `Drivers` | the reports go to the console        |
 //!
 //! `Apic` imports `Acpi`: the IOAPIC setup reads the MADT.
 //!

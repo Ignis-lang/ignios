@@ -7,9 +7,9 @@
 //! ## Overview
 //!
 //! There is exactly one producer, the keyboard interrupt handler
-//! (`Drivers::Ps2::handleInterrupt`), and exactly one consumer, `runTerminal` in
-//! `main.ign`. Each side writes only its own index and reads the other's, so
-//! no lock is needed. Every access to the indices and the slots is volatile,
+//! (`Drivers::Ps2::handleInterrupt`), and exactly one consumer,
+//! `Shell::Terminal::run`. Each side writes only its own index and reads the
+//! other's, so no lock is needed. Every access to the indices and the slots is volatile,
 //! which keeps the compiler from caching them across the interrupt and from
 //! moving the slot write after the index that publishes it. x86 does not
 //! reorder stores with other stores, so no fence is needed. A full queue drops

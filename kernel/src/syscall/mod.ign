@@ -16,26 +16,26 @@
 //!
 //! ## Public API
 //!
-//! | Name                  | File            | Purpose                                            |
-//! |-----------------------|-----------------|----------------------------------------------------|
-//! | `Syscall::initialize` | `dispatch.ign`  | fills the Linux table                              |
-//! | `Syscall::dispatch`   | `dispatch.ign`  | called by `usermode_asm.S` for every `SYSCALL`     |
-//! | `Syscall::Operation`  | `operation.ign` | the ABI independent operations and the table size  |
-//! | `Syscall::Linux`      | `linux/*.ign`   | numbers, errno values, the table and the handlers  |
+//! | Name                  | File            | Purpose                                           |
+//! |-----------------------|-----------------|---------------------------------------------------|
+//! | `Syscall::initialize` | `dispatch.ign`  | fills the Linux table                             |
+//! | `Syscall::dispatch`   | `dispatch.ign`  | called by `usermode_asm.S` for every `SYSCALL`    |
+//! | `Syscall::Operation`  | `operation.ign` | the ABI independent operations and the table size |
+//! | `Syscall::Linux`      | `linux/*.ign`   | numbers, errno values, the table and the handlers |
 //!
 //! The Linux files: `table.ign` (numbers and the table), `errno.ign` (errno
 //! values and `failure`), `write.ign` and `nanosleep.ign` (the handlers).
 //!
 //! ## Dependencies
 //!
-//! | Imports   | Why                                                              |
-//! |-----------|------------------------------------------------------------------|
-//! | `Proc`    | the current process, its ABI and address space, `exit`           |
-//! | `Sched`   | `yield` and `sleep`                                              |
-//! | `Mm`      | checked copies to and from user memory                           |
-//! | `Time`    | the tick rate that `nanosleep` rounds to                         |
-//! | `Arch`    | the `Arch::InterruptFrame` the entry stub builds                 |
-//! | `Drivers` | `write` prints on the console                                    |
+//! | Imports   | Why                                                    |
+//! |-----------|--------------------------------------------------------|
+//! | `Proc`    | the current process, its ABI and address space, `exit` |
+//! | `Sched`   | `yield` and `sleep`                                    |
+//! | `Mm`      | checked copies to and from user memory                 |
+//! | `Time`    | the tick rate that `nanosleep` rounds to               |
+//! | `Arch`    | the `Arch::InterruptFrame` the entry stub builds       |
+//! | `Drivers` | `write` prints on the console                          |
 //!
 //! `main` calls `Syscall::initialize`. The assembly entry stub in
 //! `arch/x86_64/usermode_asm.S` calls `dispatch` and `badReturn` by their

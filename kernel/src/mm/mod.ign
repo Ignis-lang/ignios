@@ -6,25 +6,25 @@
 //!
 //! ## Public API
 //!
-//! | Name                | File               | Purpose                                                  |
-//! |---------------------|--------------------|----------------------------------------------------------|
-//! | `Mm::Pmm`           | `pmm.ign`          | bitmap allocator of 4 KiB physical frames                |
-//! | `Mm::Vmm`           | `vmm.ign`          | the kernel page tables, `map`, `unmap`, `translate`      |
-//! | `Mm::AddressSpace`  | `address_space.ign`| private user halves and checked copies to and from user memory |
-//! | `Mm::Heap`          | `heap.ign`         | kernel heap behind `@allocHandler` and `@freeHandler`    |
-//! | `Mm::Modules`       | `modules.ign`      | the files Limine loaded next to the kernel               |
+//! | Name               | File                | Purpose                                                        |
+//! |--------------------|---------------------|----------------------------------------------------------------|
+//! | `Mm::Pmm`          | `pmm.ign`           | bitmap allocator of 4 KiB physical frames                      |
+//! | `Mm::Vmm`          | `vmm.ign`           | the kernel page tables, `map`, `unmap`, `translate`            |
+//! | `Mm::AddressSpace` | `address_space.ign` | private user halves and checked copies to and from user memory |
+//! | `Mm::Heap`         | `heap.ign`          | kernel heap behind `@allocHandler` and `@freeHandler`          |
+//! | `Mm::Modules`      | `modules.ign`       | the files Limine loaded next to the kernel                     |
 //!
 //! ## Dependencies
 //!
-//! | Imports   | Why                                                                |
-//! |-----------|--------------------------------------------------------------------|
-//! | `Boot`    | the memory map, the direct map, the executable address             |
-//! | `Arch`    | control registers, `invlpg`, interrupt flag handling               |
-//! | `Lib`     | `memcpy`, `memset`                                                 |
-//! | `Drivers` | `Mm::Modules` lists each module on the console                     |
+//! | Imports   | Why                                                    |
+//! |-----------|--------------------------------------------------------|
+//! | `Boot`    | the memory map, the direct map, the executable address |
+//! | `Arch`    | control registers, `invlpg`, interrupt flag handling   |
+//! | `Lib`     | `memcpy`, `memset`                                     |
+//! | `Drivers` | `Mm::Modules` lists each module on the console         |
 //!
 //! `Mm::Modules` is here and not in `Boot` because it maps the module pages
-//! with `Mm::Vmm::mapRange`, and `Mm` already imports `Boot`.
+//! with `Mm::Vmm::mapRange`. `Mm` imports `Boot`, so `Boot` cannot import `Mm`.
 //!
 //! The order of the boot calls is fixed: `Mm::Pmm::initialize`, then
 //! `Mm::Vmm::initialize` (which takes its page-table frames from the PMM),
