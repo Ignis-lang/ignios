@@ -31,6 +31,16 @@ record VmmState {
   static mut root: u64 = 0;
 }
 
+/// Boundaries defined by `kernel/linker.ld`.
+extern LinkerSymbols {
+  const __text_start: u8;
+  const __text_end: u8;
+  const __rodata_start: u8;
+  const __rodata_end: u8;
+  const __data_start: u8;
+  const __data_end: u8;
+}
+
 export namespace Vmm {
   const PAGE_SIZE: u64 = 4096;
   const LARGE_PAGE_SIZE: u64 = 2097152;
@@ -286,31 +296,30 @@ export namespace Vmm {
     mapSegment(dataStartAddress(), dataEndAddress(), WRITABLE | NO_EXECUTE);
   }
 
-  /// The page-aligned segment boundaries that `kernel/linker.ld` defines.
-  /// They are read with `lea` because a linker symbol has an address and no
-  /// value, and Ignis has no way to take the address of an extern constant.
+  /// The page-aligned segment boundaries that `kernel/linker.ld` defines. A
+  /// linker symbol has an address and no value, so only its address is used.
   function textStartAddress(): u64 {
-    return asm () -> (value: u64 in rax) { lea {value}, [rip + __text_start] };
+    return @integerFromPointer(&LinkerSymbols::__text_start as *u8);
   }
 
   function textEndAddress(): u64 {
-    return asm () -> (value: u64 in rax) { lea {value}, [rip + __text_end] };
+    return @integerFromPointer(&LinkerSymbols::__text_end as *u8);
   }
 
   function rodataStartAddress(): u64 {
-    return asm () -> (value: u64 in rax) { lea {value}, [rip + __rodata_start] };
+    return @integerFromPointer(&LinkerSymbols::__rodata_start as *u8);
   }
 
   function rodataEndAddress(): u64 {
-    return asm () -> (value: u64 in rax) { lea {value}, [rip + __rodata_end] };
+    return @integerFromPointer(&LinkerSymbols::__rodata_end as *u8);
   }
 
   function dataStartAddress(): u64 {
-    return asm () -> (value: u64 in rax) { lea {value}, [rip + __data_start] };
+    return @integerFromPointer(&LinkerSymbols::__data_start as *u8);
   }
 
   function dataEndAddress(): u64 {
-    return asm () -> (value: u64 in rax) { lea {value}, [rip + __data_end] };
+    return @integerFromPointer(&LinkerSymbols::__data_end as *u8);
   }
 
   function mapSegment(start: u64, end: u64, flags: u64): void {

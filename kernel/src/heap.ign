@@ -158,7 +158,7 @@ export namespace Heap {
       @panic("heap self-test: accepted an alignment that is not a power of two");
     }
 
-    testHandlers();
+    testClosureRelease();
   }
 
   /// Three neighbours freed middle last must merge back into one block that
@@ -199,9 +199,8 @@ export namespace Heap {
 
   /// The handlers must reach the heap, both when called directly and when
   /// the compiler calls them: a returned closure that captures a value gets
-  /// a heap environment from `onAllocate`. When the closure is defined outside
-  /// the entry module the compiler gives it no drop function, so nothing
-  /// frees that environment and it stays in use after this test.
+  /// a heap environment from `onAllocate`, and dropping the closure returns
+  /// it through `onFree`.
   function testHandlers(): void {
     let before: u64 = HeapState::allocatedBytes;
     let direct: *mut u8 = onAllocate(64, 16);
@@ -224,6 +223,18 @@ export namespace Heap {
 
     if (adder(2) != 42) {
       @panic("heap self-test: the closure lost its capture");
+    }
+  }
+
+  /// Runs `testHandlers` and checks that the closure environment it created
+  /// was freed when the closure went out of scope.
+  function testClosureRelease(): void {
+    let before: u64 = HeapState::allocatedBytes;
+
+    testHandlers();
+
+    if (HeapState::allocatedBytes != before) {
+      @panic("heap self-test: a closure environment was not freed");
     }
   }
 

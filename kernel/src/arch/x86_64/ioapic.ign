@@ -117,13 +117,12 @@ export namespace Ioapic {
 
     let mut low: u32 = vector as u32;
 
-    // `|=` makes `ignis fmt` fail its safety check, so the OR is spelled out.
     if (activeLow) {
-      low = low | ACTIVE_LOW;
+      low |= ACTIVE_LOW;
     }
 
     if (levelTriggered) {
-      low = low | LEVEL_TRIGGERED;
+      low |= LEVEL_TRIGGERED;
     }
 
     writeRegister(index, FIRST_REDIRECTION_REGISTER + pin * 2 + 1, Lapic::id() << DESTINATION_SHIFT);
