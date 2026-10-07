@@ -1,41 +1,121 @@
-//! The legacy 8259 programmable interrupt controller pair.
+//!
+//! # 8259 Programmable Interrupt Controller
+//!
+//! The legacy interrupt controller pair, remapped away from the CPU
+//! exceptions and fully masked.
+//!
+//! ## Overview
 //!
 //! The lines are remapped to vectors 0x20-0x2F so they do not collide with
 //! the CPU exceptions, and every line is masked: the IOAPIC delivers device
 //! interrupts. The remap stays so a stray or spurious 8259 interrupt lands on
 //! a known vector instead of on a CPU exception.
+//!
+//! ## The Two Chips
+//!
+//! ```text
+//!   devices ─► IRQ0..IRQ7 ─► master 8259 ──INT──► CPU
+//!                               ▲ IRQ2
+//!                               │ cascade
+//!   devices ─► IRQ8..IRQ15 ─► slave 8259
+//!
+//!   master: command 0x20, data 0x21, vectors 0x20..0x27
+//!   slave:  command 0xA0, data 0xA1, vectors 0x28..0x2F
+//! ```
+//!
+//! The classic PC firmware maps the master to vectors 8-15, which collide with
+//! CPU exceptions (8 is the double fault), hence the remap.
+//!
+//! ## Initialization Sequence
+//!
+//! `initialize` sends four initialization command words (ICW) to each chip.
+//! The first goes to the command port, the others to the data port, in this
+//! order:
+//!
+//! | Word | Master | Slave | Meaning                                      |
+//! |------|--------|-------|----------------------------------------------|
+//! | ICW1 | `0x11` | `0x11` | bit 4 start initialization, bit 0 ICW4 follows |
+//! | ICW2 | `0x20` | `0x28` | vector offset of line 0                      |
+//! | ICW3 | `0x04` | `0x02` | master: slave is on line 2 (bit mask). slave: its cascade identity is 2 |
+//! | ICW4 | `0x01` | `0x01` | bit 0: 8086 mode                             |
+//!
+//! A write to port `0x80` after each word provides the pause old chips need.
+//! The last step writes `0xFF` to both data ports: the interrupt mask
+//! register (IMR), a set bit masking the line.
+//!
+//! ## Spurious Interrupts
+//!
+//! A line can drop before the CPU acknowledges it. The chip then raises its
+//! lowest-priority line (7 on the master, 15 on the slave) without setting
+//! the in-service bit. `isSpurious` reads the in-service register (OCW3 command
+//! `0x0B`) to tell the two cases apart: a real interrupt gets an end of
+//! interrupt (`0x20`), a spurious one must not.
+//!
+//! See concept doc 05 and the OSDev wiki page "8259 PIC".
 
 import Port from "./io";
 
+/// The 8259 pair API.
 export namespace Pic {
+  /// I/O port of the master chip's command register.
   const MASTER_COMMAND: u16 = 0x20;
+
+  /// I/O port of the master chip's data register (the mask register after
+  /// initialization).
   const MASTER_DATA: u16 = 0x21;
+
+  /// I/O port of the slave chip's command register.
   const SLAVE_COMMAND: u16 = 0xA0;
+
+  /// I/O port of the slave chip's data register.
   const SLAVE_DATA: u16 = 0xA1;
 
   /// Unused port that takes about one I/O cycle to write, which the old
   /// controllers need between initialization words.
   const DELAY_PORT: u16 = 0x80;
 
+  /// ICW1: bit 4 starts the initialization sequence and bit 0 announces that an
+  /// ICW4 will be sent.
   const INITIALIZE: u8 = 0x11;
+
+  /// ICW4 bit 0: use 8086 mode (not the old 8080 mode).
   const MODE_8086: u8 = 0x01;
+
+  /// ICW3 for the master: bit 2 set, because the slave is wired to line 2.
   const MASTER_HAS_SLAVE_ON_LINE_2: u8 = 0x04;
+
+  /// ICW3 for the slave: its cascade identity, the line number 2 on the master.
   const SLAVE_CASCADE_IDENTITY: u8 = 0x02;
 
+  /// OCW2 command `0x20`: non-specific end of interrupt.
   const END_OF_INTERRUPT: u8 = 0x20;
+
+  /// OCW3 command `0x0B`: the next read of the command port returns the
+  /// in-service register.
   const READ_IN_SERVICE: u8 = 0x0B;
 
   /// First vector of the master controller, then of the slave.
   const MASTER_OFFSET: u8 = 0x20;
+
+  /// Vector of line 8, the first line of the slave: `0x28`.
   const SLAVE_OFFSET: u8 = 0x28;
 
   /// Every line masked.
   const MASTER_MASK: u8 = 0xFF;
+
+  /// Interrupt mask for the slave: every line masked.
   const SLAVE_MASK: u8 = 0xFF;
 
+  /// Lines 8 to 15 belong to the slave.
   const SLAVE_FIRST_LINE: u8 = 8;
+
+  /// Line 7, where the master reports a spurious interrupt.
   const SPURIOUS_MASTER_LINE: u8 = 7;
+
+  /// Line 15, where the slave reports a spurious interrupt.
   const SPURIOUS_SLAVE_LINE: u8 = 15;
+
+  /// Bit 7 of the in-service register: line 7 of that chip is being serviced.
   const LINE_7_BIT: u8 = 0x80;
 
   /// Remaps both controllers and masks every line.
@@ -107,12 +187,15 @@ export namespace Pic {
     }
   }
 
+  /// Reads the in-service register of the chip at `command` and returns whether
+  /// its line 7 (the spurious candidate) is being serviced.
   function isLine7InService(command: u16): boolean {
     Port::writeByte(command, READ_IN_SERVICE);
 
     return (Port::readByte(command) & LINE_7_BIT) != 0;
   }
 
+  /// Waits about one I/O cycle by writing to the unused port `0x80`.
   function delay(): void {
     Port::writeByte(DELAY_PORT, 0);
   }

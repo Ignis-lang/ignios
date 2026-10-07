@@ -1,52 +1,141 @@
-//! The local APIC in xAPIC mode.
 //!
-//! Limine hands over the local APIC enabled, and with base revision 5 or
-//! later it masks every LVT entry that has Fixed, Lowest Priority, NMI or
-//! ExtINT delivery, which includes LINT0. LINT0 is the line the 8259 drives,
-//! and the kernel does not use the 8259 (the IOAPIC delivers device
-//! interrupts), so `initialize` writes LINT0 masked explicitly rather than
-//! rely on that. The
-//! registers are memory mapped, so `initialize` first maps the APIC page
+//! # Local APIC
+//!
+//! The per-processor interrupt controller, in xAPIC (memory-mapped) mode.
+//!
+//! ## Overview
+//!
+//! Limine hands over the local APIC enabled, and with base revision 5 or later
+//! it masks every LVT entry that has Fixed, Lowest Priority, NMI or ExtINT
+//! delivery, which includes LINT0. LINT0 is the line the 8259 drives, and the
+//! kernel does not use the 8259 (the IOAPIC delivers device interrupts), so
+//! `initialize` writes LINT0 masked explicitly rather than rely on that.
+//!
+//! The registers are memory mapped, so `initialize` first maps the APIC page
 //! uncached into the kernel address space. It then enables the APIC through
 //! the spurious interrupt vector register, leaves LINT0 as a masked external
 //! interrupt input and routes LINT1 as a non-maskable interrupt, which is the
 //! wiring a PC expects. Handlers acknowledge an interrupt with
 //! `endOfInterrupt`. The APIC timer registers are exposed as start and stop
 //! helpers for `timer.ign`.
+//!
+//! ## Where the Registers Are
+//!
+//! The base physical address is in the `IA32_APIC_BASE` MSR (`0x1B`),
+//! normally `0xFEE00000`:
+//!
+//! ```text
+//!   IA32_APIC_BASE
+//!   63        52 51          12 11   10     9  8    7..0
+//!   ┌──────────┬──────────────┬────┬──────┬───┬────┬─────┐
+//!   │ reserved │ base address │ EN │ EXTD │ . │BSP │  .  │
+//!   └──────────┴──────────────┴────┴──────┴───┴────┴─────┘
+//!                              bit 11 global enable    bit 10 x2APIC mode
+//! ```
+//!
+//! The page is mapped at `MAPPING` and each register is a 32-bit word at a
+//! 16-byte-aligned offset in it:
+//!
+//! | Offset  | Register               | Use                                     |
+//! |---------|------------------------|-----------------------------------------|
+//! | `0x020` | ID                     | APIC id in bits 31-24                   |
+//! | `0x030` | Version                | version in bits 7-0, last LVT entry in 23-16 |
+//! | `0x080` | Task priority          | set to 0: accept every interrupt        |
+//! | `0x0B0` | End of interrupt       | write 0 to acknowledge                  |
+//! | `0x0F0` | Spurious vector        | bit 8 software enable, bits 7-0 vector  |
+//! | `0x320` | LVT timer              | vector, mask bit 16, mode bits 18-17    |
+//! | `0x350` | LVT LINT0              | external interrupt input from the 8259  |
+//! | `0x360` | LVT LINT1              | non-maskable interrupt input            |
+//! | `0x380` | Timer initial count    | writing starts the countdown            |
+//! | `0x390` | Timer current count    | read-only                               |
+//! | `0x3E0` | Timer divide config    | `0x3` = divide by 16                    |
+//!
+//! A local vector table (LVT) entry:
+//!
+//! ```text
+//!   31..19    18..17      16     15      14    13        12       11   10..8      7..0
+//!   reserved  timer mode  mask   trigger rIRR  polarity  status   .    delivery   vector
+//!             00 one-shot                                                 mode
+//!             01 periodic
+//! ```
+//!
+//! Delivery mode `100` is NMI (`0x400`) and `111` is ExtINT (`0x700`).
+//!
+//! See concept doc 05 and Intel SDM Vol. 3A, "Advanced Programmable Interrupt
+//! Controller (APIC)".
 
 import Cpu from "./cpu";
 import Vmm from "../../vmm";
 
+/// The local APIC API. All register access is volatile MMIO.
 export namespace Lapic {
   /// Vector of the spurious interrupt the APIC raises when an interrupt
   /// disappears before the processor takes it. Its handler must not signal
   /// end of interrupt.
   const SPURIOUS_VECTOR: u64 = 0xFF;
 
+  /// MSR number of `IA32_APIC_BASE`.
   const APIC_BASE_MSR: u32 = 0x1B;
+
+  /// `IA32_APIC_BASE` bit 11: the local APIC is globally enabled.
   const APIC_BASE_ENABLE: u64 = 0x800;
+
+  /// `IA32_APIC_BASE` bit 10: the APIC is in x2APIC mode, which has no
+  /// memory-mapped registers.
   const APIC_BASE_X2APIC: u64 = 0x400;
+
+  /// Bits 12 to 51 of `IA32_APIC_BASE`: the physical base address.
   const APIC_BASE_ADDRESS_MASK: u64 = 0x000FFFFFFFFFF000;
 
   /// Where the kernel maps the APIC page. It lies in its own region of the
   /// higher half, away from the direct map, the heap and the kernel image.
   const MAPPING: u64 = 0xFFFFA00000000000;
 
+  /// Offset `0x20`: the APIC id in bits 31-24.
   const ID_REGISTER: u64 = 0x20;
+
+  /// Offset `0x30`: version in bits 7-0, index of the last LVT entry in 23-16.
   const VERSION_REGISTER: u64 = 0x30;
+
+  /// Offset `0x80`. Zero lets every priority class through.
   const TASK_PRIORITY_REGISTER: u64 = 0x80;
+
+  /// Offset `0xB0`. Any write acknowledges the interrupt in service.
   const END_OF_INTERRUPT_REGISTER: u64 = 0xB0;
+
+  /// Offset `0xF0`. Bit 8 enables the APIC, bits 7-0 are the spurious vector.
   const SPURIOUS_REGISTER: u64 = 0xF0;
+
+  /// Offset `0x320`: the LVT entry of the timer.
   const TIMER_REGISTER: u64 = 0x320;
+
+  /// Offset `0x350`: the LVT entry of local pin 0, where the 8259 connects.
   const LINT0_REGISTER: u64 = 0x350;
+
+  /// Offset `0x360`: the LVT entry of local pin 1, conventionally NMI.
   const LINT1_REGISTER: u64 = 0x360;
+
+  /// Offset `0x380`. Writing a non-zero value starts the countdown, writing 0
+  /// stops it.
   const TIMER_INITIAL_COUNT_REGISTER: u64 = 0x380;
+
+  /// Offset `0x390`: the count still to run down.
   const TIMER_CURRENT_COUNT_REGISTER: u64 = 0x390;
+
+  /// Offset `0x3E0`: divides the input clock before it reaches the counter.
   const TIMER_DIVIDE_REGISTER: u64 = 0x3E0;
 
+  /// Spurious vector register bit 8: the APIC is enabled.
   const SOFTWARE_ENABLE: u32 = 0x100;
+
+  /// LVT delivery mode 111 (bits 10-8): an external interrupt whose vector the
+  /// 8259 supplies.
   const DELIVERY_EXTINT: u32 = 0x700;
+
+  /// LVT delivery mode 100 (bits 10-8): non-maskable interrupt.
   const DELIVERY_NMI: u32 = 0x400;
+
+  /// LVT bit 16: the entry is masked and never delivers.
   const LVT_MASKED: u32 = 0x10000;
 
   /// Bit 17 of the timer LVT entry selects periodic mode; clear is one-shot.
@@ -145,10 +234,14 @@ export namespace Lapic {
     return readRegister(VERSION_REGISTER);
   }
 
+  /// Reads the 32-bit register at `offset` in the mapped APIC page. Volatile:
+  /// the value changes without the compiler's knowledge.
   function readRegister(offset: u64): u32 {
     return @readVolatile<u32>(@pointerFromInteger<*mut u32>(MAPPING + offset));
   }
 
+  /// Writes the 32-bit register at `offset`. Volatile, so the store always
+  /// happens and keeps its order.
   function writeRegister(offset: u64, value: u32): void {
     @writeVolatile<u32>(@pointerFromInteger<*mut u32>(MAPPING + offset), value);
   }

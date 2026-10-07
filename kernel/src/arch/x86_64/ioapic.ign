@@ -1,5 +1,10 @@
-//! The I/O APIC: the chip that receives device interrupt lines and turns each
-//! one into a vector sent to a local APIC.
+//!
+//! # I/O APIC
+//!
+//! The chip that receives device interrupt lines and turns each one into a
+//! vector sent to a local APIC.
+//!
+//! ## Overview
 //!
 //! An IOAPIC has two memory-mapped registers: IOREGSEL at offset 0 takes the
 //! index of an internal register, and IOWIN at offset 0x10 reads or writes it.
@@ -16,31 +21,91 @@
 //! using the MADT interrupt source overrides for the GSI, polarity and
 //! trigger. Everything is sent to the processor that runs the code (the
 //! bootstrap processor), in physical destination mode.
+//!
+//! ## Register Access
+//!
+//! ```text
+//!   page base + 0x00   IOREGSEL   write the index of the register you want
+//!   page base + 0x10   IOWIN      then read or write its value here
+//!
+//!   index 0x00  ID           bits 27-24 = IOAPIC id
+//!   index 0x01  version      bits 7-0 = version, bits 23-16 = highest entry number
+//!   index 0x10 + 2n          redirection entry n, low 32 bits
+//!   index 0x11 + 2n          redirection entry n, high 32 bits
+//! ```
+//!
+//! ## Redirection Entry (64 bits)
+//!
+//! ```text
+//!   63..56         55..17     16     15      14    13       12      11     10..8    7..0
+//!   ┌──────────────┬────────┬──────┬───────┬─────┬────────┬───────┬──────┬────────┬────────┐
+//!   │ destination  │ resvd  │ mask │trigger│ rIRR│polarity│status │ dest │delivery│ vector │
+//!   │ (APIC id in  │        │ 1 =  │1=level│     │1=active│       │ mode │ mode   │        │
+//!   │  bits 59-56) │        │masked│       │     │ low    │       │0=phys│000=fixed│       │
+//!   └──────────────┴────────┴──────┴───────┴─────┴────────┴───────┴──────┴────────┴────────┘
+//!      high register (offset 0x11 + 2n)             low register (offset 0x10 + 2n)
+//! ```
+//!
+//! `route` writes the high register first and the low one second. The entry
+//! starts masked (`initialize` masks every pin), and the low-register write
+//! is the one that unmasks it, so the destination is already valid when the
+//! pin goes live.
+//!
+//! ## Keyboard Example
+//!
+//! In the QEMU boot log: `ioapic: keyboard IRQ 1 -> GSI 1, vector 0x21, entry
+//! 0x21`. The MADT has no override for IRQ 1, so GSI = 1; the entry has
+//! vector `0x21` and every other bit clear: unmasked, edge, active high,
+//! fixed delivery to physical APIC id 0.
+//!
+//! See concept doc 12 and the OSDev wiki page "IOAPIC".
 
 import Acpi from "../../acpi";
 import Lapic from "./lapic";
 import Vmm from "../../vmm";
 
+/// Per-chip data read once at start-up.
 record IoapicState {
+  /// Highest redirection entry number of each IOAPIC (the version register,
+  /// bits 23-16). The count of entries is that plus one.
   static mut maxEntries: u8[8];
+
+  /// Version byte of each IOAPIC (version register, bits 7-0).
   static mut versions: u8[8];
 }
 
+/// The IOAPIC API. Call `initialize`, then `routeIsa` for each device line.
 export namespace Ioapic {
   /// Where the kernel maps the first IOAPIC page, then one page per further
   /// IOAPIC. It lies in the same higher-half region as the local APIC page.
   const MAPPING: u64 = 0xFFFFA00000010000;
+
+  /// Size of the page mapped for each IOAPIC.
   const PAGE_SIZE: u64 = 4096;
 
+  /// Offset of IOREGSEL from the start of the IOAPIC page.
   const SELECT_OFFSET: u64 = 0x00;
+
+  /// Offset of IOWIN from the start of the IOAPIC page.
   const WINDOW_OFFSET: u64 = 0x10;
 
+  /// Index of the id register.
   const ID_REGISTER: u32 = 0x00;
+
+  /// Index of the version register.
   const VERSION_REGISTER: u32 = 0x01;
+
+  /// Index of the low half of redirection entry 0. Entry `n` is at
+  /// `0x10 + 2n` (low) and `0x11 + 2n` (high).
   const FIRST_REDIRECTION_REGISTER: u32 = 0x10;
 
+  /// Redirection entry bit 16: the pin is masked and raises nothing.
   const MASKED: u32 = 0x10000;
+
+  /// Redirection entry bit 13: the line is active low.
   const ACTIVE_LOW: u32 = 0x2000;
+
+  /// Redirection entry bit 15: the line is level triggered.
   const LEVEL_TRIGGERED: u32 = 0x8000;
 
   /// Bit position of the destination APIC id in the high redirection
@@ -167,6 +232,8 @@ export namespace Ioapic {
     return count;
   }
 
+  /// Masks every redirection entry of IOAPIC `index`, so no pin raises an
+  /// interrupt until `route` programs it.
   function maskAll(index: u64): void {
     let entries: u64 = entryCount(index);
 
@@ -178,16 +245,20 @@ export namespace Ioapic {
     }
   }
 
+  /// The virtual address of the page mapped for IOAPIC `index`.
   function pageOf(index: u64): u64 {
     return MAPPING + index * PAGE_SIZE;
   }
 
+  /// Reads the internal register `register` of IOAPIC `index`: select it, then
+  /// read the window. Both accesses are volatile and must stay in this order.
   function readRegister(index: u64, register: u32): u32 {
     @writeVolatile<u32>(@pointerFromInteger<*mut u32>(pageOf(index) + SELECT_OFFSET), register);
 
     return @readVolatile<u32>(@pointerFromInteger<*mut u32>(pageOf(index) + WINDOW_OFFSET));
   }
 
+  /// Writes `value` to the internal register `register` of IOAPIC `index`.
   function writeRegister(index: u64, register: u32, value: u32): void {
     @writeVolatile<u32>(@pointerFromInteger<*mut u32>(pageOf(index) + SELECT_OFFSET), register);
     @writeVolatile<u32>(@pointerFromInteger<*mut u32>(pageOf(index) + WINDOW_OFFSET), value);

@@ -1,4 +1,10 @@
-//! The periodic tick, driven by the local APIC timer.
+//!
+//! # APIC Timer Tick
+//!
+//! The periodic 100 Hz tick, driven by the local APIC timer and calibrated
+//! against the PIT.
+//!
+//! ## Overview
 //!
 //! The local APIC timer counts down from an initial count at a rate that
 //! depends on the processor's bus or core crystal clock, and ACPI does not say
@@ -8,17 +14,48 @@
 //! initial count that gives `FREQUENCY` interrupts per second, and starts the
 //! timer in periodic mode. The interrupt handler only increments a counter;
 //! `ticks` and `uptimeMilliseconds` read it.
+//!
+//! ## Calibration
+//!
+//! ```text
+//!   t = 0                                                   t = 50 ms
+//!   APIC timer: start one-shot from 0xFFFFFFFF, masked ────► read current count
+//!   PIT ch.2:   load 59659, open gate ──── counts down ────► output goes high
+//!
+//!   elapsed   = 0xFFFFFFFF - currentCount           APIC counts in 50 ms
+//!   countRate = elapsed * 1193182 / 59659           APIC counts per second
+//!   initial   = countRate / 100                     counts per 10 ms tick
+//! ```
+//!
+//! 59659 PIT counts at 1193182 Hz take 50.0 ms. In the QEMU boot log the
+//! measured rate is about 62.5 MHz (already divided by 16 by the divide
+//! configuration register), which gives an initial count of about 625512.
+//! Then the timer runs in periodic mode: when the count reaches zero it raises
+//! the tick vector and reloads the initial count.
+//!
+//! The measured rate depends on the machine and on how QEMU is accelerated, so
+//! the initial count differs between runs.
+//!
+//! See concept doc 12.
 
 import Cpu from "./arch/x86_64/cpu";
 import Lapic from "./arch/x86_64/lapic";
 import Pit from "./arch/x86_64/pit";
 
+/// Tick counter and the calibration result.
 record TimerState {
+  /// Timer interrupts since `initialize`. Written by the interrupt handler,
+  /// read with volatile loads.
   static mut ticks: u64 = 0;
+
+  /// Timer counts per second at the divide-by-16 setting.
   static mut countRate: u64 = 0;
+
+  /// The count loaded at each period.
   static mut initialCount: u64 = 0;
 }
 
+/// The timer API.
 export namespace Timer {
   /// Ticks per second.
   const FREQUENCY: u64 = 100;
@@ -34,6 +71,7 @@ export namespace Timer {
   /// Polls of the PIT output before the measurement is given up.
   const CALIBRATION_POLL_LIMIT: u64 = 100000000;
 
+  /// Ticks the self-test waits for: 10 ticks is 100 ms.
   const SELF_TEST_TICKS: u64 = 10;
 
   /// Measures the APIC timer and starts it ticking `FREQUENCY` times per
