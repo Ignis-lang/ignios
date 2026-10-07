@@ -60,8 +60,8 @@
 //!
 //! See concept doc 12 and the OSDev wiki page "IOAPIC".
 
+import Acpi from "@acpi";
 import Mm from "@mm";
-import Acpi from "../acpi";
 import _ from "./lapic";
 
 /// Per-chip data read once at start-up.
@@ -118,14 +118,14 @@ namespace Apic::Ioapic {
   /// Maps and masks every IOAPIC in the MADT. The kernel page tables and the
   /// ACPI tables must be ready. Panics when a page cannot be mapped.
   function initialize(): void {
-    let count: u64 = Acpi::ioapicCount();
+    let count: u64 = Acpi::Madt::ioapicCount();
 
     let mut index: u64 = 0;
 
     while (index < count) {
       let flags: u64 = Mm::Vmm::WRITABLE | Mm::Vmm::NO_EXECUTE | Mm::Vmm::UNCACHED;
 
-      if (!Mm::Vmm::map(pageOf(index), Acpi::ioapicAddress(index), flags)) {
+      if (!Mm::Vmm::map(pageOf(index), Acpi::Madt::ioapicAddress(index), flags)) {
         @panic("ioapic: cannot map an IOAPIC page");
       }
 
@@ -159,10 +159,10 @@ namespace Apic::Ioapic {
   /// are the ISA defaults (GSI equal to the line, active high, edge). Returns
   /// the GSI used, or 0xFFFFFFFF when no IOAPIC serves it.
   function routeIsa(irq: u8, vector: u8): u32 {
-    let gsi: u32 = Acpi::isaIrqGsi(irq);
-    let flags: u16 = Acpi::isaIrqFlags(irq);
+    let gsi: u32 = Acpi::Madt::isaIrqGsi(irq);
+    let flags: u16 = Acpi::Madt::isaIrqFlags(irq);
 
-    if (!route(gsi, vector, Acpi::flagsActiveLow(flags), Acpi::flagsLevelTriggered(flags))) {
+    if (!route(gsi, vector, Acpi::Madt::flagsActiveLow(flags), Acpi::Madt::flagsLevelTriggered(flags))) {
       return NO_GSI;
     }
 
@@ -174,11 +174,11 @@ namespace Apic::Ioapic {
   function route(gsi: u32, vector: u8, activeLow: boolean, levelTriggered: boolean): boolean {
     let index: u64 = findIoapic(gsi);
 
-    if (index == Acpi::ioapicCount()) {
+    if (index == Acpi::Madt::ioapicCount()) {
       return false;
     }
 
-    let pin: u32 = gsi - Acpi::ioapicGsiBase(index);
+    let pin: u32 = gsi - Acpi::Madt::ioapicGsiBase(index);
 
     let mut low: u32 = vector as u32;
 
@@ -201,11 +201,11 @@ namespace Apic::Ioapic {
   function redirection(gsi: u32): u64 {
     let index: u64 = findIoapic(gsi);
 
-    if (index == Acpi::ioapicCount()) {
+    if (index == Acpi::Madt::ioapicCount()) {
       return 0;
     }
 
-    let pin: u32 = gsi - Acpi::ioapicGsiBase(index);
+    let pin: u32 = gsi - Acpi::Madt::ioapicGsiBase(index);
     let low: u64 = readRegister(index, FIRST_REDIRECTION_REGISTER + pin * 2) as u64;
     let high: u64 = readRegister(index, FIRST_REDIRECTION_REGISTER + pin * 2 + 1) as u64;
 
@@ -215,12 +215,12 @@ namespace Apic::Ioapic {
   /// The index of the IOAPIC whose GSI range holds `gsi`, or the IOAPIC
   /// count when none does.
   function findIoapic(gsi: u32): u64 {
-    let count: u64 = Acpi::ioapicCount();
+    let count: u64 = Acpi::Madt::ioapicCount();
 
     let mut index: u64 = 0;
 
     while (index < count) {
-      let base: u64 = Acpi::ioapicGsiBase(index) as u64;
+      let base: u64 = Acpi::Madt::ioapicGsiBase(index) as u64;
 
       if ((gsi as u64) >= base && (gsi as u64) < base + entryCount(index)) {
         return index;

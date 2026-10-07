@@ -1,0 +1,112 @@
+//!
+//! # Acpi
+//!
+//! Finds the MADT, the one ACPI table the interrupt setup needs, and parses it.
+//!
+//! ## Overview
+//!
+//! ACPI is how the firmware describes the hardware to the kernel. Limine hands
+//! over the RSDP, the RSDP names the root table, the root table lists every
+//! other table, and the MADT says where the interrupt controllers are:
+//!
+//! ```text
+//!   Limine RSDP response
+//!        │
+//!        ▼
+//!   RSDP  "RSD PTR "  ──revision >= 2 and XSDT address != 0──►  XSDT (8-byte entries)
+//!        │                                                        │
+//!        └──────────────── otherwise ──────────────►  RSDT (4-byte entries)
+//!                                                                 │
+//!                                          each entry: physical address of a table
+//!                                                                 ▼
+//!                                              table whose signature is "APIC" = MADT
+//! ```
+//!
+//! `Acpi::initialize` runs that walk once and `Acpi::report` prints the result.
+//! Later code reads the parsed MADT through the `Acpi::Madt` accessors.
+//!
+//! ## Public API
+//!
+//! | Name              | File          | Purpose                                                    |
+//! |-------------------|---------------|------------------------------------------------------------|
+//! | `Acpi::initialize`| `mod.ign`     | RSDP, root table, MADT; panics when any of them is bad     |
+//! | `Acpi::report`    | `mod.ign`     | the `acpi:` and `madt:` boot log lines                     |
+//! | `Acpi::Rsdp`      | `rsdp.ign`    | the Root System Description Pointer                        |
+//! | `Acpi::Xsdt`      | `xsdt.ign`    | the XSDT or RSDT and the search for a table by signature   |
+//! | `Acpi::Madt`      | `madt.ign`    | local APIC address, IOAPICs, interrupt source overrides    |
+//! | `Acpi::Table`     | `table.ign`   | the table header, checksums and little-endian readers      |
+//!
+//! ## Dependencies
+//!
+//! | Imports   | Why                                                          |
+//! |-----------|--------------------------------------------------------------|
+//! | `Boot`    | the RSDP response and the direct map                         |
+//! | `Drivers` | the reports go to the console                                |
+//!
+//! `Apic` imports `Acpi`: the IOAPIC setup reads the MADT.
+//!
+//! See concept doc 12 and the ACPI specification, "ACPI System Description
+//! Tables" (RSDP, XSDT, MADT).
+
+import Boot from "@boot";
+import Drivers from "@drivers";
+import _ from "./madt";
+import _ from "./rsdp";
+import _ from "./table";
+import _ from "./xsdt";
+
+/// The ACPI discovery API. Call `initialize` once, then use the accessors of
+/// `Acpi::Madt`.
+export namespace Acpi {
+  /// Finds the RSDP, walks to the MADT and parses it. Panics when there are
+  /// no ACPI tables, a checksum fails, or the MADT is missing: without them
+  /// the kernel cannot find the IOAPIC.
+  function initialize(): void {
+    let response: *mut Boot::Limine::RsdpResponse = Boot::Limine::rsdp();
+
+    if (response == null) {
+      @panic("acpi: Limine provided no RSDP");
+    }
+
+    Rsdp::read((*response).address);
+    Xsdt::open();
+
+    let madt: *mut u8 = Xsdt::findTable(Madt::SIGNATURE);
+
+    if (madt == null) {
+      @panic("acpi: no MADT");
+    }
+
+    Madt::read(madt);
+  }
+
+  /// Prints the RSDP, the root table and the MADT contents.
+  function report(): void {
+    Drivers::Console::write("acpi: rsdp ");
+    Drivers::Console::writeHex(Rsdp::physicalAddress());
+    Drivers::Console::write(", revision ");
+    Drivers::Console::writeDecimal(Rsdp::revision());
+    Drivers::Console::write(", oem ");
+    writeText(Rsdp::pointer(), Rsdp::OEM_OFFSET, 6);
+    Drivers::Console::write(", ");
+    Drivers::Console::write(Xsdt::usesXsdt() ? "xsdt " : "rsdt ");
+    Drivers::Console::writeHex(Xsdt::address());
+    Drivers::Console::write(" with ");
+    Drivers::Console::writeDecimal(Xsdt::entryCount());
+    Drivers::Console::write(" tables, madt ");
+    Drivers::Console::writeHex(Madt::address());
+    Drivers::Console::writeLine("");
+
+    Madt::report();
+  }
+
+  /// Prints `count` characters starting at `base + offset`, for the OEM id.
+  function writeText(base: *mut u8, offset: u64, count: u64): void {
+    let mut index: u64 = 0;
+
+    while (index < count) {
+      Drivers::Console::writeChar(*(base + offset + index));
+      index += 1;
+    }
+  }
+}

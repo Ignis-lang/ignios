@@ -1,0 +1,104 @@
+//!
+//! # ACPI System Description Tables
+//!
+//! What every ACPI table shares: the 36-byte header, the checksum rule and the
+//! little-endian field readers.
+//!
+//! ## Overview
+//!
+//! Every table except the RSDP starts with the same header:
+//!
+//! ```text
+//!   offset  size  field
+//!    0       4    signature, for example "APIC"
+//!    4       4    length of the whole table, header included
+//!    8       1    revision
+//!    9       1    checksum (the sum of all `length` bytes is 0 mod 256)
+//!   10       6    OEM id
+//!   16       8    OEM table id
+//!   24       4    OEM revision
+//!   28       4    creator id
+//!   32       4    creator revision
+//! ```
+//!
+//! The tables are packed and byte aligned, so every field is read byte by
+//! byte in little-endian order instead of through a typed pointer. A typed
+//! read of an unaligned field could fault or read wrongly.
+//!
+//! See concept doc 12 and the ACPI specification, "System Description Table
+//! Header".
+
+/// The header layout, the validation rule and the field readers.
+namespace Acpi::Table {
+  /// Offset of the 32-bit table length in a system description table header.
+  const HEADER_LENGTH_OFFSET: u64 = 4;
+
+  /// Offset of the revision byte in a system description table header.
+  const HEADER_REVISION_OFFSET: u64 = 8;
+
+  /// Size of the system description table header, which every table starts
+  /// with.
+  const HEADER_SIZE: u64 = 36;
+
+  /// A table longer than this is treated as corrupt before its checksum is
+  /// read.
+  const MAX_TABLE_LENGTH: u64 = 0x100000;
+
+  /// False when the table's length is implausible or its checksum does not
+  /// add up.
+  function isTableValid(table: *mut u8): boolean {
+    let length: u64 = readU32(table, HEADER_LENGTH_OFFSET) as u64;
+
+    return length >= HEADER_SIZE && length <= MAX_TABLE_LENGTH && checksumValid(table, length);
+  }
+
+  /// True when the bytes sum to zero modulo 256, how every ACPI table is
+  /// validated.
+  function checksumValid(base: *mut u8, length: u64): boolean {
+    let mut sum: u64 = 0;
+    let mut index: u64 = 0;
+
+    while (index < length) {
+      sum += *(base + index) as u64;
+      index += 1;
+    }
+
+    return (sum & 0xFF) == 0;
+  }
+
+  /// Reads the byte at `base + offset`. The `readU16`, `readU32` and `readU64`
+  /// functions below do the same for wider little-endian values.
+  function readU8(base: *mut u8, offset: u64): u8 {
+    return *(base + offset);
+  }
+
+  /// Reads an unsigned 16-bit little-endian value from `base + offset`.
+  function readU16(base: *mut u8, offset: u64): u16 {
+    return readLittleEndian(base, offset, 2) as u16;
+  }
+
+  /// Reads an unsigned 32-bit little-endian value from `base + offset`.
+  function readU32(base: *mut u8, offset: u64): u32 {
+    return readLittleEndian(base, offset, 4) as u32;
+  }
+
+  /// Reads an unsigned 64-bit little-endian value from `base + offset`.
+  function readU64(base: *mut u8, offset: u64): u64 {
+    return readLittleEndian(base, offset, 8);
+  }
+
+  /// Assembles `width` bytes at `base + offset` into an integer, lowest address
+  /// being the least significant byte. Table fields are unaligned, so a typed
+  /// pointer read could fault or read wrongly.
+  function readLittleEndian(base: *mut u8, offset: u64, width: u64): u64 {
+    let mut value: u64 = 0;
+    let mut index: u64 = width;
+
+    while (index > 0) {
+      index -= 1;
+      value = (value << 8) | (*(base + offset + index) as u64);
+    }
+
+    return value;
+  }
+}

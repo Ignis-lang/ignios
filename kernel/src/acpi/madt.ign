@@ -1,0 +1,384 @@
+//!
+//! # ACPI MADT
+//!
+//! The Multiple APIC Description Table: where the interrupt controllers are
+//! and how the legacy interrupt lines are wired to them.
+//!
+//! ## Overview
+//!
+//! For this kernel the only question ACPI answers is "where are the interrupt
+//! controllers": the local APIC address, the IOAPICs with the range of global
+//! system interrupts (GSIs) each serves, and the interrupt source overrides
+//! (ISOs) that say an ISA line is wired to a different GSI or has non-default
+//! polarity. `read` parses the MADT once into fixed-size arrays and later code
+//! reads the result through the accessors.
+//!
+//! The table has signature "APIC". After the 36-byte header come the 32-bit
+//! physical address of the local APIC (offset 36), a 32-bit flags word (offset
+//! 40, bit 0 means the machine also has a dual 8259), then variable-length
+//! entries from offset 44. Each entry starts with a type byte and a length
+//! byte:
+//!
+//! ```text
+//!   type 0  processor local APIC      [2] processor id  [3] APIC id  [4..7] flags (bit 0 enabled)
+//!   type 1  I/O APIC                  [2] id  [3] reserved  [4..7] address  [8..11] GSI base
+//!   type 2  interrupt source override [2] bus (0 = ISA)  [3] source IRQ  [4..7] GSI  [8..9] flags
+//!   type 5  local APIC address override  [2..3] reserved  [4..11] 64-bit address
+//! ```
+//!
+//! Override flags: bits 0-1 are the polarity (`01` active high, `11` active
+//! low, `00` as the bus says) and bits 2-3 the trigger mode (`01` edge, `11`
+//! level, `00` as the bus says). For ISA the default is active high, edge.
+//!
+//! See concept doc 12 and the ACPI specification, "Multiple APIC Description
+//! Table (MADT)".
+
+import Boot from "@boot";
+import Drivers from "@drivers";
+import _ from "./table";
+
+/// Everything `read` learned. The arrays are sized for the machines the
+/// kernel targets and their capacities must equal `Acpi::Madt::MAX_IOAPICS` and
+/// `Acpi::Madt::MAX_OVERRIDES`.
+record MadtState {
+  /// Physical address of the MADT.
+  static mut madtAddress: u64 = 0;
+
+  /// Flags word of the MADT.
+  static mut madtFlags: u64 = 0;
+
+  /// Physical address of the local APIC from the MADT, replaced by the address
+  /// override entry when there is one.
+  static mut lapicAddress: u64 = 0;
+
+  /// Local APIC entries with the enabled flag set.
+  static mut processorsEnabled: u64 = 0;
+
+  /// All local APIC entries.
+  static mut processorsTotal: u64 = 0;
+
+  /// IOAPICs found. The three arrays that follow are indexed by IOAPIC number.
+  static mut ioapicCount: u64 = 0;
+
+  /// The id field of each IOAPIC entry, by IOAPIC number.
+  static mut ioapicIds: u8[8];
+
+  /// The 32-bit physical MMIO address of each IOAPIC.
+  static mut ioapicAddresses: u32[8];
+
+  /// The first GSI each IOAPIC serves.
+  static mut ioapicGsiBases: u32[8];
+
+  /// Interrupt source overrides found. The three arrays that follow are
+  /// indexed by override number.
+  static mut overrideCount: u64 = 0;
+
+  /// The ISA IRQ number each override applies to.
+  static mut overrideSources: u8[16];
+
+  /// The GSI each overridden ISA IRQ is wired to.
+  static mut overrideGsis: u32[16];
+
+  /// The polarity and trigger mode bits of each override.
+  static mut overrideFlags: u16[16];
+}
+
+/// The MADT parser and its accessors.
+namespace Acpi::Madt {
+  /// Capacity of the IOAPIC arrays in `MadtState`. It must equal the array size
+  /// there, which has to be an integer literal.
+  const MAX_IOAPICS: u64 = 8;
+
+  /// Capacity of the override arrays in `MadtState`. It must equal the array
+  /// size there.
+  const MAX_OVERRIDES: u64 = 16;
+
+  /// "APIC" read as a little-endian 32-bit integer: the signature of the MADT.
+  const SIGNATURE: u64 = 0x43495041;
+
+  /// Offset of the 32-bit local APIC physical address in the MADT.
+  const LAPIC_ADDRESS_OFFSET: u64 = 36;
+
+  /// Offset of the 32-bit MADT flags word.
+  const FLAGS_OFFSET: u64 = 40;
+
+  /// Offset where the variable-length MADT entries start.
+  const ENTRIES_OFFSET: u64 = 44;
+
+  /// MADT entry type 0: a processor local APIC.
+  const ENTRY_LOCAL_APIC: u8 = 0;
+
+  /// MADT entry type 1: an I/O APIC.
+  const ENTRY_IOAPIC: u8 = 1;
+
+  /// MADT entry type 2: an interrupt source override.
+  const ENTRY_INTERRUPT_SOURCE_OVERRIDE: u8 = 2;
+
+  /// MADT entry type 5: a 64-bit replacement for the local APIC address.
+  const ENTRY_LOCAL_APIC_ADDRESS_OVERRIDE: u8 = 5;
+
+  /// Bit 0 of a local APIC entry's flags: the processor can be used.
+  const LOCAL_APIC_ENABLED: u64 = 0x1;
+
+  /// Bit 0 of the MADT flags: the machine also has a dual 8259 setup.
+  const PC_AT_COMPATIBLE: u64 = 0x1;
+
+  /// Interrupt source override flags: polarity in bits 0-1, trigger mode in
+  /// bits 2-3. Zero in either field means "as the bus specifies", which for
+  /// ISA is active high and edge triggered.
+  const FLAGS_POLARITY_MASK: u16 = 0x3;
+
+  /// Bits 2-3 of override flags: the trigger mode field.
+  const FLAGS_TRIGGER_MASK: u16 = 0xC;
+
+  /// Polarity field value `01`.
+  const POLARITY_ACTIVE_HIGH: u16 = 0x1;
+
+  /// Polarity field value `11`.
+  const POLARITY_ACTIVE_LOW: u16 = 0x3;
+
+  /// Trigger field value `01`, already shifted into bits 2-3.
+  const TRIGGER_EDGE: u16 = 0x4;
+
+  /// Trigger field value `11`, already shifted into bits 2-3.
+  const TRIGGER_LEVEL: u16 = 0xC;
+
+  /// Walks the MADT entries and fills the state. Entry types this kernel
+  /// does not use are skipped by their length byte. Panics on a bad header
+  /// or checksum and on a malformed entry.
+  function read(madt: *mut u8): void {
+    MadtState::madtAddress = @integerFromPointer(madt) - Boot::Hhdm::offset();
+
+    if (!Table::isTableValid(madt)) {
+      @panic("acpi: bad MADT");
+    }
+
+    MadtState::lapicAddress = Table::readU32(madt, LAPIC_ADDRESS_OFFSET) as u64;
+    MadtState::madtFlags = Table::readU32(madt, FLAGS_OFFSET) as u64;
+
+    let length: u64 = Table::readU32(madt, Table::HEADER_LENGTH_OFFSET) as u64;
+    let mut offset: u64 = ENTRIES_OFFSET;
+
+    while (offset + 2 <= length) {
+      let kind: u8 = Table::readU8(madt, offset);
+      let size: u64 = Table::readU8(madt, offset + 1) as u64;
+
+      if (size < 2 || offset + size > length) {
+        @panic("acpi: malformed MADT entry");
+      }
+
+      readEntry(madt + offset, kind, size);
+      offset += size;
+    }
+  }
+
+  /// Handles one MADT entry of `size` bytes at `entry`. Entries that are too
+  /// short for their type, and types the kernel does not use, are ignored.
+  function readEntry(entry: *mut u8, kind: u8, size: u64): void {
+    if (kind == ENTRY_LOCAL_APIC && size >= 8) {
+      let flags: u64 = Table::readU32(entry, 4) as u64;
+
+      MadtState::processorsTotal += 1;
+
+      if ((flags & LOCAL_APIC_ENABLED) != 0) {
+        MadtState::processorsEnabled += 1;
+      }
+    } else if (kind == ENTRY_IOAPIC && size >= 12) {
+      addIoapic(Table::readU8(entry, 2), Table::readU32(entry, 4), Table::readU32(entry, 8));
+    } else if (kind == ENTRY_INTERRUPT_SOURCE_OVERRIDE && size >= 10) {
+      addOverride(Table::readU8(entry, 3), Table::readU32(entry, 4), Table::readU16(entry, 8));
+    } else if (kind == ENTRY_LOCAL_APIC_ADDRESS_OVERRIDE && size >= 12) {
+      MadtState::lapicAddress = Table::readU64(entry, 4);
+    }
+  }
+
+  /// Records an IOAPIC. Panics when the table is full.
+  function addIoapic(id: u8, address: u32, gsiBase: u32): void {
+    let index: u64 = MadtState::ioapicCount;
+
+    if (index == MAX_IOAPICS) {
+      @panic("acpi: more IOAPICs than the kernel tracks");
+    }
+
+    @write<u8>((&mut MadtState::ioapicIds as *mut u8) + index, id);
+    @write<u32>((&mut MadtState::ioapicAddresses as *mut u32) + index, address);
+    @write<u32>((&mut MadtState::ioapicGsiBases as *mut u32) + index, gsiBase);
+
+    MadtState::ioapicCount = index + 1;
+  }
+
+  /// Records an interrupt source override. Panics when the table is full.
+  function addOverride(source: u8, gsi: u32, flags: u16): void {
+    let index: u64 = MadtState::overrideCount;
+
+    if (index == MAX_OVERRIDES) {
+      @panic("acpi: more interrupt overrides than the kernel tracks");
+    }
+
+    @write<u8>((&mut MadtState::overrideSources as *mut u8) + index, source);
+    @write<u32>((&mut MadtState::overrideGsis as *mut u32) + index, gsi);
+    @write<u16>((&mut MadtState::overrideFlags as *mut u16) + index, flags);
+
+    MadtState::overrideCount = index + 1;
+  }
+
+  /// Physical address of the MADT.
+  function address(): u64 {
+    return MadtState::madtAddress;
+  }
+
+  /// Number of IOAPICs the MADT lists.
+  function ioapicCount(): u64 {
+    return MadtState::ioapicCount;
+  }
+
+  /// The IOAPIC id from the MADT entry of IOAPIC `index`.
+  function ioapicId(index: u64): u8 {
+    return *((&mut MadtState::ioapicIds as *mut u8) + index);
+  }
+
+  /// The physical address of IOAPIC `index`.
+  function ioapicAddress(index: u64): u64 {
+    return *((&mut MadtState::ioapicAddresses as *mut u32) + index) as u64;
+  }
+
+  /// The first global system interrupt (GSI) IOAPIC `index` serves.
+  function ioapicGsiBase(index: u64): u32 {
+    return *((&mut MadtState::ioapicGsiBases as *mut u32) + index);
+  }
+
+  /// The global system interrupt an ISA interrupt request line is wired to:
+  /// the line number itself unless the MADT has an override for it.
+  function isaIrqGsi(irq: u8): u32 {
+    let index: u64 = findOverride(irq);
+
+    if (index == MAX_OVERRIDES) {
+      return irq as u32;
+    }
+
+    return *((&mut MadtState::overrideGsis as *mut u32) + index);
+  }
+
+  /// The override flags of an ISA line, or zero when the MADT has none.
+  /// Zero means ISA defaults: active high, edge triggered.
+  function isaIrqFlags(irq: u8): u16 {
+    let index: u64 = findOverride(irq);
+
+    if (index == MAX_OVERRIDES) {
+      return 0;
+    }
+
+    return *((&mut MadtState::overrideFlags as *mut u16) + index);
+  }
+
+  /// True when override flags ask for an active low line. Bus default and
+  /// active high both give false, which is what ISA wants.
+  function flagsActiveLow(flags: u16): boolean {
+    return (flags & FLAGS_POLARITY_MASK) == POLARITY_ACTIVE_LOW;
+  }
+
+  /// True when override flags ask for a level triggered line. Bus default and
+  /// edge both give false, which is what ISA wants.
+  function flagsLevelTriggered(flags: u16): boolean {
+    return (flags & FLAGS_TRIGGER_MASK) == TRIGGER_LEVEL;
+  }
+
+  /// The index of the override for ISA line `irq`, or MAX_OVERRIDES.
+  function findOverride(irq: u8): u64 {
+    let mut index: u64 = 0;
+
+    while (index < MadtState::overrideCount) {
+      if (*((&mut MadtState::overrideSources as *mut u8) + index) == irq) {
+        return index;
+      }
+
+      index += 1;
+    }
+
+    return MAX_OVERRIDES;
+  }
+
+  /// Prints the MADT contents: the summary line, then one line per IOAPIC and
+  /// one per override.
+  function report(): void {
+    Drivers::Console::write("madt: lapic ");
+    Drivers::Console::writeHex(MadtState::lapicAddress);
+    Drivers::Console::write(", ");
+    Drivers::Console::writeDecimal(MadtState::processorsEnabled);
+    Drivers::Console::write(" of ");
+    Drivers::Console::writeDecimal(MadtState::processorsTotal);
+    Drivers::Console::write(" processors enabled, ");
+    Drivers::Console::write((MadtState::madtFlags & PC_AT_COMPATIBLE) != 0 ? "8259 present" : "no 8259");
+    Drivers::Console::write(", ");
+    Drivers::Console::writeDecimal(MadtState::ioapicCount);
+    Drivers::Console::write(" ioapic, ");
+    Drivers::Console::writeDecimal(MadtState::overrideCount);
+    Drivers::Console::writeLine(" overrides");
+
+    let mut index: u64 = 0;
+
+    while (index < MadtState::ioapicCount) {
+      Drivers::Console::write("madt: ioapic id ");
+      Drivers::Console::writeDecimal(ioapicId(index) as u64);
+      Drivers::Console::write(" at ");
+      Drivers::Console::writeHex(ioapicAddress(index));
+      Drivers::Console::write(", gsi base ");
+      Drivers::Console::writeDecimal(ioapicGsiBase(index) as u64);
+      Drivers::Console::writeLine("");
+      index += 1;
+    }
+
+    index = 0;
+
+    while (index < MadtState::overrideCount) {
+      reportOverride(index);
+      index += 1;
+    }
+  }
+
+  /// Prints one override line for the boot log.
+  function reportOverride(index: u64): void {
+    let source: u8 = *((&mut MadtState::overrideSources as *mut u8) + index);
+    let flags: u16 = *((&mut MadtState::overrideFlags as *mut u16) + index);
+
+    Drivers::Console::write("madt: override ISA IRQ ");
+    Drivers::Console::writeDecimal(source as u64);
+    Drivers::Console::write(" -> GSI ");
+    Drivers::Console::writeDecimal(*((&mut MadtState::overrideGsis as *mut u32) + index) as u64);
+    Drivers::Console::write(", ");
+    Drivers::Console::write(polarityName(flags));
+    Drivers::Console::write(", ");
+    Drivers::Console::write(triggerName(flags));
+    Drivers::Console::writeLine("");
+  }
+
+  /// Text for the polarity bits of override flags.
+  function polarityName(flags: u16): str {
+    let polarity: u16 = flags & FLAGS_POLARITY_MASK;
+
+    if (polarity == POLARITY_ACTIVE_HIGH) {
+      return "active high";
+    }
+
+    if (polarity == POLARITY_ACTIVE_LOW) {
+      return "active low";
+    }
+
+    return "default polarity";
+  }
+
+  /// Text for the trigger mode bits of override flags.
+  function triggerName(flags: u16): str {
+    let trigger: u16 = flags & FLAGS_TRIGGER_MASK;
+
+    if (trigger == TRIGGER_EDGE) {
+      return "edge";
+    }
+
+    if (trigger == TRIGGER_LEVEL) {
+      return "level";
+    }
+
+    return "default trigger";
+  }
+}

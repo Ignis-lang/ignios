@@ -1,0 +1,109 @@
+//!
+//! # ACPI Root Table
+//!
+//! The XSDT (or the RSDT on ACPI 1.0 machines): the array of pointers to every
+//! other table.
+//!
+//! ## Overview
+//!
+//! Every entry is the physical address of a table, 8 bytes wide in the XSDT
+//! and 4 bytes wide in the RSDT. `open` prefers the XSDT when the RSDP names
+//! one and checks the root table's header. `findTable` then walks the entries
+//! and returns the first table with a given signature.
+//!
+//! ```text
+//!   RSDP  ──XSDT address != 0──►  XSDT (8-byte entries)
+//!    │                              │
+//!    └───── otherwise ───────►  RSDT (4-byte entries)
+//!                                   │
+//!                     each entry: physical address of a table
+//!                                   ▼
+//!                       table whose signature matches
+//! ```
+//!
+//! Base revision 4 of the Limine protocol guarantees that the RSDP, the root
+//! table and every table they list are inside memory the direct map covers,
+//! so the physical addresses are reached through `Boot::Hhdm::toVirtual`.
+//!
+//! See concept doc 12.
+
+import Boot from "@boot";
+import _ from "./rsdp";
+import _ from "./table";
+
+/// The root table chosen by `open`.
+record XsdtState {
+  /// Physical address of the XSDT or the RSDT.
+  static mut rootAddress: u64 = 0;
+
+  /// True when the root table is the XSDT (8-byte entries), false for the RSDT
+  /// (4-byte entries).
+  static mut rootUsesXsdt: boolean = false;
+
+  /// Number of table pointers in the root table.
+  static mut rootEntryCount: u64 = 0;
+}
+
+/// The root table reader.
+namespace Acpi::Xsdt {
+  /// Picks the XSDT when the RSDP names one, otherwise the RSDT, checks its
+  /// header and counts its entries. `Acpi::Rsdp::read` must have run.
+  function open(): void {
+    let xsdt: u64 = Rsdp::xsdtAddress();
+
+    if (xsdt != 0) {
+      XsdtState::rootAddress = xsdt;
+      XsdtState::rootUsesXsdt = true;
+    } else {
+      XsdtState::rootAddress = Rsdp::rsdtAddress();
+      XsdtState::rootUsesXsdt = false;
+    }
+
+    let root: *mut u8 = Boot::Hhdm::toVirtual(XsdtState::rootAddress);
+
+    if (!Table::isTableValid(root)) {
+      @panic("acpi: bad root table");
+    }
+
+    let entrySize: u64 = XsdtState::rootUsesXsdt ? 8 : 4;
+
+    XsdtState::rootEntryCount = (Table::readU32(root, Table::HEADER_LENGTH_OFFSET) as u64 - Table::HEADER_SIZE) / entrySize;
+  }
+
+  /// The virtual address of the first table with `signature` listed in the
+  /// root table, or null when none matches.
+  function findTable(signature: u64): *mut u8 {
+    let root: *mut u8 = Boot::Hhdm::toVirtual(XsdtState::rootAddress);
+    let entrySize: u64 = XsdtState::rootUsesXsdt ? 8 : 4;
+
+    let mut index: u64 = 0;
+
+    while (index < XsdtState::rootEntryCount) {
+      let physical: u64 = Table::readLittleEndian(root, Table::HEADER_SIZE + index * entrySize, entrySize);
+      let table: *mut u8 = Boot::Hhdm::toVirtual(physical);
+
+      if (Table::readU32(table, 0) as u64 == signature) {
+        return table;
+      }
+
+      index += 1;
+    }
+
+    return null;
+  }
+
+  /// Physical address of the XSDT or the RSDT.
+  function address(): u64 {
+    return XsdtState::rootAddress;
+  }
+
+  /// True when the root table is the XSDT, false for the RSDT.
+  function usesXsdt(): boolean {
+    return XsdtState::rootUsesXsdt;
+  }
+
+  /// Number of table pointers in the root table.
+  function entryCount(): u64 {
+    return XsdtState::rootEntryCount;
+  }
+}

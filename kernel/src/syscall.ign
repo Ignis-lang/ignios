@@ -64,9 +64,9 @@
 
 import Drivers from "@drivers";
 import Mm from "@mm";
+import Time from "@time";
 import Process from "./process";
 import Scheduler from "./scheduler";
-import Timer from "./timer";
 
 /// The number-to-operation table of the Linux ABI and a scratch buffer.
 record SyscallState {
@@ -149,7 +149,7 @@ export namespace Syscall {
   /// 10^9.
   const NANOSECONDS_PER_SECOND: u64 = 1000000000;
 
-  /// 10^7 ns = 10 ms, one tick of the 100 Hz timer (`Timer::FREQUENCY`).
+  /// 10^7 ns = 10 ms, one tick of the 100 Hz timer (`Time::Timer::FREQUENCY`).
   const NANOSECONDS_PER_TICK: u64 = 10000000;
 
   /// Longest sleep in seconds, so the tick count cannot overflow.
@@ -266,7 +266,7 @@ export namespace Syscall {
       seconds = MAX_SLEEP_SECONDS;
     }
 
-    let ticks: u64 = seconds * Timer::FREQUENCY + ((time.nanoseconds as u64) + NANOSECONDS_PER_TICK - 1) / NANOSECONDS_PER_TICK;
+    let ticks: u64 = seconds * Time::Timer::FREQUENCY + ((time.nanoseconds as u64) + NANOSECONDS_PER_TICK - 1) / NANOSECONDS_PER_TICK;
 
     Scheduler::sleep(ticks);
 

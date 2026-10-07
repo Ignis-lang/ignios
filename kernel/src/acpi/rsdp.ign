@@ -1,0 +1,124 @@
+//!
+//! # ACPI RSDP
+//!
+//! The Root System Description Pointer: the one structure Limine hands over,
+//! from which every other table is reached.
+//!
+//! ## Overview
+//!
+//! Limine answers the RSDP request with a higher half direct map address (base
+//! revision 4 and later). `read` checks the signature and the checksums and
+//! keeps the addresses of the RSDT and of the XSDT. Layout (the ACPI 2.0+
+//! form; the first 20 bytes alone are the 1.0 form):
+//!
+//! ```text
+//!   offset  size  field
+//!    0       8    signature "RSD PTR "
+//!    8       1    checksum of bytes 0..19 (sum is 0 mod 256)
+//!    9       6    OEM id
+//!   15       1    revision (0 = ACPI 1.0, 2 = ACPI 2.0 and later)
+//!   16       4    RSDT physical address
+//!   20       4    length of the whole structure (revision 2 and later)
+//!   24       8    XSDT physical address
+//!   32       1    extended checksum over `length` bytes
+//!   33       3    reserved
+//! ```
+//!
+//! See concept doc 12 and the ACPI specification, "Root System Description
+//! Pointer (RSDP)".
+
+import Boot from "@boot";
+import _ from "./table";
+
+/// What `read` learned.
+record RsdpState {
+  /// Direct-map pointer to the RSDP.
+  static mut pointer: *mut u8 = null;
+
+  /// The RSDP address with the direct map offset removed, for display.
+  static mut physical: u64 = 0;
+
+  /// RSDP revision: 0 for ACPI 1.0, 2 for ACPI 2.0 and later.
+  static mut revision: u64 = 0;
+
+  /// Physical address of the XSDT, or 0 when the RSDP is older than revision 2
+  /// or names none.
+  static mut xsdtAddress: u64 = 0;
+
+  /// Physical address of the RSDT.
+  static mut rsdtAddress: u64 = 0;
+}
+
+/// The RSDP reader.
+namespace Acpi::Rsdp {
+  /// "RSD PTR " read as a little-endian 64-bit integer.
+  const SIGNATURE: u64 = 0x2052545020445352;
+
+  /// Size of the ACPI 1.0 RSDP, which its first checksum covers.
+  const V1_LENGTH: u64 = 20;
+
+  /// Offset of the revision byte in the RSDP.
+  const REVISION_OFFSET: u64 = 15;
+
+  /// Offset of the 32-bit RSDT address in the RSDP.
+  const RSDT_OFFSET: u64 = 16;
+
+  /// Offset of the 32-bit structure length in a revision 2 RSDP.
+  const LENGTH_OFFSET: u64 = 20;
+
+  /// Offset of the 64-bit XSDT address in a revision 2 RSDP.
+  const XSDT_OFFSET: u64 = 24;
+
+  /// Offset of the 6-byte OEM id in the RSDP, printed in the boot log.
+  const OEM_OFFSET: u64 = 9;
+
+  /// Validates the RSDP and records its revision and the addresses of the
+  /// root tables. Panics on a bad signature or checksum.
+  function read(address: *mut u8): void {
+    if (Table::readU64(address, 0) != SIGNATURE) {
+      @panic("acpi: bad RSDP signature");
+    }
+
+    let revision: u64 = Table::readU8(address, REVISION_OFFSET) as u64;
+    let mut length: u64 = V1_LENGTH;
+
+    if (revision >= 2) {
+      length = Table::readU32(address, LENGTH_OFFSET) as u64;
+    }
+
+    if (!Table::checksumValid(address, V1_LENGTH) || (revision >= 2 && !Table::checksumValid(address, length))) {
+      @panic("acpi: bad RSDP checksum");
+    }
+
+    RsdpState::pointer = address;
+    RsdpState::physical = @integerFromPointer(address) - Boot::Hhdm::offset();
+    RsdpState::revision = revision;
+    RsdpState::xsdtAddress = revision >= 2 ? Table::readU64(address, XSDT_OFFSET) : 0;
+    RsdpState::rsdtAddress = Table::readU32(address, RSDT_OFFSET) as u64;
+  }
+
+  /// Direct-map pointer to the RSDP.
+  function pointer(): *mut u8 {
+    return RsdpState::pointer;
+  }
+
+  /// The RSDP address with the direct map offset removed.
+  function physicalAddress(): u64 {
+    return RsdpState::physical;
+  }
+
+  /// RSDP revision: 0 for ACPI 1.0, 2 for ACPI 2.0 and later.
+  function revision(): u64 {
+    return RsdpState::revision;
+  }
+
+  /// Physical address of the XSDT, or 0 when there is none.
+  function xsdtAddress(): u64 {
+    return RsdpState::xsdtAddress;
+  }
+
+  /// Physical address of the RSDT.
+  function rsdtAddress(): u64 {
+    return RsdpState::rsdtAddress;
+  }
+}

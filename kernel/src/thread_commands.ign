@@ -28,8 +28,8 @@
 
 import Arch from "@arch";
 import Drivers from "@drivers";
+import Time from "@time";
 import Scheduler from "./scheduler";
-import Timer from "./timer";
 
 /// The commands.
 export namespace ThreadCommands {
@@ -107,11 +107,11 @@ export namespace ThreadCommands {
   /// Spins for `duration` ticks without yielding, announcing the start and
   /// the end.
   function busySpinner(duration: u64): void {
-    let end: u64 = Timer::ticks() + duration;
+    let end: u64 = Time::Timer::ticks() + duration;
 
     printTick("spinning");
 
-    while (Timer::ticks() < end) {
+    while (Time::Timer::ticks() < end) {
     }
 
     printTick("done");
@@ -127,7 +127,7 @@ export namespace ThreadCommands {
     Drivers::Console::write(": ");
     Drivers::Console::write(label);
     Drivers::Console::write(" at tick ");
-    Drivers::Console::writeDecimal(Timer::ticks());
+    Drivers::Console::writeDecimal(Time::Timer::ticks());
     Drivers::Console::writeLine("");
 
     Arch::Cpu::restoreInterrupts(saved);

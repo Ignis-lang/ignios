@@ -19,8 +19,8 @@
 import Arch from "@arch";
 import Boot from "@boot";
 import Mm from "@mm";
+import Time from "@time";
 import Scheduler from "./scheduler";
-import Timer from "./timer";
 
 /// Results the test threads report back to the boot thread.
 record SchedulerTestState {
@@ -150,11 +150,11 @@ export namespace SchedulerTest {
     let first: u64 = Scheduler::spawn(Arch::ContextAsm::ignis_function_address(spinner), 0);
     let second: u64 = Scheduler::spawn(Arch::ContextAsm::ignis_function_address(spinner), 1);
 
-    let end: u64 = Timer::ticks() + PREEMPTION_TICKS;
+    let end: u64 = Time::Timer::ticks() + PREEMPTION_TICKS;
 
     Arch::Cpu::enableInterrupts();
 
-    while (Timer::ticks() < end) {
+    while (Time::Timer::ticks() < end) {
       Arch::Cpu::waitForInterrupt();
     }
 
@@ -333,9 +333,9 @@ export namespace SchedulerTest {
 
   /// Sleeps `ticks` ticks and records how long that took.
   function sleepWorker(ticks: u64): void {
-    let start: u64 = Timer::ticks();
+    let start: u64 = Time::Timer::ticks();
 
     Scheduler::sleep(ticks);
-    SchedulerTestState::sleptTicks = Timer::ticks() - start;
+    SchedulerTestState::sleptTicks = Time::Timer::ticks() - start;
   }
 }

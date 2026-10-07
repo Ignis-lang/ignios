@@ -62,3 +62,5 @@ emit = ["c"]
 "@boot" = "kernel/src/boot"
 "@drivers" = "kernel/src/drivers"
 "@mm" = "kernel/src/mm"
+"@acpi" = "kernel/src/acpi"
+"@time" = "kernel/src/time"

@@ -72,13 +72,14 @@
 //! the kernel ends there. There is no unwinding: the machine stops in
 //! `Arch::Cpu::haltForever`.
 
+import Acpi from "@acpi";
 import Apic from "@apic";
 import Arch from "@arch";
 import Boot from "@boot";
 import Drivers from "@drivers";
 import Lib from "@lib";
 import Mm from "@mm";
-import Acpi from "./acpi";
+import Time from "@time";
 import Interrupts from "./interrupts";
 import Process from "./process";
 import Programs from "./programs";
@@ -87,7 +88,6 @@ import SchedulerTest from "./scheduler_test";
 import Syscall from "./syscall";
 import ThreadCommands from "./thread_commands";
 import UserTest from "./user_test";
-import Timer from "./timer";
 
 /// Set by the first panic so a second panic knows the console path already
 /// failed or is in use.
@@ -334,7 +334,7 @@ function reportLapic(): void {
 function reportIoapic(keyboardGsi: u32): void {
   let mut index: u64 = 0;
 
-  while (index < Acpi::ioapicCount()) {
+  while (index < Acpi::Madt::ioapicCount()) {
     Drivers::Console::write("ioapic: id ");
     Drivers::Console::writeDecimal(Apic::Ioapic::id(index) as u64);
     Drivers::Console::write(", version ");
@@ -342,7 +342,7 @@ function reportIoapic(keyboardGsi: u32): void {
     Drivers::Console::write(", ");
     Drivers::Console::writeDecimal(Apic::Ioapic::entryCount(index));
     Drivers::Console::write(" redirection entries, gsi base ");
-    Drivers::Console::writeDecimal(Acpi::ioapicGsiBase(index) as u64);
+    Drivers::Console::writeDecimal(Acpi::Madt::ioapicGsiBase(index) as u64);
     Drivers::Console::writeLine("");
     index += 1;
   }
@@ -365,22 +365,22 @@ function reportIoapic(keyboardGsi: u32): void {
 /// Calibrates the APIC timer against the PIT, starts it, checks that ticks
 /// arrive and reports the numbers. See `timer.ign`.
 function initializeTimer(): void {
-  Timer::initialize(Interrupts::TIMER_VECTOR as u8);
+  Time::Timer::initialize(Interrupts::TIMER_VECTOR as u8);
 
   Drivers::Console::write("timer: calibrated on PIT channel 2: ");
-  Drivers::Console::writeDecimal(Timer::countRate());
+  Drivers::Console::writeDecimal(Time::Timer::countRate());
   Drivers::Console::write(" Hz (divide 16), initial count ");
-  Drivers::Console::writeDecimal(Timer::initialCount());
+  Drivers::Console::writeDecimal(Time::Timer::initialCount());
   Drivers::Console::write(", ");
-  Drivers::Console::writeDecimal(Timer::FREQUENCY);
+  Drivers::Console::writeDecimal(Time::Timer::FREQUENCY);
   Drivers::Console::write(" Hz periodic, vector ");
   Drivers::Console::writeHex(Interrupts::TIMER_VECTOR);
   Drivers::Console::writeLine("");
 
-  Timer::selfTest();
+  Time::Timer::selfTest();
 
   Drivers::Console::write("timer: self-test ok, ");
-  Drivers::Console::writeDecimal(Timer::ticks());
+  Drivers::Console::writeDecimal(Time::Timer::ticks());
   Drivers::Console::writeLine(" ticks so far");
 }
 
@@ -388,7 +388,7 @@ function initializeTimer(): void {
 /// fraction is zero-padded by hand to three digits, because `writeDecimal`
 /// does no padding.
 function printUptime(): void {
-  let milliseconds: u64 = Timer::uptimeMilliseconds();
+  let milliseconds: u64 = Time::Timer::uptimeMilliseconds();
   let fraction: u64 = milliseconds % 1000;
 
   Drivers::Console::write("uptime: ");
@@ -405,9 +405,9 @@ function printUptime(): void {
 
   Drivers::Console::writeDecimal(fraction);
   Drivers::Console::write(" s, ");
-  Drivers::Console::writeDecimal(Timer::ticks());
+  Drivers::Console::writeDecimal(Time::Timer::ticks());
   Drivers::Console::write(" ticks at ");
-  Drivers::Console::writeDecimal(Timer::FREQUENCY);
+  Drivers::Console::writeDecimal(Time::Timer::FREQUENCY);
   Drivers::Console::writeLine(" Hz");
 }
 

@@ -82,7 +82,7 @@
 //!
 //! ```text
 //!   LAPIC timer ──► vector 0x30 ──► Interrupts::dispatch
-//!                                     ├─ Timer::handleTick       ticks += 1
+//!                                     ├─ Time::Timer::handleTick       ticks += 1
 //!                                     ├─ Apic::Lapic::endOfInterrupt
 //!                                     └─ Scheduler::onTick       (interrupts still off)
 //!                                           ├─ count the tick against the thread
@@ -99,7 +99,7 @@
 
 import Arch from "@arch";
 import Mm from "@mm";
-import Timer from "./timer";
+import Time from "@time";
 
 /// One entry of the thread table.
 @cLayout
@@ -350,7 +350,7 @@ export namespace Scheduler {
       @panic("scheduler: the idle thread cannot sleep");
     }
 
-    (*current).wakeTick = Timer::ticks() + ticks;
+    (*current).wakeTick = Time::Timer::ticks() + ticks;
     (*current).state = BLOCKED;
     switchToNext();
 
@@ -629,7 +629,7 @@ export namespace Scheduler {
 
   /// Moves every sleeper whose time has come to the run queue.
   function wakeSleepers(): void {
-    let now: u64 = Timer::ticks();
+    let now: u64 = Time::Timer::ticks();
     let mut slot: u64 = 0;
 
     while (slot < MAX_THREADS) {

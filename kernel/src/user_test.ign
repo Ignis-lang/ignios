@@ -23,9 +23,9 @@
 
 import Drivers from "@drivers";
 import Mm from "@mm";
+import Time from "@time";
 import Process from "./process";
 import Programs from "./programs";
-import Timer from "./timer";
 
 /// Functions implemented in `user_test_asm.S`.
 extern UserTestAsm {
@@ -107,13 +107,13 @@ export namespace UserTest {
 
     Drivers::Console::writeLine("user: SYSCALL returned -ENOSYS by SYSRET with every other register intact");
 
-    let ticksBefore: u64 = Timer::ticks();
+    let ticksBefore: u64 = Time::Timer::ticks();
 
     if (runProgram(SPIN) != 7) {
       @panic("user test: the spinning program did not finish");
     }
 
-    let ticks: u64 = Timer::ticks() - ticksBefore;
+    let ticks: u64 = Time::Timer::ticks() - ticksBefore;
 
     if (ticks == 0) {
       @panic("user test: no timer tick arrived while a program ran in ring 3");
@@ -177,7 +177,7 @@ export namespace UserTest {
   /// Runs the system call program, which prints from ring 3 and checks the
   /// result of every call, including the error ones.
   function runSyscalls(): void {
-    let ticksBefore: u64 = Timer::ticks();
+    let ticksBefore: u64 = Time::Timer::ticks();
     let status: u64 = runProgram(SYSCALLS);
 
     if (status != 0) {
@@ -187,7 +187,7 @@ export namespace UserTest {
       @panic("user test: a system call returned the wrong value");
     }
 
-    if (Timer::ticks() - ticksBefore < SYSCALLS_SLEEP_TICKS) {
+    if (Time::Timer::ticks() - ticksBefore < SYSCALLS_SLEEP_TICKS) {
       @panic("user test: nanosleep returned too early");
     }
 

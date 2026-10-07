@@ -55,7 +55,7 @@ record TimerState {
 }
 
 /// The timer API.
-export namespace Timer {
+namespace Time::Timer {
   /// Ticks per second.
   const FREQUENCY: u64 = 100;
 
