@@ -1,11 +1,32 @@
-//! Access to physical memory through Limine's higher half direct map, which
-//! maps physical address `p` at `offset + p`. The kernel's own page tables
-//! keep the same offset, so these pointers stay valid across the CR3 switch.
+//!
+//! # Higher Half Direct Map
+//!
+//! Access to any physical address through Limine's direct map.
+//!
+//! ## Overview
+//!
+//! Limine maps all physical memory at a fixed virtual offset, so physical
+//! address `p` is readable at virtual address `offset + p`:
+//!
+//! ```text
+//!   physical                         virtual
+//!   0x0000_0000_0000_0000  ───────►  offset + 0x0
+//!   0x0000_0000_1234_5000  ───────►  offset + 0x1234_5000
+//!   ...                              (offset is typically 0xffff800000000000)
+//! ```
+//!
+//! The kernel's own page tables (`vmm.ign`) rebuild the same mapping with the
+//! same offset, so pointers made here stay valid across the CR3 switch in
+//! `Vmm::initialize`. The kernel uses it to edit page tables, read ACPI
+//! tables, touch memory-mapped device registers and hand out physical frames
+//! as ordinary pointers. See concept doc 09.
 
 import Limine from "./limine";
 
+/// Conversions between physical addresses and direct-map pointers.
 export namespace Hhdm {
-  /// The virtual address of physical address zero.
+  /// The virtual address of physical address zero. Panics when Limine provided
+  /// no direct map; the answer is read from the response on every call.
   function offset(): u64 {
     let response: *mut Limine::HhdmResponse = Limine::hhdm();
 
@@ -17,7 +38,9 @@ export namespace Hhdm {
   }
 
   /// A pointer to physical address `physical`. The address must lie in a
-  /// region the direct map covers.
+  /// region the direct map covers; this is not checked. The memory type of the
+  /// mapping is write-back, so device registers need the special mappings
+  /// `Vmm` provides instead.
   function toVirtual(physical: u64): *mut u8 {
     return @pointerFromInteger<*mut u8>(offset() + physical);
   }

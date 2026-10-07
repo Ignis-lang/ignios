@@ -1,41 +1,117 @@
-//! Scancode set 1 decoder with a US keyboard layout.
+//!
+//! # Keyboard Decoder
+//!
+//! A scancode set 1 decoder with a US keyboard layout.
+//!
+//! ## Overview
 //!
 //! `decode` takes the raw bytes the keyboard sends, in order, from whatever
 //! source reads them, and tracks the modifier keys between calls. It yields
 //! ASCII: printable characters, `\n` for Enter, `\t` for Tab and 0x08 for
-//! Backspace. Every other key, every release and every extended (0xE0) key
-//! but right Ctrl yields NONE.
+//! Backspace. Every other key, every key release and every extended (0xE0)
+//! key yields `NONE`. Releases and the extended Control key only update the
+//! modifier state.
+//!
+//! ## Scancode Set 1
+//!
+//! Pressing a key sends its make code. Releasing it sends the same code with
+//! bit 7 set (`code | 0x80`). A few keys send a prefix first:
+//!
+//! | Bytes                  | Meaning                                        |
+//! |------------------------|------------------------------------------------|
+//! | `0xE0 xx`              | extended key (right Ctrl is `E0 1D`, arrows, ...) |
+//! | `E1 1D 45 E1 9D C5`    | Pause: six bytes, no release code              |
+//!
+//! Make codes of the keys `translate` knows:
+//!
+//! ```text
+//!   02-0B   1 2 3 4 5 6 7 8 9 0     0C  -     0D  =     0E  Backspace
+//!   0F      Tab
+//!   10-19   q w e r t y u i o p     1A  [     1B  ]     1C  Enter
+//!   1D      Left Ctrl
+//!   1E-26   a s d f g h j k l       27  ;     28  '     29  `
+//!   2A      Left Shift              2B  \
+//!   2C-32   z x c v b n m           33  ,     34  .     35  /
+//!   36      Right Shift
+//!   39      Space                   3A  Caps Lock
+//! ```
+//!
+//! ## State Machine
+//!
+//! ```text
+//!   byte arrives
+//!     │
+//!     ├─ inside a Pause sequence? ── yes ─► skip it (5 bytes after E1)
+//!     ├─ E1? ───────────────────────────► start skipping 5 bytes
+//!     ├─ E0? ───────────────────────────► remember "extended" for next byte
+//!     ├─ extended key? ─────────────────► only right Ctrl changes state
+//!     ├─ modifier (Shift, Ctrl, Caps)? ─► update flags, no character
+//!     ├─ release? ──────────────────────► NONE
+//!     └─ otherwise ─────────────────────► translate(key) with Shift / Caps Lock
+//! ```
+//!
+//! See concept doc 06.
 
-/// The decoder state, one `static mut` per field.
+/// Decoder state kept between bytes. Every field is written only by `decode`.
 record KeyboardState {
+  /// True after an `0xE0` prefix, until the next byte arrives.
   static mut extended: boolean = false;
+
+  /// Bytes of the Pause sequence still to skip.
   static mut pauseBytesLeft: u8 = 0;
 
+  /// True while the left Shift key is down.
   static mut leftShift: boolean = false;
+
+  /// True while the right Shift key is down.
   static mut rightShift: boolean = false;
+
+  /// True while the left Ctrl key is down.
   static mut leftControl: boolean = false;
+
+  /// True while the right Ctrl key (`E0 1D`) is down.
   static mut rightControl: boolean = false;
+
+  /// The Caps Lock toggle, flipped on each key press.
   static mut capsLock: boolean = false;
+
+  /// True while the Caps Lock key is down, so the auto-repeat of a held key does
+  /// not toggle the lock again.
   static mut capsLockHeld: boolean = false;
 }
 
+/// The decoder API: `decode` is the only function the terminal needs.
 export namespace Keyboard {
   /// What `decode` returns for a byte that produces no character.
   const NONE: u8 = 0;
 
+  /// The character code `decode` returns for the Backspace key.
   const BACKSPACE: u8 = 0x08;
 
+  /// First byte of an extended key: `0xE0`.
   const EXTENDED_PREFIX: u8 = 0xE0;
+
+  /// First byte of the Pause sequence: `0xE1`.
   const PAUSE_PREFIX: u8 = 0xE1;
+
+  /// Bit 7 of a scancode byte: set on key release.
   const RELEASE: u8 = 0x80;
 
   /// The bytes that follow 0xE1 in the Pause sequence (E1 1D 45 E1 9D C5).
   /// They are skipped so the 0x1D in them is not read as Ctrl.
   const PAUSE_TRAILING_BYTES: u8 = 5;
 
+  /// Make code of the Control key (`0x1D`), also the second byte of right
+  /// Control (`E0 1D`).
   const KEY_CONTROL: u8 = 0x1D;
+
+  /// Make code of left Shift.
   const KEY_LEFT_SHIFT: u8 = 0x2A;
+
+  /// Make code of right Shift.
   const KEY_RIGHT_SHIFT: u8 = 0x36;
+
+  /// Make code of Caps Lock.
   const KEY_CAPS_LOCK: u8 = 0x3A;
 
   /// Feeds one scancode byte and returns the character it completes, or
@@ -100,6 +176,7 @@ export namespace Keyboard {
     return translate(key);
   }
 
+  /// True while either Shift key is down.
   function isShiftHeld(): boolean {
     return KeyboardState::leftShift || KeyboardState::rightShift;
   }
@@ -110,6 +187,7 @@ export namespace Keyboard {
     return KeyboardState::leftControl || KeyboardState::rightControl;
   }
 
+  /// True while Caps Lock is toggled on.
   function isCapsLockOn(): boolean {
     return KeyboardState::capsLock;
   }

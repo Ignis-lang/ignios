@@ -1,40 +1,122 @@
-//! Polled driver for the COM1 16550 UART.
+//!
+//! # Serial Port (COM1)
+//!
+//! A polled driver for the first 16550 UART, the kernel's debug channel.
+//!
+//! ## Overview
+//!
+//! COM1 is the first thing the kernel initializes and the last thing that
+//! still works after everything else has failed. QEMU connects it to the host
+//! terminal (`-serial stdio`) or to a file (`build/serial.log` in
+//! `make run-headless`). The driver never enables UART interrupts: every
+//! byte is sent by waiting for the transmitter to be empty.
 //!
 //! `write`, `writeLine`, `writeDecimal` and `writeHex` run with interrupts
 //! disabled, so the text of one call is never split by another thread's
 //! output. `writeByte` alone is not guarded.
+//!
+//! ## Register Map
+//!
+//! The UART has eight registers at consecutive ports from the base `0x3F8`.
+//! Offsets 0 and 1 change meaning while the DLAB bit of the line control
+//! register is set.
+//!
+//! ```text
+//!   port   offset  DLAB=0                   DLAB=1
+//!   0x3F8    0     data (read/write)        divisor low byte
+//!   0x3F9    1     interrupt enable         divisor high byte
+//!   0x3FA    2     FIFO control (write)     (same)
+//!   0x3FB    3     line control             (same)
+//!   0x3FC    4     modem control            (same)
+//!   0x3FD    5     line status              (same)
+//! ```
+//!
+//! Registers written by `initialize`:
+//!
+//! | Register     | Value  | Bits                                                      |
+//! |--------------|--------|-----------------------------------------------------------|
+//! | line control | `0x80` | bit 7 DLAB: expose the divisor latch                      |
+//! | divisor      | `0x0001` | 115200 / 1 = 115200 baud                                |
+//! | line control | `0x03` | bits 1:0 = 11 eight data bits, bit 2 = 0 one stop, bit 3 = 0 no parity |
+//! | FIFO control | `0xC7` | bit 0 enable FIFOs, bit 1 clear receive, bit 2 clear transmit, bits 7:6 = 11 trigger at 14 bytes |
+//! | modem control | `0x0B` | bit 0 DTR, bit 1 RTS, bit 3 OUT2 (gates the UART interrupt line on a PC) |
+//!
+//! Line status bit 5 (`0x20`, transmit holding register empty) says the UART
+//! can take another byte.
+//!
+//! ## Line Endings
+//!
+//! `write` sends `\r\n` for every `\n`, because serial terminals treat a bare
+//! line feed as "move down" without "return to column 0".
+//!
+//! See concept doc 06 and the National Semiconductor PC16550D datasheet.
 
 import Cpu from "./arch/x86_64/cpu";
 import Port from "./arch/x86_64/io";
 import Format from "./lib/format";
 
+/// The serial port API.
 export namespace Serial {
+  /// I/O port base of COM1. The register ports are `COM1 + offset`.
   const COM1: u16 = 0x3F8;
 
+  /// Offset 0: transmit/receive data. With DLAB set, the divisor low byte.
   const DATA: u16 = 0;
+
+  /// Offset 1: interrupt enable. With DLAB set, the divisor high byte.
   const INTERRUPT_ENABLE: u16 = 1;
+
+  /// Offset 2: FIFO control (write only).
   const FIFO_CONTROL: u16 = 2;
+
+  /// Offset 3: data format and the DLAB bit.
   const LINE_CONTROL: u16 = 3;
+
+  /// Offset 4: modem control outputs.
   const MODEM_CONTROL: u16 = 4;
+
+  /// Offset 5: line status, includes the transmitter-empty flag.
   const LINE_STATUS: u16 = 5;
 
+  /// Line control bit 7 (DLAB). While set, offsets 0 and 1 address the baud
+  /// rate divisor instead of the data and interrupt registers.
   const DIVISOR_LATCH_ACCESS: u8 = 0x80;
+
+  /// Line control value `0x03`: eight data bits, no parity, one stop bit (8N1).
   const EIGHT_BITS_NO_PARITY_ONE_STOP: u8 = 0x03;
+
+  /// FIFO control value `0xC7`: enable the FIFOs, clear both, interrupt trigger
+  /// level of 14 bytes.
   const FIFO_ENABLE_CLEAR_14_BYTES: u8 = 0xC7;
+
+  /// Modem control value `0x0B`: DTR (bit 0), RTS (bit 1) and OUT2 (bit 3).
   const DATA_TERMINAL_READY_REQUEST_TO_SEND_OUT2: u8 = 0x0B;
+
+  /// Line status bit 5: the transmit holding register can take another byte.
   const TRANSMIT_HOLDING_EMPTY: u8 = 0x20;
 
   /// Programs 115200 baud, 8N1 and the FIFOs, with UART interrupts off.
+  /// Must run before any other function of this namespace.
   function initialize(): void {
     Port::writeByte(COM1 + INTERRUPT_ENABLE, 0x00);
     Port::writeByte(COM1 + LINE_CONTROL, DIVISOR_LATCH_ACCESS);
+
+    // With DLAB set, offsets 0 and 1 are the divisor latch: low byte 1 and (next
+    // line) high byte 0 make the divisor 1, so 115200 / 1 = 115200 baud. The
+    // second write to INTERRUPT_ENABLE is the divisor high byte, not an
+    // interrupt mask.
     Port::writeByte(COM1 + DATA, 0x01);
     Port::writeByte(COM1 + INTERRUPT_ENABLE, 0x00);
+
+    // This write clears DLAB, which gives offsets 0 and 1 back to the data and
+    // interrupt enable registers.
     Port::writeByte(COM1 + LINE_CONTROL, EIGHT_BITS_NO_PARITY_ONE_STOP);
     Port::writeByte(COM1 + FIFO_CONTROL, FIFO_ENABLE_CLEAR_14_BYTES);
     Port::writeByte(COM1 + MODEM_CONTROL, DATA_TERMINAL_READY_REQUEST_TO_SEND_OUT2);
   }
 
+  /// Sends one raw byte, busy-waiting until the transmitter is ready. Does not
+  /// translate line endings and does not disable interrupts.
   function writeByte(value: u8): void {
     while ((Port::readByte(COM1 + LINE_STATUS) & TRANSMIT_HOLDING_EMPTY) == 0) {
     }
@@ -59,6 +141,7 @@ export namespace Serial {
     Cpu::restoreInterrupts(saved);
   }
 
+  /// Writes `text` followed by a newline, in one uninterrupted piece.
   function writeLine(text: str): void {
     let saved: u64 = Cpu::saveAndDisableInterrupts();
 
@@ -68,6 +151,7 @@ export namespace Serial {
     Cpu::restoreInterrupts(saved);
   }
 
+  /// Writes `value` in decimal (see `Format::decimal`).
   function writeDecimal(value: u64): void {
     let saved: u64 = Cpu::saveAndDisableInterrupts();
 
@@ -76,6 +160,7 @@ export namespace Serial {
     Cpu::restoreInterrupts(saved);
   }
 
+  /// Writes `value` as `0x` and 16 hex digits (see `Format::hexadecimal`).
   function writeHex(value: u64): void {
     let saved: u64 = Cpu::saveAndDisableInterrupts();
 

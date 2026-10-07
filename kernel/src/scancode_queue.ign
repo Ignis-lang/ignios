@@ -1,15 +1,48 @@
-//! A lock-free ring buffer of raw keyboard bytes between the IRQ1 handler,
-//! the only producer, and the terminal loop, the only consumer.
 //!
-//! Each side writes only its own index and reads the other's, so no lock is
-//! needed. Every access to the indices and the slots is volatile, which keeps
-//! the compiler from caching them across the interrupt and from moving the
-//! slot write after the index that publishes it. x86 does not reorder stores
-//! with other stores, so no fence is needed. A full queue drops the new byte.
+//! # Scancode Queue
+//!
+//! A lock-free ring buffer that carries raw keyboard bytes from the IRQ1
+//! handler to the terminal loop.
+//!
+//! ## Overview
+//!
+//! There is exactly one producer, the keyboard interrupt handler
+//! (`Ps2::handleInterrupt`), and exactly one consumer, `runTerminal` in
+//! `main.ign`. Each side writes only its own index and reads the other's, so
+//! no lock is needed. Every access to the indices and the slots is volatile,
+//! which keeps the compiler from caching them across the interrupt and from
+//! moving the slot write after the index that publishes it. x86 does not
+//! reorder stores with other stores, so no fence is needed. A full queue drops
+//! the new byte.
+//!
+//! ```text
+//!   slots (CAPACITY = 64, one is always left empty, so 63 bytes fit)
+//!
+//!        head                          tail
+//!         │                             │
+//!   ┌───┬─▼─┬───┬───┬───┬───┬───┬───┬──▼┬───┬───┐
+//!   │   │ a │ b │ c │ d │ e │ f │ g │   │   │   │
+//!   └───┴───┴───┴───┴───┴───┴───┴───┴───┴───┴───┘
+//!           ◄─────── queued bytes ───────►
+//!
+//!   push: write slot[tail], then publish tail = (tail + 1) & 63
+//!   pop:  read slot[head], then publish head = (head + 1) & 63
+//!   empty: head == tail          full: (tail + 1) & 63 == head
+//! ```
+//!
+//! The wrap-around uses `& (CAPACITY - 1)`, which is why `CAPACITY` has to be
+//! a power of two. See concept doc 06.
 
+/// The queue state. `head` is written only by the consumer and `tail` only by
+/// the producer.
 record ScancodeQueueState {
+  /// Index of the oldest queued byte, the next one `pop` returns.
   static mut head: u64 = 0;
+
+  /// Index of the next free slot, where `push` stores.
   static mut tail: u64 = 0;
+
+  /// The queued bytes. The size must equal `ScancodeQueue::CAPACITY`.
   static mut slots: u8[64] = [
     0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
     0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
@@ -18,12 +51,15 @@ record ScancodeQueueState {
   ];
 }
 
+/// The queue API: `push` from the interrupt handler, `isEmpty` and `pop` from
+/// the terminal loop.
 export namespace ScancodeQueue {
   /// Slot count. It must equal the array size in `ScancodeQueueState`, and
   /// be a power of two.
   const CAPACITY: u64 = 64;
 
-  /// Appends a byte. Called only from the interrupt handler.
+  /// Appends a byte. Called only from the interrupt handler. When the queue is
+  /// full the byte is dropped silently.
   function push(value: u8): void {
     let tail: u64 = @readVolatile<u64>(&mut ScancodeQueueState::tail as *mut u64);
     let next: u64 = (tail + 1) & (CAPACITY - 1);
@@ -55,6 +91,7 @@ export namespace ScancodeQueue {
     return value;
   }
 
+  /// Address of slot `index`.
   function slot(index: u64): *mut u8 {
     return (&mut ScancodeQueueState::slots as *mut u8) + index;
   }

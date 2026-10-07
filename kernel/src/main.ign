@@ -1,4 +1,76 @@
-//! IgniOS kernel entry point.
+//!
+//! # Kernel Entry Point
+//!
+//! `kmain`, the boot sequence, the panic handler and the interactive terminal.
+//!
+//! ## Overview
+//!
+//! Limine loads the kernel ELF, switches the CPU to 64-bit mode with paging
+//! on, answers the requests in `limine.ign` and jumps to `kmain` (the ELF
+//! entry point named in `kernel/linker.ld`). From there everything runs in
+//! ring 0 on the boot thread. When `kmain` reaches `runTerminal` the boot
+//! thread becomes the shell and never returns.
+//!
+//! State on entry (Limine protocol, x86-64): interrupts off (RFLAGS.IF clear),
+//! the 8259 PIC lines masked, Limine's own GDT loaded, a stack of at least
+//! 64 KiB in bootloader-reclaimable memory, the kernel mapped in the top 2 GiB
+//! (`0xffffffff80000000` and up). See concept doc 01.
+//!
+//! ## Boot Sequence
+//!
+//! Each step needs the ones above it. The right column names the file to read
+//! and the concept doc that explains the hardware.
+//!
+//! ```text
+//!   kmain
+//!   │
+//!   ├─ Serial::initialize ........ COM1 up, first log line      serial.ign       doc 06
+//!   ├─ Gdt::initialize ........... own GDT, TSS, CS/SS/DS       gdt.ign           doc 03
+//!   ├─ Idt::initialize ........... 50 gates (49 thunks + spur.) idt.ign           doc 04
+//!   ├─ Limine::isBaseRevisionSupported                          limine.ign        doc 01
+//!   ├─ Console::initialize ....... framebuffer text console     console.ign       doc 07
+//!   ├─ printBanner ............... banner, framebuffer, memory map
+//!   ├─ initializeMemory
+//!   │    ├─ Pmm::initialize ...... frame bitmap                 pmm.ign           doc 08
+//!   │    ├─ Vmm::initialize ...... own page tables, CR3 switch  vmm.ign           doc 09
+//!   │    ├─ Modules::initialize .. map Limine modules           modules.ign       doc 15
+//!   │    ├─ Heap::initialize ..... kernel heap                  heap.ign          doc 10
+//!   │    └─ AddressSpace::selfTest                              address_space.ign doc 14
+//!   ├─ Scheduler::initialize, Process::initialize, Syscall::initialize
+//!   ├─ UserMode::initialize ...... EFER.SCE, STAR/LSTAR/FMASK   usermode.ign      doc 14
+//!   ├─ Acpi::initialize/report ... RSDP, XSDT, MADT             acpi.ign          doc 12
+//!   ├─ Pic::initialize ........... remap and mask the 8259      pic.ign           doc 05
+//!   ├─ Lapic::initialize ......... local APIC on                lapic.ign         doc 05
+//!   ├─ Ioapic::initialize + routeIsa(keyboard)                  ioapic.ign        doc 12
+//!   ├─ initializeTimer ........... APIC timer, 100 Hz           timer.ign         doc 12
+//!   ├─ Context::selfTest, SchedulerTest::*                      scheduler_test.ign doc 13
+//!   ├─ Scheduler::enablePreemption
+//!   ├─ UserTest::run ............. ring 3 smoke tests           user_test.ign     doc 14
+//!   ├─ initializeKeyboard ........ 8042 enable, IRQ1 live       ps2.ign           doc 06
+//!   └─ runTerminal ............... prompt loop, never returns
+//! ```
+//!
+//! ## Where Output Goes
+//!
+//! Before the console exists, `kmain` logs to COM1 only (`Serial::write`).
+//! `Console::write` shows text on the framebuffer and mirrors every byte to
+//! COM1, so the serial log of a headless run contains the whole screen. The
+//! `docs/READING.md` guide annotates the complete boot log line by line.
+//!
+//! ## Terminal Commands
+//!
+//! | Command     | Effect                                                  |
+//! |-------------|---------------------------------------------------------|
+//! | `uptime`    | Time since the timer started, from the tick counter     |
+//! | `ps`        | Lists the kernel threads (`thread_commands.ign`)        |
+//! | `threads`   | Starts the demo threads (`thread_commands.ign`)         |
+//! | `run NAME`  | Runs the Limine module called NAME in ring 3            |
+//!
+//! ## Panics
+//!
+//! `onPanic` is registered with `@panicHandler`, so every `@panic(...)` call in
+//! the kernel ends there. There is no unwinding: the machine stops in
+//! `Cpu::haltForever`.
 
 import Acpi from "./acpi";
 import AddressSpace from "./address_space";
@@ -31,16 +103,28 @@ import Timer from "./timer";
 import Vmm from "./vmm";
 import _ from "./lib/mem";
 
+/// Set by the first panic so a second panic knows the console path already
+/// failed or is in use.
 record PanicState {
+  /// True once a panic is being reported.
   static mut active: boolean = false;
 }
 
+/// ASCII backspace (0x08), the byte the Backspace key decodes to.
 const BACKSPACE: u8 = 0x08;
+
+/// ASCII line feed (0x0A), the byte the Enter key decodes to.
 const NEWLINE: u8 = 0x0A;
+
+/// First printable ASCII character, space (0x20).
 const FIRST_PRINTABLE: u8 = 0x20;
+
+/// Last printable ASCII character, tilde (0x7E). The terminal stores only
+/// bytes from `FIRST_PRINTABLE` to `LAST_PRINTABLE`, both included.
 const LAST_PRINTABLE: u8 = 0x7E;
 
-/// The ISA interrupt line of the PS/2 keyboard.
+/// The ISA interrupt line of the PS/2 keyboard (IRQ1). The IOAPIC routes it
+/// through the GSI that ACPI assigns to it.
 const KEYBOARD_IRQ: u8 = 1;
 
 /// Prints the time since the timer started.
@@ -52,8 +136,11 @@ const PS_COMMAND: str = "ps";
 /// Starts the demo threads.
 const THREADS_COMMAND: str = "threads";
 
-/// Runs a program the bootloader loaded: `run hello`.
+/// Runs a program the bootloader loaded: `run hello`. The command is a prefix
+/// followed by a module name.
 const RUN_COMMAND: str = "run ";
+
+/// Byte length of `RUN_COMMAND`, including the trailing space.
 const RUN_COMMAND_LENGTH: u64 = 4;
 
 /// Bytes one input line can hold. It must equal the array size in
@@ -63,6 +150,12 @@ const LINE_CAPACITY: u64 = 128;
 /// Reports the panic on COM1, and on the console once it is initialized, then
 /// stops the machine. A panic raised while reporting another one only reaches
 /// COM1, so a fault in the console cannot recurse.
+///
+/// The compiler routes every `@panic(...)` call here. `file` and `line` locate
+/// the call in the Ignis source. Never returns.
+///
+/// On the console the report is bright white on red. On COM1 it is the same
+/// text with `\r\n` line endings (added by `Serial::write`).
 @panicHandler
 function onPanic(message: str, file: str, line: u32): never {
   if (PanicState::active || !Console::isInitialized()) {
@@ -91,6 +184,8 @@ function onPanic(message: str, file: str, line: u32): never {
   Cpu::haltForever();
 }
 
+/// The first Limine framebuffer. Panics when the bootloader provided none,
+/// because the console has nowhere to draw.
 function requireFramebuffer(): *mut Limine::Framebuffer {
   let framebuffer: *mut Limine::Framebuffer = Limine::firstFramebuffer();
 
@@ -101,6 +196,9 @@ function requireFramebuffer(): *mut Limine::Framebuffer {
   return framebuffer;
 }
 
+/// Prints the framebuffer geometry and the resulting cell grid, for example
+/// `framebuffer: 1280x800, pitch 5120, bpp 32, 160x50 cells`. The pitch is
+/// the number of bytes between two pixel rows and can exceed `width * 4`.
 function reportFramebuffer(framebuffer: *mut Limine::Framebuffer): void {
   Console::write("framebuffer: ");
   Console::writeDecimal((*framebuffer).width);
@@ -117,6 +215,8 @@ function reportFramebuffer(framebuffer: *mut Limine::Framebuffer): void {
   Console::writeLine(" cells");
 }
 
+/// Prints the number of memory-map entries and the higher half direct map
+/// offset. Panics when Limine answered neither request.
 function reportMemory(): void {
   let memmap: *mut Limine::MemmapResponse = Limine::memmap();
 
@@ -137,6 +237,8 @@ function reportMemory(): void {
   Console::writeLine("");
 }
 
+/// Draws the colored banner and the framebuffer and memory lines. This is the
+/// first console output of the boot.
 function printBanner(framebuffer: *mut Limine::Framebuffer): void {
   Console::setColors(Color::BRIGHT_YELLOW, Color::BLUE);
   Console::write(" IgniOS ");
@@ -150,7 +252,9 @@ function printBanner(framebuffer: *mut Limine::Framebuffer): void {
   Console::writeLine("");
 }
 
-/// Brings up the PS/2 keyboard and reports the result on the console.
+/// Brings up the PS/2 keyboard and reports the result on the console. Returns
+/// false when no controller answered, in which case `kmain` halts: without a
+/// keyboard the terminal is useless.
 function initializeKeyboard(): boolean {
   if (!Ps2::initialize()) {
     Console::writeLine("keyboard: no PS/2 controller answered");
@@ -161,6 +265,9 @@ function initializeKeyboard(): boolean {
   return true;
 }
 
+/// Logs the code segment selector and the task register read back from the
+/// CPU. On a correct boot they are `0x8` and `0x28`, which proves the far
+/// return and `ltr` in `Gdt::initialize` took effect.
 function reportGdt(): void {
   Serial::write("gdt: cs=");
   Serial::writeHex(Gdt::currentCode() as u64);
@@ -171,6 +278,11 @@ function reportGdt(): void {
 
 /// Builds the frame allocator, the kernel page tables and the heap, reports on
 /// them and runs their self-tests.
+///
+/// The order is fixed. `Vmm::initialize` takes page-table frames from the
+/// PMM, and `Modules::initialize` and the heap map their pages through the
+/// VMM. Every self-test panics on failure, so a boot that continues has
+/// passed them.
 function initializeMemory(framebuffer: *mut Limine::Framebuffer): void {
   Pmm::initialize();
 
@@ -211,6 +323,10 @@ function initializeMemory(framebuffer: *mut Limine::Framebuffer): void {
   Console::writeLine("address space: self-test ok, private user half, shared kernel half, frames returned");
 }
 
+/// Prints the local APIC state: physical base from the `IA32_APIC_BASE` MSR,
+/// its ID and version registers, and whether it is enabled in the MSR (global
+/// enable, bit 11) and in the spurious vector register (software enable,
+/// bit 8). LINT0 is masked because the PIC is not used, LINT1 is set to NMI.
 function reportLapic(): void {
   Console::write("lapic: base ");
   Console::writeHex(Lapic::physicalBase());
@@ -225,6 +341,10 @@ function reportLapic(): void {
   Console::writeLine(", LINT0 masked, LINT1 NMI");
 }
 
+/// Prints every IOAPIC (ID, version, redirection entry count, first GSI) and
+/// the keyboard route: ISA IRQ 1, the GSI ACPI maps it to, the vector the
+/// interrupt arrives on and the raw 64-bit redirection entry. Finishes with
+/// the PIC interrupt mask register, which must read `0xffff` (all masked).
 function reportIoapic(keyboardGsi: u32): void {
   let mut index: u64 = 0;
 
@@ -256,7 +376,8 @@ function reportIoapic(keyboardGsi: u32): void {
   Console::writeLine("");
 }
 
-/// Calibrates the APIC timer, starts it and checks that ticks arrive.
+/// Calibrates the APIC timer against the PIT, starts it, checks that ticks
+/// arrive and reports the numbers. See `timer.ign`.
 function initializeTimer(): void {
   Timer::initialize(Interrupts::TIMER_VECTOR as u8);
 
@@ -277,7 +398,9 @@ function initializeTimer(): void {
   Console::writeLine(" ticks so far");
 }
 
-/// Prints seconds with three decimals, then the raw tick count.
+/// Prints seconds with three decimals, then the raw tick count. The
+/// fraction is zero-padded by hand to three digits, because `writeDecimal`
+/// does no padding.
 function printUptime(): void {
   let milliseconds: u64 = Timer::uptimeMilliseconds();
   let fraction: u64 = milliseconds % 1000;
@@ -303,6 +426,7 @@ function printUptime(): void {
 }
 
 /// True when the first `length` bytes of `line` spell `text` exactly.
+/// `text` is NUL-terminated and `line` is not, so `length` bounds `line`.
 function lineIs(line: *mut u8, length: u64, text: str): boolean {
   let mut cursor: *u8 = text as *u8;
   let mut index: u64 = 0;
@@ -319,7 +443,8 @@ function lineIs(line: *mut u8, length: u64, text: str): boolean {
   return index == length;
 }
 
-/// True when the line begins with `prefix`.
+/// True when the line begins with `prefix`. `prefix` is NUL-terminated and
+/// `line` is not, so `length` bounds `line`.
 function lineStartsWith(line: *mut u8, length: u64, prefix: str): boolean {
   let mut cursor: *u8 = prefix as *u8;
   let mut index: u64 = 0;
@@ -336,7 +461,8 @@ function lineStartsWith(line: *mut u8, length: u64, prefix: str): boolean {
   return true;
 }
 
-/// Runs the command on the line. A line that names no command does nothing.
+/// Runs the command on the line. A line that names no command does nothing:
+/// there is no "unknown command" message.
 function runCommand(line: *mut u8, length: u64): void {
   if (lineIs(line, length, UPTIME_COMMAND)) {
     printUptime();
@@ -351,6 +477,8 @@ function runCommand(line: *mut u8, length: u64): void {
   }
 }
 
+/// Prints the green `> ` prompt, then switches to bright white for the text
+/// the user types.
 function printPrompt(): void {
   Console::setColors(Color::BRIGHT_GREEN, Color::BLACK);
   Console::write("> ");
@@ -361,11 +489,25 @@ function printPrompt(): void {
 /// characters are echoed and stored, Backspace erases the last stored
 /// character but never the prompt, and Enter runs the line as a command and
 /// starts a new prompt. The terminal runs in the boot thread, so the keyboard
-/// keeps working while other threads run. Input past
-/// LINE_CAPACITY and Tab are ignored. The queue is checked with interrupts
-/// off, so an IRQ1 cannot land between the check and the `sti; hlt` that
-/// sleeps until the next one.
+/// keeps working while other threads run. Input past `LINE_CAPACITY` and Tab
+/// are ignored.
+///
+/// The queue is checked with interrupts off, so an IRQ1 cannot land between
+/// the check and the `sti; hlt` that sleeps until the next one:
+///
+/// ```text
+///   cli
+///   queue empty?  ── yes ──► sti; hlt   (one pair: an interrupt that was
+///                            │           already pending wakes the hlt)
+///                            └─ loop
+///   no ──► sti, pop one scancode, decode, act
+/// ```
+///
+/// Without the `cli` the interrupt could fire after the emptiness check and
+/// before the `hlt`, and the processor would sleep with a byte waiting.
 function runTerminal(): void {
+  // Literal size: array lengths must be integer literals, so this repeats
+  // `LINE_CAPACITY`.
   let mut line: u8[128];
   let mut length: u64 = 0;
 
@@ -404,18 +546,31 @@ function runTerminal(): void {
 }
 
 /// The ELF entry point. Limine jumps here in long mode on its own stack, with
-/// interrupts disabled and every request already answered.
+/// interrupts disabled and every request already answered. The function never
+/// returns: it ends in the terminal loop or, on a fatal error, in
+/// `Cpu::haltForever`.
+///
+/// `@externName("kmain")` keeps the C symbol name unmangled, which is the
+/// name `ENTRY(kmain)` in `kernel/linker.ld` refers to.
 @externName("kmain")
 function kmain(): void {
   Serial::initialize();
   Serial::writeLine("IgniOS booting");
 
+  // The IDT gates installed next name the kernel's code selector, and the double
+  // fault gate names IST1 of the kernel's TSS, so the GDT comes first.
   Gdt::initialize();
   reportGdt();
 
+  // From here every CPU exception reaches `Interrupts::dispatch`. The IDT state
+  // Limine leaves is not specified by the protocol, so the kernel installs its
+  // own before it does anything that can fault.
   Idt::initialize();
   Serial::writeLine("idt: 50 gates loaded");
 
+  // Limine overwrites the third word of the base revision tag with 0 when it
+  // supports the revision requested. Anything else means the responses below
+  // cannot be trusted.
   if (!Limine::isBaseRevisionSupported()) {
     @panic("Limine base revision 6 is not supported");
   }
@@ -431,6 +586,8 @@ function kmain(): void {
   Process::initialize();
   Syscall::initialize();
 
+  // Sets IA32_EFER.SCE and programs IA32_STAR, IA32_LSTAR and IA32_FMASK. See
+  // `usermode.ign`. The values are logged to COM1 only.
   UserMode::initialize();
   Serial::write("usermode: syscall enabled, star ");
   Serial::writeHex(UserMode::starValue());
@@ -443,6 +600,9 @@ function kmain(): void {
   Acpi::initialize();
   Acpi::report();
 
+  // The 8259 is remapped to vectors 0x20-0x2F, away from the CPU exceptions
+  // 0-31, and fully masked. The kernel receives device interrupts through the
+  // IOAPIC instead.
   Pic::initialize();
   Lapic::initialize();
   reportLapic();
@@ -471,6 +631,8 @@ function kmain(): void {
   SchedulerTest::runAddressSpaces();
   Console::writeLine("scheduler: address-space self-test ok, each thread ran in its own CR3 and every frame came back");
 
+  // From here the timer tick can switch threads. The self-tests above ran
+  // cooperatively because their expectations assume no preemption.
   Scheduler::enablePreemption();
 
   let preemptions: u64 = SchedulerTest::runPreemptive();
@@ -481,6 +643,8 @@ function kmain(): void {
 
   UserTest::run();
 
+  // The keyboard is initialized last: its interrupt is live from here on, and
+  // the terminal is the first code that consumes it.
   if (!initializeKeyboard()) {
     Cpu::haltForever();
   }

@@ -1,9 +1,37 @@
-//! Integer formatting shared by the serial port and the console. Each
-//! function hands the characters it produces to `emit`, one byte at a time,
-//! so callers need no buffer.
+//!
+//! # Integer Formatting
+//!
+//! Number to text conversion shared by the serial port and the console.
+//!
+//! ## Overview
+//!
+//! The kernel has no heap at the time it prints its first line and no string
+//! type, so formatting works through a callback. Each function produces the
+//! characters one at a time and hands every byte to `emit`. The caller decides
+//! where the byte goes: `Serial::writeByte` for COM1, `Console::writeChar` for
+//! the screen. No buffer is needed on either side.
+//!
+//! ```text
+//!   Format::decimal(1234, emit)        Format::hexadecimal(0xBEEF, emit)
+//!        │                                  │
+//!        ├─ emit('1')                       ├─ emit('0')
+//!        ├─ emit('2')                       ├─ emit('x')
+//!        ├─ emit('3')                       ├─ emit('0') x12  (leading zeros)
+//!        └─ emit('4')                       └─ emit('b') emit('e') emit('e') emit('f')
+//! ```
+//!
+//! The ASCII constants used below: `0x30` is `'0'`, `0x78` is `'x'`, and
+//! `0x57` is `'a' - 10` (`'a'` is `0x61`).
 
+/// The formatting functions.
 export namespace Format {
-  /// Emits `value` in decimal, most significant digit first.
+  /// Emits `value` in decimal, most significant digit first, without leading
+  /// zeros and without padding. Zero prints as `0`.
+  ///
+  /// The first loop finds the largest power of ten that is at most `value`
+  /// (`divisor`). The second loop then divides it out digit by digit. This
+  /// emits digits in the right order without a reverse buffer. The divisor
+  /// reaches at most 10^19, which fits in a `u64`.
   function decimal(value: u64, emit: (u8) -> void): void {
     let mut divisor: u64 = 1;
 
@@ -19,11 +47,14 @@ export namespace Format {
     }
   }
 
-  /// Emits `value` as `0x` followed by all 16 lowercase hex digits.
+  /// Emits `value` as `0x` followed by all 16 lowercase hex digits, so the
+  /// output is always 18 characters. The fixed width makes addresses line up in
+  /// the boot log.
   function hexadecimal(value: u64, emit: (u8) -> void): void {
     emit(0x30);
     emit(0x78);
 
+    // Walks from the highest nibble (bits 63..60) down to the lowest (3..0).
     let mut shift: u64 = 64;
 
     while (shift > 0) {

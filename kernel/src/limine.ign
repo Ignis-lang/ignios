@@ -1,123 +1,309 @@
-//! Limine boot protocol (base revision 6): the requests the kernel makes,
-//! their response layouts, and readers for them.
 //!
-//! The requests are initialized `static mut` globals in `.data`, 8-byte
-//! aligned. Limine finds them by scanning the loaded image for their IDs, so
-//! no start or end markers are needed, and answers them in place before
-//! `kmain` runs. That write happens behind the compiler's back, so every read
-//! of a request field is volatile.
+//! # Limine Boot Protocol
+//!
+//! The requests the kernel makes (base revision 6), the layout of each
+//! response, and readers that return typed pointers.
+//!
+//! ## How Requests Work
+//!
+//! A request is an initialized `static mut` record in `.data`. It starts with
+//! a four-word identifier that is the same in every build. Before it jumps to
+//! `kmain`, Limine scans the loaded kernel image for those identifiers
+//! (8-byte aligned), and writes a pointer to its answer into the `response`
+//! slot of each request it recognizes. The kernel reads the pointer back.
+//!
+//! ```text
+//!   Request (in the kernel's .data)           Response (bootloader memory)
+//!   ┌─────────────────────────────┐          ┌──────────────────────────┐
+//!   │ id[0] = COMMON_MAGIC_0      │          │ revision: u64            │
+//!   │ id[1] = COMMON_MAGIC_1      │          │ request specific fields  │
+//!   │ id[2] = request specific    │          │ ...                      │
+//!   │ id[3] = request specific    │          └──────────────────────────┘
+//!   │ revision: u64               │                      ▲
+//!   │ response: *mut Response ────┼── null until Limine ─┘ fills it in
+//!   └─────────────────────────────┘
+//! ```
+//!
+//! The scan is why no start or end markers are needed. The write happens
+//! behind the compiler's back, so every read of a request field is volatile:
+//! without it the compiler could fold the read into the `null` initializer.
+//!
+//! ## Base Revision Tag
+//!
+//! `BaseRevision` is a separate three-word tag: two magic words and the
+//! revision the kernel wants. If Limine supports that revision it replaces the
+//! third word with 0. `isBaseRevisionSupported` tests for that. Revision 6 is
+//! the one this kernel is written against. From revision 4 on, Limine hands
+//! the RSDP over as a direct-map address instead of a physical one.
+//!
+//! ## Requests Made
+//!
+//! | Request            | Used by                                  | Gives                              |
+//! |--------------------|------------------------------------------|------------------------------------|
+//! | Framebuffer        | `Console::initialize`, `Vmm`             | pixel buffer address and format    |
+//! | Memory map         | `Pmm`, `Vmm`                             | list of physical memory regions    |
+//! | HHDM               | `Hhdm`                                   | virtual offset of physical memory  |
+//! | Executable address | `Vmm::mapKernelImage`                    | physical and virtual kernel base   |
+//! | Modules            | `Modules`                                | files listed in `boot/limine.conf` |
+//! | RSDP               | `Acpi`                                   | physical/direct-map address of ACPI|
+//!
+//! The record layouts follow `PROTOCOL.md` of the Limine boot protocol
+//! (https://codeberg.org/Limine/limine-protocol). Every record is `@cLayout`,
+//! so its fields have C struct order and padding, which is what Limine writes.
+//! See concept doc 01.
 
+/// The Limine requests, their response layouts and readers.
 export namespace Limine {
+  /// First two identifier words shared by every Limine request
+  /// (`LIMINE_COMMON_MAGIC` in the protocol header).
   const COMMON_MAGIC_0: u64 = 0xc7b1dd30df4c8b88;
+
+  /// Second common identifier word (`LIMINE_COMMON_MAGIC`).
   const COMMON_MAGIC_1: u64 = 0x0a82e883a194f07b;
 
+  /// The base revision of the protocol the kernel is written for.
   const BASE_REVISION: u64 = 6;
+
+  /// The value Limine writes over the revision word when it supports the
+  /// requested base revision.
   const BASE_REVISION_SUPPORTED: u64 = 0;
 
+  /// The base revision tag: two magic words and the requested revision.
   @cLayout
   record BaseRevision {
+    /// The two magic words `0xf9562b2d5c95a6c8` and `0x6a7b384944536bdc` that mark
+    /// the tag.
     public magic: u64[2];
+
+    /// Requested revision on input. Limine sets it to 0 when it supports it.
     public revision: u64;
   }
 
+  /// One framebuffer, `struct limine_framebuffer` up to the mask fields (the
+  /// EDID and video mode fields that follow in memory are not read).
   @cLayout
   record Framebuffer {
+    /// Virtual address of the first pixel. Revision 6 gives a higher half direct
+    /// map address.
     public address: *mut u8;
+
+    /// Visible width in pixels.
     public width: u64;
+
+    /// Visible height in pixels.
     public height: u64;
+
+    /// Bytes from the start of one pixel row to the next. Can be larger than
+    /// `width * bpp / 8`; the address of pixel (x, y) is
+    /// `address + y * pitch + x * bpp / 8`.
     public pitch: u64;
+
+    /// Bits per pixel. The console requires 32.
     public bpp: u16;
+
+    /// Pixel format; 1 is RGB, the only one the console accepts.
     public memoryModel: u8;
+
+    /// Width in bits of the red channel inside a pixel.
     public redMaskSize: u8;
+
+    /// Bit position of the red channel's least significant bit.
     public redMaskShift: u8;
+
+    /// Width in bits of the green channel.
     public greenMaskSize: u8;
+
+    /// Bit position of the green channel.
     public greenMaskShift: u8;
+
+    /// Width in bits of the blue channel.
     public blueMaskSize: u8;
+
+    /// Bit position of the blue channel.
     public blueMaskShift: u8;
   }
 
+  /// Answer to the framebuffer request: an array of pointers to framebuffers.
   @cLayout
   record FramebufferResponse {
+    /// Revision of this response layout.
     public revision: u64;
+
+    /// Number of entries in `framebuffers`. Zero when there is no display.
     public framebufferCount: u64;
+
+    /// Array of `framebufferCount` pointers.
     public framebuffers: *mut *mut Framebuffer;
   }
 
+  /// The framebuffer request. The same shape (identifier, revision, response
+  /// slot) applies to every request record below.
   @cLayout
   record FramebufferRequest {
+    /// Request identifier: the two common words, then two words unique to this
+    /// request kind.
     public id: u64[4];
+
+    /// Revision of the request layout the kernel asks for (0 for all requests
+    /// here).
     public revision: u64;
+
+    /// Null until Limine answers. Always read with `readResponse`.
     public response: *mut FramebufferResponse;
   }
 
+  /// Memory map entry types (`LIMINE_MEMMAP_*`). Concept doc 08 explains what
+  /// the kernel does with each.
+  ///
+  /// | Value | Name                    | Meaning                                              |
+  /// |-------|-------------------------|------------------------------------------------------|
+  /// | 0     | USABLE                  | free RAM the kernel may use                          |
+  /// | 1     | RESERVED                | not usable, firmware or hardware owns it             |
+  /// | 2     | ACPI_RECLAIMABLE        | ACPI tables, reusable after they are parsed          |
+  /// | 3     | ACPI_NVS                | ACPI non-volatile storage, never touch               |
+  /// | 4     | BAD_MEMORY              | defective RAM                                        |
+  /// | 5     | BOOTLOADER_RECLAIMABLE  | Limine's page tables, stack, responses, modules      |
+  /// | 6     | EXECUTABLE_AND_MODULES  | the kernel image and the module files                |
+  /// | 7     | FRAMEBUFFER             | video memory                                         |
+  /// | 8     | RESERVED_MAPPED         | reserved, but mapped in the direct map (revision 6)  |
   const MEMMAP_USABLE: u64 = 0;
+
+  /// Memory map entry type: hardware or firmware use, never touch.
   const MEMMAP_RESERVED: u64 = 1;
+
+  /// Memory map entry type: ACPI tables; reusable after they are parsed.
   const MEMMAP_ACPI_RECLAIMABLE: u64 = 2;
+
+  /// Memory map entry type: ACPI non-volatile storage, never touch.
   const MEMMAP_ACPI_NVS: u64 = 3;
+
+  /// Memory map entry type: defective RAM.
   const MEMMAP_BAD_MEMORY: u64 = 4;
+
+  /// Memory map entry type: Limine's page tables, stack and responses.
   const MEMMAP_BOOTLOADER_RECLAIMABLE: u64 = 5;
+
+  /// Memory map entry type: the kernel image and the module files.
   const MEMMAP_EXECUTABLE_AND_MODULES: u64 = 6;
+
+  /// Memory map entry type: video memory.
   const MEMMAP_FRAMEBUFFER: u64 = 7;
+
+  /// Memory map entry type: reserved, but present in the direct map.
   const MEMMAP_RESERVED_MAPPED: u64 = 8;
 
+  /// One physical memory region. Entries are sorted by base address and do not
+  /// overlap.
   @cLayout
   record MemmapEntry {
+    /// Physical start address of the region, page aligned.
     public base: u64;
+
+    /// Size of the region in bytes, a multiple of the page size.
     public length: u64;
+
+    /// One of the `MEMMAP_*` values. Named `kind` because `type` is a keyword.
     public kind: u64;
   }
 
+  /// Answer to the memory map request.
   @cLayout
   record MemmapResponse {
+    /// Revision of this response layout. Every response starts with it.
     public revision: u64;
+
+    /// Number of entries in `entries`.
     public entryCount: u64;
+
+    /// Array of `entryCount` pointers to entries.
     public entries: *mut *mut MemmapEntry;
   }
 
+  /// The memory map request. Same shape as `FramebufferRequest`.
   @cLayout
   record MemmapRequest {
+    /// Request identifier: the two common words and two specific ones.
     public id: u64[4];
+
+    /// Request revision, 0.
     public revision: u64;
+
+    /// Null until Limine answers; read it with `readResponse`.
     public response: *mut MemmapResponse;
   }
 
+  /// Answer to the higher half direct map request.
   @cLayout
   record HhdmResponse {
+    /// Revision of this response layout.
     public revision: u64;
+
+    /// Virtual address at which physical address 0 is mapped. Physical address
+    /// `p` is at `offset + p`.
     public offset: u64;
   }
 
+  /// The higher half direct map request. Same shape as `FramebufferRequest`.
   @cLayout
   record HhdmRequest {
+    /// Request identifier: the two common words and two specific ones.
     public id: u64[4];
+
+    /// Request revision, 0.
     public revision: u64;
+
+    /// Null until Limine answers; read it with `readResponse`.
     public response: *mut HhdmResponse;
   }
 
+  /// Answer to the executable address request.
   @cLayout
   record ExecutableAddressResponse {
+    /// Revision of this response layout.
     public revision: u64;
+
+    /// Physical address where the kernel image was loaded.
     public physicalBase: u64;
+
+    /// Virtual address of the image start, `0xffffffff80000000` for this linker
+    /// script.
     public virtualBase: u64;
   }
 
+  /// The executable address request. Same shape as `FramebufferRequest`.
   @cLayout
   record ExecutableAddressRequest {
+    /// Request identifier: the two common words and two specific ones.
     public id: u64[4];
+
+    /// Request revision, 0.
     public revision: u64;
+
+    /// Null until Limine answers; read it with `readResponse`.
     public response: *mut ExecutableAddressResponse;
   }
 
+  /// Answer to the ACPI RSDP request.
   @cLayout
   record RsdpResponse {
+    /// Revision of this response layout.
     public revision: u64;
+
+    /// Address of the Root System Description Pointer structure (revision 4 and
+    /// later: a higher half direct map address).
     public address: *mut u8;
   }
 
+  /// The ACPI RSDP request. Same shape as `FramebufferRequest`.
   @cLayout
   record RsdpRequest {
+    /// Request identifier: the two common words and two specific ones.
     public id: u64[4];
+
+    /// Request revision, 0.
     public revision: u64;
+
+    /// Null until Limine answers; read it with `readResponse`.
     public response: *mut RsdpResponse;
   }
 
@@ -125,63 +311,96 @@ export namespace Limine {
   /// rest (media type, TFTP and partition identifiers) follows in memory.
   @cLayout
   record File {
+    /// Revision of this file record layout.
     public revision: u64;
+
+    /// Virtual address of the file contents.
     public address: *mut u8;
+
+    /// File size in bytes.
     public size: u64;
+
+    /// NUL-terminated path, as written in the configuration.
     public path: *mut u8;
+
+    /// NUL-terminated `module_string` from the configuration. IgniOS uses it as
+    /// the program name for `run`.
     public string: *mut u8;
   }
 
+  /// Answer to the module request.
   @cLayout
   record ModuleResponse {
+    /// Revision of this response layout.
     public revision: u64;
+
+    /// Number of modules.
     public moduleCount: u64;
+
+    /// Array of `moduleCount` pointers to files.
     public modules: *mut *mut File;
   }
 
+  /// The module request. Same shape as `FramebufferRequest`.
   @cLayout
   record ModuleRequest {
+    /// Request identifier: the two common words and two specific ones.
     public id: u64[4];
+
+    /// Request revision, 0.
     public revision: u64;
+
+    /// Null until Limine answers; read it with `readResponse`.
     public response: *mut ModuleResponse;
   }
 
+  /// All the requests, as globals the bootloader finds by scanning the image.
+  /// Each `id` ends with the two request-specific words from `PROTOCOL.md`.
+  /// The records are initialized `static mut` globals, so they are stored in
+  /// `.data`, which is part of the file image Limine scans.
   record Requests {
+    /// Storage of the base revision tag.
     static mut baseRevision: BaseRevision = BaseRevision {
       magic: [0xf9562b2d5c95a6c8, 0x6a7b384944536bdc],
       revision: BASE_REVISION,
     };
 
+    /// Storage of the framebuffer request.
     static mut framebuffer: FramebufferRequest = FramebufferRequest {
       id: [COMMON_MAGIC_0, COMMON_MAGIC_1, 0x9d5827dcd881dd75, 0xa3148604f6fab11b],
       revision: 0,
       response: null,
     };
 
+    /// Storage of the memory map request.
     static mut memmap: MemmapRequest = MemmapRequest {
       id: [COMMON_MAGIC_0, COMMON_MAGIC_1, 0x67cf3d9d378a806f, 0xe304acdfc50c3c62],
       revision: 0,
       response: null,
     };
 
+    /// Storage of the higher half direct map request.
     static mut hhdm: HhdmRequest = HhdmRequest {
       id: [COMMON_MAGIC_0, COMMON_MAGIC_1, 0x48dcf1cb8ad2b852, 0x63984e959a98244b],
       revision: 0,
       response: null,
     };
 
+    /// Storage of the executable address request.
     static mut executableAddress: ExecutableAddressRequest = ExecutableAddressRequest {
       id: [COMMON_MAGIC_0, COMMON_MAGIC_1, 0x71ba76863cc55f63, 0xb2644a48c516a487],
       revision: 0,
       response: null,
     };
 
+    /// Storage of the module request.
     static mut modules: ModuleRequest = ModuleRequest {
       id: [COMMON_MAGIC_0, COMMON_MAGIC_1, 0x3e7e279702be32af, 0xca1c4f3bd1280cee],
       revision: 0,
       response: null,
     };
 
+    /// Storage of the ACPI RSDP request.
     static mut rsdp: RsdpRequest = RsdpRequest {
       id: [COMMON_MAGIC_0, COMMON_MAGIC_1, 0xc5e77b6b397e7b43, 0x27637845accdcf3c],
       revision: 0,
@@ -190,17 +409,20 @@ export namespace Limine {
   }
 
   /// The bootloader clears the requested revision when it supports it.
+  /// Volatile because Limine wrote the word before `kmain` ran.
   function isBaseRevisionSupported(): boolean {
     return @readVolatile<u64>(&mut Requests::baseRevision.revision as *mut u64) == BASE_REVISION_SUPPORTED;
   }
 
   /// The response pointer the bootloader left in a request's `response`
-  /// slot, or null when it left none.
+  /// slot, or null when it left none. The load is volatile, so it is a real
+  /// read of the slot Limine filled in.
   function readResponse<T>(slot: *mut *mut T): *mut T {
     return @readVolatile<*mut T>(slot);
   }
 
   /// The first framebuffer, or null when the bootloader provided none.
+  /// Limine may report several; the console uses only the first.
   function firstFramebuffer(): *mut Framebuffer {
     let response: *mut FramebufferResponse = readResponse<FramebufferResponse>(
       &mut Requests::framebuffer.response as *mut *mut FramebufferResponse,
@@ -219,6 +441,7 @@ export namespace Limine {
   }
 
   /// Entry `index` of the memory map. The entries are sorted by base address.
+  /// `index` must be below `entryCount`; it is not checked.
   function memmapEntry(response: *mut MemmapResponse, index: u64): *mut MemmapEntry {
     return *((*response).entries + index);
   }
@@ -243,7 +466,8 @@ export namespace Limine {
   }
 
   /// Module `index` of a module response. The array comes in the order of
-  /// the configuration file.
+  /// the configuration file. `index` must be below `moduleCount`; it is not
+  /// checked.
   function moduleFile(response: *mut ModuleResponse, index: u64): *mut File {
     return *((*response).modules + index);
   }

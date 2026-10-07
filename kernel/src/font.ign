@@ -1,14 +1,55 @@
-//! The 8x16 console font: the printable ASCII glyphs of Spleen, generated
-//! into `font_8x16.ign`.
+//!
+//! # Console Font
+//!
+//! Lookup of the 8x16 glyph bitmaps used by the console.
+//!
+//! ## Overview
+//!
+//! The glyph data is Spleen 8x16, printable ASCII only (`0x20` to `0x7E`, 95
+//! glyphs), generated into `font_8x16.ign` by `scripts/gen-font.py`. Each
+//! glyph is 16 bytes, one byte per pixel row from the top. In each byte the
+//! most significant bit is the leftmost pixel and a set bit means foreground:
+//!
+//! ```text
+//!   glyph 'A' (0x41), 16 rows, rows 12-15 blank
+//!   row  byte  pixels
+//!    0   0x00  ........
+//!    1   0x00  ........
+//!    2   0x7C  .XXXXX..
+//!    3   0xC6  XX...XX.
+//!    4   0xC6  XX...XX.
+//!    5   0xC6  XX...XX.
+//!    6   0xFE  XXXXXXX.
+//!    7   0xC6  XX...XX.
+//!    8   0xC6  XX...XX.
+//!    9   0xC6  XX...XX.
+//!   10   0xC6  XX...XX.
+//!   11   0xC6  XX...XX.
+//!   12-15 0x00 ........
+//!   bit 7 is the leftmost pixel, bit 0 the rightmost
+//! ```
+//!
+//! The table is a flat array. The glyph of character `c` starts at byte
+//! offset `(c - 0x20) * 16`. See concept doc 07.
 
 import FontData from "./font_8x16";
 
+/// The font API.
 export namespace Font {
+  /// Glyph width in pixels, which is also the width of a console cell.
   const WIDTH: u64 = 8;
+
+  /// Glyph height in pixels, which is also the height of a console cell and the
+  /// number of bytes per glyph.
   const HEIGHT: u64 = 16;
 
+  /// First character the table covers, space (`0x20`).
   const FIRST: u8 = 0x20;
+
+  /// Last character the table covers, tilde (`0x7E`).
   const LAST: u8 = 0x7E;
+
+  /// Character drawn for anything outside `FIRST` to `LAST`: `?` (`0x3F`).
   const FALLBACK: u8 = 0x3F;
 
   /// The HEIGHT rows of the glyph for `character`, top row first, leftmost

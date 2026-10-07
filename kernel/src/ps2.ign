@@ -1,4 +1,9 @@
+//!
+//! # PS/2 Controller
+//!
 //! Driver for the 8042 PS/2 controller, keyboard port only.
+//!
+//! ## Overview
 //!
 //! The controller keeps its firmware translation setting, so the keyboard
 //! arrives as scancode set 1 bytes, as it does under QEMU and OVMF. The
@@ -6,29 +11,96 @@
 //! into the scancode queue. Bytes from the auxiliary (mouse) port are read and
 //! dropped. This module only moves bytes; `keyboard.ign` turns them into
 //! characters.
+//!
+//! ## Ports and Registers
+//!
+//! The controller has two I/O ports. The same port number means different
+//! registers for reading and writing:
+//!
+//! | Port   | Read           | Write                  |
+//! |--------|----------------|------------------------|
+//! | `0x60` | data (output buffer) | data to the device, or the argument of a command |
+//! | `0x64` | status         | command                |
+//!
+//! Status register bits used here:
+//!
+//! ```text
+//!   bit 7   6   5     4   3   2   1    0
+//!       .   .   AUX   .   .   .   IBF  OBF
+//!
+//!   OBF (bit 0)  output buffer full: a byte is waiting at port 0x60
+//!   IBF (bit 1)  input buffer full: the controller has not read the last
+//!                byte written; wait for it to clear before writing
+//!   AUX (bit 5)  the waiting byte came from the second (mouse) port
+//! ```
+//!
+//! The configuration byte (read with command `0x20`, written with command
+//! `0x60` followed by the new value on port `0x60`):
+//!
+//! ```text
+//!   bit 7   6          5   4                   3   2     1        0
+//!       0   translate  .   clock1 disabled     .   post  irq12    irq1
+//!                                                         enable   enable
+//! ```
+//!
+//! `initialize` clears bits 1 (second port interrupt) and 4 (first port
+//! clock disable) and sets bit 0 (first port interrupt). It leaves bit 6
+//! alone, which is how the scancodes stay in set 1.
+//!
+//! ## Key Press Path
+//!
+//! ```text
+//!   key -> keyboard -> 8042 -> IRQ1 -> IOAPIC pin 1 -> vector 0x21
+//!       -> Interrupts::dispatch -> Ps2::handleInterrupt -> ScancodeQueue::push
+//! ```
+//!
+//! See concept doc 06 and the OSDev wiki pages "I8042 PS/2 Controller" and
+//! "PS/2 Keyboard".
 
 import Cpu from "./arch/x86_64/cpu";
 import Port from "./arch/x86_64/io";
 import ScancodeQueue from "./scancode_queue";
 
+/// The PS/2 controller API.
 export namespace Ps2 {
+  /// Data port. Reading it takes the byte out of the output buffer.
   const DATA: u16 = 0x60;
+
+  /// Status register (read side of port `0x64`).
   const STATUS: u16 = 0x64;
+
+  /// Command register (write side of port `0x64`).
   const COMMAND: u16 = 0x64;
 
+  /// Status bit 0: a byte is waiting to be read from `DATA`.
   const OUTPUT_FULL: u8 = 0x01;
+
+  /// Status bit 1: the controller still holds the last byte written; do not
+  /// write another one yet.
   const INPUT_FULL: u8 = 0x02;
+
+  /// Status bit 5: the waiting byte came from the auxiliary (mouse) port.
   const AUXILIARY_DATA: u8 = 0x20;
 
   /// What a status read returns when no controller decodes the port.
   const NO_CONTROLLER: u8 = 0xFF;
 
+  /// Command `0x20`: put the configuration byte in the output buffer.
   const READ_CONFIGURATION: u8 = 0x20;
+
+  /// Command `0x60`: the next byte written to `DATA` is the new configuration.
   const WRITE_CONFIGURATION: u8 = 0x60;
+
+  /// Command `0xAE`: enable the first (keyboard) port.
   const ENABLE_FIRST_PORT: u8 = 0xAE;
 
+  /// Configuration bit 0: raise IRQ1 when the keyboard has a byte.
   const CONFIGURATION_FIRST_INTERRUPT: u8 = 0x01;
+
+  /// Configuration bit 1: raise IRQ12 when the mouse has a byte. Cleared.
   const CONFIGURATION_SECOND_INTERRUPT: u8 = 0x02;
+
+  /// Configuration bit 4: the first port clock is stopped. Cleared.
   const CONFIGURATION_FIRST_CLOCK_DISABLED: u8 = 0x10;
 
   /// Upper bound on bytes drained by `flush`, so a controller that always
@@ -87,6 +159,7 @@ export namespace Ps2 {
     }
   }
 
+  /// Discards bytes waiting in the output buffer, at most `FLUSH_LIMIT`.
   function flush(): void {
     let mut drained: u64 = 0;
 
@@ -96,6 +169,8 @@ export namespace Ps2 {
     }
   }
 
+  /// Writes a controller command once the input buffer is free. Returns false
+  /// when it stays busy for `WAIT_LIMIT` polls.
   function sendCommand(command: u8): boolean {
     if (!waitForInputSpace()) {
       return false;
@@ -106,6 +181,8 @@ export namespace Ps2 {
     return true;
   }
 
+  /// Writes a data byte (a command argument) once the input buffer is free.
+  /// Returns false on timeout.
   function writeData(value: u8): boolean {
     if (!waitForInputSpace()) {
       return false;
@@ -116,6 +193,8 @@ export namespace Ps2 {
     return true;
   }
 
+  /// Polls until the input buffer is empty. Returns false after `WAIT_LIMIT`
+  /// polls.
   function waitForInputSpace(): boolean {
     let mut spins: u64 = 0;
 
@@ -131,6 +210,8 @@ export namespace Ps2 {
     return true;
   }
 
+  /// Polls until a byte is waiting in the output buffer. Returns false after
+  /// `WAIT_LIMIT` polls.
   function waitForOutput(): boolean {
     let mut spins: u64 = 0;
 

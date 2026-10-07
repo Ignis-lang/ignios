@@ -10,8 +10,13 @@
 //! Each glyph is 16 bytes, one per row from the top, with the most
 //! significant bit as the leftmost pixel. kernel/src/font.ign reads them.
 
+/// Holder of the generated glyph table.
 export namespace FontData {
+  /// Record that owns the table as a public static array.
   record Glyphs {
+    /// 95 glyphs of 16 bytes each, in character order from 0x20.
+    /// Glyph `c` starts at byte `(c - 0x20) * 16`. Row 0 is the top row
+    /// and bit 7 of a row byte is the leftmost pixel.
     public static rows: u8[1520] = [
       0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
       0x00, 0x00, 0x18, 0x18, 0x18, 0x18, 0x18, 0x18, 0x18, 0x00, 0x18, 0x18, 0x00, 0x00, 0x00, 0x00,

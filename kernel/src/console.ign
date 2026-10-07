@@ -1,4 +1,9 @@
-//! Text console on the Limine framebuffer.
+//!
+//! # Framebuffer Text Console
+//!
+//! A text terminal drawn pixel by pixel into the Limine framebuffer.
+//!
+//! ## Overview
 //!
 //! The screen is a grid of 8x16 cells. Each cell is drawn with a foreground
 //! and a background color from a 16-color palette, the cursor is the bottom
@@ -12,15 +17,68 @@
 //! framebuffer, which is slow on write-combining memory. A framebuffer with
 //! more than `MAX_COLUMNS` x `MAX_ROWS` cells uses only that many.
 //!
+//! ## Framebuffer Geometry
+//!
+//! Pixels are 32 bits. Rows are `pitch` bytes apart, and `pitch` can be larger
+//! than `width * 4` because firmware may pad each row.
+//!
+//! ```text
+//!   base ──► ┌────────────────────────────────┬───────┐ ─┐
+//!            │ row 0: width * 4 bytes of pixels│padding│  │ pitch bytes
+//!            ├────────────────────────────────┼───────┤ ─┘
+//!            │ row 1                           │       │
+//!            │ ...                                     │
+//!
+//!   address of pixel (x, y) = base + y * pitch + x * 4
+//!
+//!   one pixel (32 bpp), channel positions come from the Limine mask fields:
+//!     bit 31                                           bit 0
+//!     ┌──────────┬──────────────┬──────────────┬──────────────┐
+//!     │ unused   │ red          │ green        │ blue         │   (typical layout:
+//!     └──────────┴──────────────┴──────────────┴──────────────┘    red shift 16,
+//!                                                                    green 8, blue 0)
+//! ```
+//!
+//! ## Cell Grid
+//!
+//! ```text
+//!   columns = width / 8, rows = height / 16        (1280x800 -> 160 x 50)
+//!
+//!   cell (column, row) occupies pixels
+//!     x: column * 8  .. column * 8 + 7
+//!     y: row * 16    .. row * 16 + 15
+//!
+//!   cell copy, row by row:           color byte of a cell:
+//!     cellCharacters[row * columns + column]     bit 7..4   bit 3..0
+//!     cellColors    [row * columns + column]     foreground  background
+//!                                                palette idx palette idx
+//!
+//!   cursor = rows 14 and 15 of the cell with ink and paper swapped
+//! ```
+//!
+//! ## Control Characters
+//!
+//! | Byte   | Effect                                                       |
+//! |--------|--------------------------------------------------------------|
+//! | `\n` (0x0A) | next line, column 0, scroll at the bottom               |
+//! | `\r` (0x0D) | column 0                                                |
+//! | `\t` (0x09) | advance to the next multiple of `TAB_WIDTH` (8)         |
+//! | `\b` (0x08) | move back one cell and blank it                         |
+//! | other non-printable | drawn as `?` (see `Font::glyph`)                |
+//!
+//! ## Concurrency
+//!
 //! Every public operation runs with interrupts disabled, so the cell copy, the
 //! cursor and the serial mirror are never touched by two threads at once. A
 //! whole string, number or color change is one critical section, which keeps
 //! the text of one call together on the screen and on COM1.
 //!
+//! ## Known Limitation
+//!
 //! Scrolling still moves the framebuffer itself, reading video memory back.
 //! That is cheap under QEMU but slow on real hardware, where a shadow buffer
 //! of pixels in normal memory would be the fix once the kernel can allocate
-//! one.
+//! one. See concept doc 07.
 
 import Cpu from "./arch/x86_64/cpu";
 import Font from "./font";
@@ -30,25 +88,57 @@ import Format from "./lib/format";
 import Mem from "./lib/mem";
 
 /// Palette indices, in ANSI order, with the classic VGA text-mode colors.
+/// The indices 8 to 15 are the bright variants of 0 to 7.
 export namespace Color {
+  /// Palette index 0, `0x000000`.
   const BLACK: u8 = 0;
+
+  /// Palette index 1, `0xAA0000`.
   const RED: u8 = 1;
+
+  /// Palette index 2, `0x00AA00`.
   const GREEN: u8 = 2;
+
+  /// Palette index 3, `0xAA5500` (VGA "brown").
   const YELLOW: u8 = 3;
+
+  /// Palette index 4, `0x0000AA`.
   const BLUE: u8 = 4;
+
+  /// Palette index 5, `0xAA00AA`.
   const MAGENTA: u8 = 5;
+
+  /// Palette index 6, `0x00AAAA`.
   const CYAN: u8 = 6;
+
+  /// Palette index 7, `0xAAAAAA` (light gray, the default text color).
   const WHITE: u8 = 7;
+
+  /// Palette index 8, `0x555555`.
   const BRIGHT_BLACK: u8 = 8;
+
+  /// Palette index 9, `0xFF5555`.
   const BRIGHT_RED: u8 = 9;
+
+  /// Palette index 10, `0x55FF55`.
   const BRIGHT_GREEN: u8 = 10;
+
+  /// Palette index 11, `0xFFFF55`.
   const BRIGHT_YELLOW: u8 = 11;
+
+  /// Palette index 12, `0x5555FF`.
   const BRIGHT_BLUE: u8 = 12;
+
+  /// Palette index 13, `0xFF55FF`.
   const BRIGHT_MAGENTA: u8 = 13;
+
+  /// Palette index 14, `0x55FFFF`.
   const BRIGHT_CYAN: u8 = 14;
+
+  /// Palette index 15, `0xFFFFFF`.
   const BRIGHT_WHITE: u8 = 15;
 
-  /// The 0xRRGGBB value of a palette index. Indices above 15 are white.
+  /// The `0xRRGGBB` value of a palette index. Indices above 15 are white.
   function rgb(index: u8): u32 {
     return match (index) {
       0 -> 0x000000,
@@ -71,31 +161,72 @@ export namespace Color {
   }
 }
 
-/// The console state, one `static mut` per field.
+/// The console state, one `static mut` per field. The fields are globals
+/// because the console is a singleton and runs before the heap exists.
 record ConsoleState {
+  /// False until `Console::initialize`. Before that, output goes to COM1 only.
   static mut initialized: boolean = false;
+
+  /// True while the cursor is painted on the screen. Painting and erasing are
+  /// paired through this flag.
   static mut cursorDrawn: boolean = false;
 
+  /// Address of pixel (0, 0) in the direct map.
   static mut base: u64 = 0;
+
+  /// Bytes between two pixel rows.
   static mut pitch: u64 = 0;
+
+  /// Visible width in pixels.
   static mut width: u64 = 0;
+
+  /// Visible height in pixels.
   static mut height: u64 = 0;
 
+  /// Width in bits of the red channel in a pixel (the green and blue fields
+  /// that follow have the same meaning for their channel). The `*Shift` field
+  /// is the bit position of the channel's lowest bit.
   static mut redSize: u8 = 0;
+
+  /// Bit position of the lowest bit of the red channel.
   static mut redShift: u8 = 0;
+
+  /// Width in bits of the green channel.
   static mut greenSize: u8 = 0;
+
+  /// Bit position of the lowest bit of the green channel.
   static mut greenShift: u8 = 0;
+
+  /// Width in bits of the blue channel.
   static mut blueSize: u8 = 0;
+
+  /// Bit position of the lowest bit of the blue channel.
   static mut blueShift: u8 = 0;
 
+  /// Size of the text grid in cells, at most `Console::MAX_COLUMNS` by
+  /// `Console::MAX_ROWS`.
   static mut columns: u64 = 0;
+
+  /// Height of the text grid in cells.
   static mut rows: u64 = 0;
+
+  /// Cursor position in cells, counted from the top left corner.
   static mut column: u64 = 0;
+
+  /// Cursor row, counted from the top.
   static mut row: u64 = 0;
 
+  /// Current pixel values of the foreground and the background, already packed
+  /// for this framebuffer's mask layout.
   static mut foreground: u32 = 0;
+
+  /// Pixel value of the current background color.
   static mut background: u32 = 0;
+
+  /// Palette indices of the current colors, stored into the cell copy.
   static mut foregroundIndex: u8 = 0;
+
+  /// Palette index of the current background color.
   static mut backgroundIndex: u8 = 0;
 
   /// The character and the palette colors of each cell, row by row. The
@@ -104,27 +235,52 @@ record ConsoleState {
   /// `Console::MAX_COLUMNS * Console::MAX_ROWS`, and have to be integer
   /// literals.
   static mut cellCharacters: u8[64800];
+
+  /// The color byte of each cell. See `cellCharacters`.
   static mut cellColors: u8[64800];
 }
 
+/// The console API. Every function is safe to call from any thread.
 export namespace Console {
+  /// The only pixel size the console draws: 32 bits.
   const BITS_PER_PIXEL: u16 = 32;
+
+  /// Limine framebuffer memory model for direct color (red, green, blue).
   const MEMORY_MODEL_RGB: u8 = 1;
+
+  /// Tab stops are every `TAB_WIDTH` columns.
   const TAB_WIDTH: u64 = 8;
+
+  /// Pixel rows of the cursor, measured from the bottom of the cell.
   const CURSOR_HEIGHT: u64 = 2;
 
-  /// The most cells the console tracks, enough for a 3840x2160 screen.
+  /// The most cells the console tracks, enough for a 3840x2160 screen
+  /// (3840 / 8 = 480 columns, 2160 / 16 = 135 rows). The cell copy arrays in
+  /// `ConsoleState` are sized to `MAX_COLUMNS * MAX_ROWS`, so a larger screen
+  /// uses only the top left part.
   const MAX_COLUMNS: u64 = 480;
+
+  /// See `MAX_COLUMNS`.
   const MAX_ROWS: u64 = 135;
 
+  /// ASCII backspace (0x08).
   const BACKSPACE: u8 = 0x08;
+
+  /// ASCII horizontal tab (0x09).
   const TAB: u8 = 0x09;
+
+  /// ASCII line feed (0x0A).
   const NEWLINE: u8 = 0x0A;
+
+  /// ASCII carriage return (0x0D).
   const CARRIAGE_RETURN: u8 = 0x0D;
+
+  /// ASCII space, used to blank a cell.
   const SPACE: u8 = 0x20;
 
   /// Takes over `framebuffer`, which must be 32 bits per pixel with RGB
-  /// masks, and clears it to white on black.
+  /// masks, and clears it to white on black. Panics on any other format or when
+  /// the screen is smaller than one cell.
   function initialize(framebuffer: *mut Limine::Framebuffer): void {
     if ((*framebuffer).bpp != BITS_PER_PIXEL || (*framebuffer).memoryModel != MEMORY_MODEL_RGB) {
       @panic("console needs a 32 bpp RGB framebuffer");
@@ -162,19 +318,24 @@ export namespace Console {
     clear();
   }
 
+  /// True once `initialize` has run. The panic handler and the exception
+  /// reporter check it to choose between the screen and COM1.
   function isInitialized(): boolean {
     return ConsoleState::initialized;
   }
 
+  /// Width of the text grid in cells.
   function columns(): u64 {
     return ConsoleState::columns;
   }
 
+  /// Height of the text grid in cells.
   function rows(): u64 {
     return ConsoleState::rows;
   }
 
-  /// Sets the palette colors of the characters written from now on.
+  /// Sets the palette colors of the characters written from now on. Cells that
+  /// are already drawn keep their colors.
   function setColors(foreground: u8, background: u8): void {
     let saved: u64 = Cpu::saveAndDisableInterrupts();
     let cursorWasDrawn: boolean = ConsoleState::cursorDrawn;
@@ -238,6 +399,7 @@ export namespace Console {
     Cpu::restoreInterrupts(saved);
   }
 
+  /// Writes `text` followed by a newline.
   function writeLine(text: str): void {
     let saved: u64 = Cpu::saveAndDisableInterrupts();
 
@@ -247,6 +409,7 @@ export namespace Console {
     Cpu::restoreInterrupts(saved);
   }
 
+  /// Writes `value` in decimal.
   function writeDecimal(value: u64): void {
     let saved: u64 = Cpu::saveAndDisableInterrupts();
 
@@ -255,6 +418,7 @@ export namespace Console {
     Cpu::restoreInterrupts(saved);
   }
 
+  /// Writes `value` as `0x` and 16 hex digits.
   function writeHex(value: u64): void {
     let saved: u64 = Cpu::saveAndDisableInterrupts();
 
@@ -263,6 +427,9 @@ export namespace Console {
     Cpu::restoreInterrupts(saved);
   }
 
+  /// Sends `character` to COM1 with the same editing a terminal would do:
+  /// `\n` becomes `\r\n` and backspace becomes backspace, space, backspace, so
+  /// a serial terminal erases the character as well.
   function mirror(character: u8): void {
     if (character == NEWLINE) {
       Serial::writeByte(CARRIAGE_RETURN);
@@ -276,6 +443,8 @@ export namespace Console {
     }
   }
 
+  /// Applies one byte to the screen and the cursor position. The cursor must
+  /// be hidden by the caller.
   function render(character: u8): void {
     if (character == NEWLINE) {
       newLine();
@@ -321,6 +490,8 @@ export namespace Console {
     drawGlyph(SPACE, ConsoleState::column, ConsoleState::row);
   }
 
+  /// Moves to column 0 of the next row, scrolling when already on the last
+  /// row.
   function newLine(): void {
     ConsoleState::column = 0;
 
@@ -336,6 +507,8 @@ export namespace Console {
     let rowBytes: u64 = ConsoleState::pitch * Font::HEIGHT;
     let screen: *mut u8 = @pointerFromInteger<*mut u8>(ConsoleState::base);
 
+    // The destination starts one text row above the source and the ranges
+    // overlap, so this has to be a memmove.
     Mem::move(screen, (screen + rowBytes) as *u8, rowBytes * (ConsoleState::rows - 1));
 
     let lastRowTop: u64 = (ConsoleState::rows - 1) * Font::HEIGHT;
@@ -365,10 +538,13 @@ export namespace Console {
     }
   }
 
+  /// Address of the character byte of cell number `index` (`row * columns +
+  /// column`).
   function cellCharacterAddress(index: u64): *mut u8 {
     return (&mut ConsoleState::cellCharacters as *mut u8) + index;
   }
 
+  /// Address of the color byte of cell number `index`.
   function cellColorAddress(index: u64): *mut u8 {
     return (&mut ConsoleState::cellColors as *mut u8) + index;
   }
@@ -436,10 +612,12 @@ export namespace Console {
     }
   }
 
+  /// Address of pixel (`x`, `y`): `base + y * pitch + x * 4`.
   function pixelAddress(x: u64, y: u64): *mut u32 {
     return @pointerFromInteger<*mut u32>(ConsoleState::base + y * ConsoleState::pitch + x * 4);
   }
 
+  /// Paints the cursor at the current cell if it is not already shown.
   function showCursor(): void {
     if (ConsoleState::initialized && !ConsoleState::cursorDrawn) {
       drawCursorLines(true);
@@ -447,6 +625,7 @@ export namespace Console {
     }
   }
 
+  /// Erases the cursor by redrawing its pixel rows with the normal colors.
   function hideCursor(): void {
     if (ConsoleState::cursorDrawn) {
       drawCursorLines(false);
@@ -472,6 +651,8 @@ export namespace Console {
     return red | green | blue;
   }
 
+  /// Converts an 8-bit color channel `value` to a field of `size` bits: wider
+  /// fields are shifted left, narrower ones lose their low bits.
   function scaleChannel(value: u32, size: u8): u32 {
     if (size >= 8) {
       return value << ((size - 8) as u32);

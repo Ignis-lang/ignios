@@ -8,6 +8,7 @@
 # The QEMU command must log COM1 to <serial-log> and must not claim stdio:
 # this script attaches the monitor there.
 
+# Exit on any error, unset variable or failed pipeline stage.
 set -euo pipefail
 
 if [ "$#" -lt 5 ] || [ "$4" != "--" ]; then
@@ -24,14 +25,18 @@ prompt_pattern='^> '
 
 # Covers Shift on digits and letters, a Backspace inside the line, two
 # Backspaces at an empty prompt (which must not erase it), Enter and Caps
-# Lock.
+# Lock. The names are those of the QEMU monitor `sendkey` command. The script
+# waits 0.2 s between keys to give the guest time to handle each one.
 keys=(
   h i shift-1 spc backspace ret
   backspace backspace shift-a b c ret
   x y z caps_lock q caps_lock w
 )
 
-# The serial lines after the keyboard line once backspaces are applied.
+# What the serial transcript must show after the keyboard line, once every
+# backspace is applied: `h i shift-1 spc backspace` leaves `hi!`, and Caps
+# Lock is on only between the two `caps_lock` presses, so `q` is typed in
+# upper case.
 expected_lines='> hi!
 > Abc
 > xyzQw'
@@ -39,6 +44,7 @@ expected_lines='> hi!
 # Each erased character is mirrored as backspace, space, backspace.
 expected_backspaces=2
 
+# Polls the serial log until `pattern` appears or the timeout passes.
 wait_for_serial() {
   local pattern=$1
   local deadline=$((SECONDS + timeout_seconds))
@@ -53,6 +59,8 @@ wait_for_serial() {
   done
 }
 
+# Produces the QEMU monitor script on stdout: wait for the prompt, type the
+# keys, wait for the last echoed text, take a screendump and quit.
 send_monitor_commands() {
   if ! wait_for_serial "$prompt_pattern"; then
     echo quit
@@ -80,6 +88,10 @@ if [ ! -s "$output" ]; then
   exit 1
 fi
 
+# Replays the serial log as a terminal would, where a backspace byte removes the
+# previous character. The result must equal `expected_lines`, and the number of
+# backspace bytes must match, which proves the console mirrors an erase as
+# backspace, space, backspace.
 python3 - "$serial_log" "$expected_lines" "$expected_backspaces" <<'PYTHON'
 import sys
 

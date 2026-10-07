@@ -1,10 +1,42 @@
-//! x86_64 port-mapped I/O.
+//!
+//! # Port-Mapped I/O
+//!
+//! The `in` and `out` instructions, the only way to reach devices that live in
+//! the x86 I/O port space.
+//!
+//! ## Overview
+//!
+//! Besides the memory address space, x86 has a separate I/O port space. It
+//! has 65536 ports (`0x0000` to `0xFFFF`), each holding one byte, and is
+//! reached only with `in` and `out`. Both instructions are privileged: in
+//! ring 3 they raise a general protection fault (`#GP`) unless the TSS I/O
+//! permission bitmap allows the port, and IgniOS has no such bitmap. Port
+//! accesses are never cached.
+//!
+//! The ports this kernel uses:
+//!
+//! | Ports        | Device                    | File                     |
+//! |--------------|---------------------------|--------------------------|
+//! | `0x20-0x21`, `0xA0-0xA1` | 8259 PIC pair | `pic.ign`                |
+//! | `0x3F8-0x3FD`| COM1 16550 UART           | `serial.ign`             |
+//! | `0x42-0x43`, `0x61` | PIT channel 2      | `pit.ign`                |
+//! | `0x60`, `0x64` | 8042 PS/2 controller    | `ps2.ign`                |
+//! | `0x80`       | POST diagnostic port, used as a short delay | `pic.ign` |
+//!
+//! Inline `asm` blocks are opaque to the optimizer, so the compiler neither
+//! drops nor reorders these accesses and no `volatile` qualifier is needed.
+//! See concept doc 06.
 
+/// Namespace for the byte-wide port instructions.
 export namespace Port {
+  /// Reads one byte from `port` (`in al, dx`). The port number travels in DX,
+  /// which is why the operand is a register and not an immediate: an immediate
+  /// port is limited to `0x00-0xFF`.
   function readByte(port: u16): u8 {
     return asm (port in dx) -> (value: u8 in al) { in {value}, {port} };
   }
 
+  /// Writes `value` to `port` (`out dx, al`).
   function writeByte(port: u16, value: u8): void {
     asm (port in dx, value in al) { out {port}, {value} }
   }

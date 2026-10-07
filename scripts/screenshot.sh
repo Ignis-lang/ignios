@@ -7,6 +7,7 @@
 # The QEMU command must log COM1 to <serial-log> and must not claim stdio:
 # this script attaches the monitor there.
 
+# Exit on any error, unset variable or failed pipeline stage.
 set -euo pipefail
 
 if [ "$#" -lt 5 ] || [ "$4" != "--" ]; then
@@ -14,6 +15,8 @@ if [ "$#" -lt 5 ] || [ "$4" != "--" ]; then
   exit 2
 fi
 
+# Arguments before `--`: serial log path, output image path, timeout. Everything
+# after `--` is the QEMU command line.
 serial_log=$1
 output=$2
 timeout_seconds=$3
@@ -22,6 +25,9 @@ shift 4
 # The prompt is the last thing the kernel prints, at the start of a line.
 prompt_pattern='^> '
 
+# Produces the QEMU monitor script on stdout. The monitor reads it on its
+# standard input (`-monitor stdio`): wait until the prompt shows up in the
+# serial log, then `screendump` (framebuffer to a PPM file) and `quit`.
 send_monitor_commands() {
   local deadline=$((SECONDS + timeout_seconds))
 
@@ -40,6 +46,9 @@ send_monitor_commands() {
   echo quit
 }
 
+# Start from a clean state so a stale log or image cannot satisfy the checks.
+# The pipe feeds the monitor commands to QEMU, and the guest output goes to the
+# serial log file, so QEMU's own stdout is discarded.
 rm -f "$serial_log" "$output"
 send_monitor_commands | "$@" -monitor stdio >/dev/null
 

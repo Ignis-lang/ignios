@@ -1,12 +1,39 @@
-//! The memory primitives a freestanding C unit may call on its own: clang
-//! lowers record copies, array zeroing and similar code to `memcpy`,
-//! `memset`, `memmove` and `memcmp`.
 //!
-//! The copies and fills run as `rep movsb` and `rep stosb`, so the C compiler
-//! cannot recognize their loops as a copy and turn them back into calls to
-//! themselves.
+//! # Memory Primitives
+//!
+//! `memcpy`, `memset`, `memmove` and `memcmp`, the four C library functions a
+//! freestanding C translation unit may call on its own.
+//!
+//! ## Overview
+//!
+//! The kernel is built as one C file and compiled with clang without a C
+//! library. Even so, clang lowers record copies, array zeroing and some loops
+//! to calls to these four symbols, whether or not the source mentions them.
+//! `@externName` gives each function its C name so the linker resolves those
+//! calls here.
+//!
+//! The copy and fill use the x86 string instructions with a repeat prefix:
+//!
+//! | Instruction | Registers it reads and updates                        |
+//! |-------------|-------------------------------------------------------|
+//! | `rep movsb` | copies `[RSI]` to `[RDI]`, RCX times, RSI/RDI move by +1 or -1 (DF) |
+//! | `rep stosb` | stores `AL` to `[RDI]`, RCX times                      |
+//!
+//! The direction flag (RFLAGS.DF, bit 10) selects the step direction: clear
+//! is forward. The System V ABI requires DF clear at every function boundary,
+//! so `move` sets it only inside its own asm block and clears it before it
+//! returns.
+//!
+//! A plain `while` loop could not be used for `copy` and `fill`: clang would
+//! recognize it as a copy loop and compile it back into a call to `memcpy`,
+//! which is this function, giving infinite recursion. The asm block is opaque
+//! to that pattern matcher. See concept doc 02.
 
+/// The memory primitives. Their C names are set with `@externName`.
 export namespace Mem {
+  /// Copies `count` bytes from `source` to `destination` and returns
+  /// `destination`, as C `memcpy`. The ranges must not overlap; use `move` when
+  /// they might.
   @externName("memcpy")
   function copy(destination: *mut u8, source: *u8, count: u64): *mut u8 {
     let mut target: *mut u8 = destination;
@@ -18,6 +45,8 @@ export namespace Mem {
     return destination;
   }
 
+  /// Sets `count` bytes at `destination` to the low byte of `value` and returns
+  /// `destination`, as C `memset`. `value` is an `i32` to keep the C signature.
   @externName("memset")
   function fill(destination: *mut u8, value: i32, count: u64): *mut u8 {
     let mut target: *mut u8 = destination;
@@ -54,6 +83,9 @@ export namespace Mem {
     return destination;
   }
 
+  /// Compares `count` bytes and returns the difference of the first pair that
+  /// differs (left minus right, as unsigned bytes), or 0 when equal. It
+  /// compares one byte at a time.
   @externName("memcmp")
   function compare(left: *u8, right: *u8, count: u64): i32 {
     let mut index: u64 = 0;
