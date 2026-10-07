@@ -84,7 +84,7 @@ import Sched from "@sched";
 import Time from "@time";
 import Interrupts from "./interrupts";
 import SchedulerTest from "./scheduler_test";
-import Syscall from "./syscall";
+import Syscall from "@syscall";
 import ThreadCommands from "./thread_commands";
 import UserTest from "./user_test";
 

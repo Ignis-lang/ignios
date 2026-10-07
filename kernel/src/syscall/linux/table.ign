@@ -1,0 +1,68 @@
+//!
+//! # Linux System Call Table
+//!
+//! The Linux x86_64 numbers the kernel implements, and the table that maps
+//! each one to a kernel operation.
+//!
+//! ## Calls Implemented
+//!
+//! | Linux no | Name          | Operation              | Notes                          |
+//! |----------|---------------|------------------------|--------------------------------|
+//! | 1        | `write`       | `Operation::WRITE`     | fd 1 and 2 only, to the console |
+//! | 24       | `sched_yield` | `Operation::YIELD`     | returns 0                      |
+//! | 35       | `nanosleep`   | `Operation::SLEEP`     | rounded up to 10 ms ticks      |
+//! | 39       | `getpid`      | `Operation::GET_PID`   | the process id                 |
+//! | 60       | `exit`        | `Operation::EXIT`      | status & 0xFF                  |
+//! | 231      | `exit_group`  | `Operation::EXIT`      | same as `exit`                 |
+//!
+//! Every other number maps to `Operation::NONE` and fails with `-ENOSYS` (-38).
+//! The numbers come from the Linux x86_64 syscall table,
+//! `arch/x86/entry/syscalls/syscall_64.tbl`.
+
+import _ from "../operation";
+
+/// The number-to-operation table of the Linux ABI.
+record LinuxTableState {
+  /// One byte per system call number, the `Syscall::Operation` value it maps
+  /// to. Zero entries are `NONE`. The size must equal
+  /// `Syscall::Operation::TABLE_SIZE`.
+  static mut linux: u8[512];
+}
+
+/// The Linux numbers and the table.
+namespace Syscall::Linux {
+  /// Linux numbers, from arch/x86/entry/syscalls/syscall_64.tbl.
+  const NUMBER_WRITE: u64 = 1;
+
+  /// `sched_yield`, number 24.
+  const NUMBER_SCHED_YIELD: u64 = 24;
+
+  /// `nanosleep`, number 35.
+  const NUMBER_NANOSLEEP: u64 = 35;
+
+  /// `getpid`, number 39.
+  const NUMBER_GETPID: u64 = 39;
+
+  /// `exit`, number 60.
+  const NUMBER_EXIT: u64 = 60;
+
+  /// `exit_group`, number 231.
+  const NUMBER_EXIT_GROUP: u64 = 231;
+
+  /// Fills the table of the Linux ABI.
+  function initialize(): void {
+    let table: *mut u8 = tableBase();
+
+    *(table + NUMBER_WRITE) = Operation::WRITE;
+    *(table + NUMBER_SCHED_YIELD) = Operation::YIELD;
+    *(table + NUMBER_NANOSLEEP) = Operation::SLEEP;
+    *(table + NUMBER_GETPID) = Operation::GET_PID;
+    *(table + NUMBER_EXIT) = Operation::EXIT;
+    *(table + NUMBER_EXIT_GROUP) = Operation::EXIT;
+  }
+
+  /// The first byte of the table.
+  function tableBase(): *mut u8 {
+    return &mut LinuxTableState::linux as *mut u8;
+  }
+}

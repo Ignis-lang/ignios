@@ -1,0 +1,74 @@
+//!
+//! # Linux nanosleep
+//!
+//! `nanosleep(req, rem)`: blocks the calling process for a time.
+//!
+//! ## Overview
+//!
+//! The requested time is copied from user memory, validated, rounded up to
+//! whole timer ticks (10 ms at 100 Hz) and slept through the scheduler. The
+//! sleep is never interrupted, so `rem`, when given, is set to zero.
+
+import Mm from "@mm";
+import Proc from "@proc";
+import Sched from "@sched";
+import Time from "@time";
+import _ from "./errno";
+
+/// The `nanosleep` handler.
+namespace Syscall::Linux {
+  /// 10^9.
+  const NANOSECONDS_PER_SECOND: u64 = 1000000000;
+
+  /// 10^7 ns = 10 ms, one tick of the 100 Hz timer (`Time::Timer::FREQUENCY`).
+  const NANOSECONDS_PER_TICK: u64 = 10000000;
+
+  /// Longest sleep in seconds, so the tick count cannot overflow.
+  const MAX_SLEEP_SECONDS: u64 = 1000000;
+
+  /// `struct timespec`: seconds and nanoseconds, both signed 64-bit.
+  @cLayout
+  record Timespec {
+    /// Whole seconds.
+    public seconds: i64;
+
+    /// Nanoseconds, 0 to 999999999.
+    public nanoseconds: i64;
+  }
+
+  /// `nanosleep(req, rem)`: blocks for the requested time rounded up to
+  /// whole timer ticks (10 ms). The sleep is never interrupted, so `rem`,
+  /// when given, is set to zero.
+  function nanosleep(request: u64, remaining: u64): u64 {
+    let root: u64 = Proc::Process::currentRoot();
+    let mut time: Timespec = Timespec { seconds: 0, nanoseconds: 0 };
+
+    if (!Mm::AddressSpace::copyFromUser(root, &mut time as *mut u8, request, 16)) {
+      return Linux::failure(Linux::EFAULT);
+    }
+
+    if (time.seconds < 0 || time.nanoseconds < 0 || (time.nanoseconds as u64) >= NANOSECONDS_PER_SECOND) {
+      return Linux::failure(Linux::EINVAL);
+    }
+
+    let mut seconds: u64 = time.seconds as u64;
+
+    if (seconds > MAX_SLEEP_SECONDS) {
+      seconds = MAX_SLEEP_SECONDS;
+    }
+
+    let ticks: u64 = seconds * Time::Timer::FREQUENCY + ((time.nanoseconds as u64) + NANOSECONDS_PER_TICK - 1) / NANOSECONDS_PER_TICK;
+
+    Sched::Scheduler::sleep(ticks);
+
+    if (remaining != 0) {
+      let zero: Timespec = Timespec { seconds: 0, nanoseconds: 0 };
+
+      if (!Mm::AddressSpace::copyToUser(root, remaining, &zero as *u8, 16)) {
+        return Linux::failure(Linux::EFAULT);
+      }
+    }
+
+    return 0;
+  }
+}

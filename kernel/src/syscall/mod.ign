@@ -1,0 +1,55 @@
+//!
+//! # Syscall
+//!
+//! System calls from ring 3: the dispatcher and the handlers of each ABI.
+//!
+//! ## Overview
+//!
+//! The only ABI so far is Linux x86_64, so a static ELF program built for
+//! Linux can run. Dispatch is two steps: the ABI of the calling process turns
+//! the call number into a kernel operation, and the kernel runs the operation.
+//! Adding another ABI means adding a table next to `linux/` that maps its
+//! numbers to the same operations.
+//!
+//! Every pointer a process passes is checked before the kernel touches it
+//! (see `linux/write.ign`). A refused range is `-EFAULT`.
+//!
+//! ## Public API
+//!
+//! | Name                  | File            | Purpose                                            |
+//! |-----------------------|-----------------|----------------------------------------------------|
+//! | `Syscall::initialize` | `dispatch.ign`  | fills the Linux table                              |
+//! | `Syscall::dispatch`   | `dispatch.ign`  | called by `usermode_asm.S` for every `SYSCALL`     |
+//! | `Syscall::Operation`  | `operation.ign` | the ABI independent operations and the table size  |
+//! | `Syscall::Linux`      | `linux/*.ign`   | numbers, errno values, the table and the handlers  |
+//!
+//! The Linux files: `table.ign` (numbers and the table), `errno.ign` (errno
+//! values and `failure`), `write.ign` and `nanosleep.ign` (the handlers).
+//!
+//! ## Dependencies
+//!
+//! | Imports   | Why                                                              |
+//! |-----------|------------------------------------------------------------------|
+//! | `Proc`    | the current process, its ABI and address space, `exit`           |
+//! | `Sched`   | `yield` and `sleep`                                              |
+//! | `Mm`      | checked copies to and from user memory                           |
+//! | `Time`    | the tick rate that `nanosleep` rounds to                         |
+//! | `Arch`    | the `Arch::InterruptFrame` the entry stub builds                 |
+//! | `Drivers` | `write` prints on the console                                    |
+//!
+//! `main` calls `Syscall::initialize`. The assembly entry stub in
+//! `arch/x86_64/usermode_asm.S` calls `dispatch` and `badReturn` by their
+//! `@externName` symbols, so this facade has to be imported or they are never
+//! compiled.
+
+import _ from "./dispatch";
+import _ from "./linux/errno";
+import _ from "./linux/nanosleep";
+import _ from "./linux/table";
+import _ from "./linux/write";
+import _ from "./operation";
+
+/// Aggregate namespace of the system call code. `dispatch.ign` adds the
+/// dispatcher and `operation.ign` and `linux/*.ign` add `Syscall::Operation`
+/// and `Syscall::Linux`.
+export namespace Syscall {}

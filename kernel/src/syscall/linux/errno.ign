@@ -1,0 +1,33 @@
+//!
+//! # Linux errno Values
+//!
+//! The error numbers the Linux ABI returns, and how a failing call reports
+//! them.
+//!
+//! ## Overview
+//!
+//! A Linux system call returns its result in RAX. A value from -4095 to -1 is
+//! a negated errno, so `failure` negates the number and reinterprets it as an
+//! unsigned word. The numbers come from `include/uapi/asm-generic/errno-base.h`.
+
+/// The errno values the implemented calls use.
+namespace Syscall::Linux {
+  /// errno values, from include/uapi/asm-generic/errno-base.h.
+  const EBADF: i64 = 9;
+
+  /// Bad address (14): a user pointer failed validation.
+  const EFAULT: i64 = 14;
+
+  /// Invalid argument (22).
+  const EINVAL: i64 = 22;
+
+  /// Function not implemented (38).
+  const ENOSYS: i64 = 38;
+
+  /// The value a failing call returns in RAX: the errno, negated.
+  function failure(errno: i64): u64 {
+    let value: i64 = 0 - errno;
+
+    return value as u64;
+  }
+}

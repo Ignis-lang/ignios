@@ -1,0 +1,115 @@
+//!
+//! # System Call Dispatch
+//!
+//! The entry point from ring 3 into the kernel, and the two-step lookup that
+//! turns a call number into an operation.
+//!
+//! ## Flow
+//!
+//! `usermode_asm.S` builds an `Arch::InterruptFrame` for a `SYSCALL` and calls
+//! `dispatch` with it. The result goes back in RAX, where a value from -4095
+//! to -1 is a negated errno.
+//!
+//! ```text
+//!   user:    mov eax, 1 ; mov edi, 1 ; lea rsi, [msg] ; mov edx, n ; syscall
+//!                │
+//!                ▼  (hardware: RCX = RIP, R11 = RFLAGS, IF cleared, CPL 0)
+//!   kernel:  ignis_syscall_entry          switch to the kernel stack, build the frame
+//!                │
+//!                ▼
+//!            Syscall::dispatch(frame)
+//!                ├─ lookup(abi, frame.rax)     number -> operation (Operation::WRITE ...)
+//!                ├─ run the operation          arguments from rdi, rsi, rdx
+//!                └─ frame.rax := result        value or -errno
+//!                │
+//!                ▼
+//!            ignis_syscall_entry          reload registers, sysretq
+//! ```
+//!
+//! Each process has an ABI, its personality. The ABI owns a table that turns a
+//! system call number into an operation of the kernel, a small number that does
+//! not depend on any convention (`Syscall::Operation`), and the kernel runs
+//! that operation. The only ABI so far is Linux x86_64 (`Syscall::Linux`): the
+//! call number in RAX, the arguments in RDI, RSI, RDX, R10, R8 and R9, Linux's
+//! numbers and Linux's errno values. A number the table does not know turns
+//! into `Operation::NONE` and fails with `-ENOSYS`.
+//!
+//! The handlers run with interrupts off, which is how `SYSCALL` leaves them:
+//! the kernel has one CPU, so nothing else can touch the state in the
+//! meantime, and a handler that waits (`nanosleep`) does it through the
+//! scheduler, which switches threads with interrupts off as well.
+//!
+//! See concept doc 15.
+
+import Arch from "@arch";
+import Drivers from "@drivers";
+import Proc from "@proc";
+import Sched from "@sched";
+import _ from "./linux/errno";
+import _ from "./linux/nanosleep";
+import _ from "./linux/table";
+import _ from "./linux/write";
+import _ from "./operation";
+
+/// The dispatcher.
+namespace Syscall {
+  /// Fills the table of the Linux ABI.
+  function initialize(): void {
+    Linux::initialize();
+  }
+
+  /// Called by the entry stub with interrupts off, on the kernel stack of
+  /// the calling thread.
+  @externName("ignis_syscall_dispatch")
+  function dispatch(frame: *mut Arch::InterruptFrame): void {
+    let operation: u8 = lookup(Proc::Process::currentAbi(), (*frame).rax);
+
+    let first: u64 = (*frame).rdi;
+    let second: u64 = (*frame).rsi;
+    let third: u64 = (*frame).rdx;
+
+    if (operation == Operation::EXIT) {
+      Proc::Process::exitCurrent(first & 0xFF);
+    }
+
+    if (operation == Operation::WRITE) {
+      (*frame).rax = Linux::write(first, second, third);
+    } else if (operation == Operation::GET_PID) {
+      (*frame).rax = Proc::Process::currentId();
+    } else if (operation == Operation::YIELD) {
+      Sched::Scheduler::yield();
+      (*frame).rax = 0;
+    } else if (operation == Operation::SLEEP) {
+      (*frame).rax = Linux::nanosleep(first, second);
+    } else {
+      (*frame).rax = Linux::failure(Linux::ENOSYS);
+    }
+  }
+
+  /// The operation the ABI `abi` maps `number` to.
+  function lookup(abi: u64, number: u64): u8 {
+    if (number >= Operation::TABLE_SIZE) {
+      return Operation::NONE;
+    }
+
+    return *(tableFor(abi) + number);
+  }
+
+  /// The number-to-operation table of an ABI. Linux is the only one.
+  function tableFor(abi: u64): *mut u8 {
+    return Linux::tableBase();
+  }
+
+  /// Called by the entry stub when the return address of a system call is
+  /// not canonical and `SYSRET` would fault in ring 0.
+  @externName("ignis_syscall_bad_return")
+  function badReturn(rip: u64): never {
+    Drivers::Console::write("process ");
+    Drivers::Console::writeDecimal(Proc::Process::currentId());
+    Drivers::Console::write(": non-canonical return address ");
+    Drivers::Console::writeHex(rip);
+    Drivers::Console::writeLine("");
+
+    Proc::Process::killCurrent(139);
+  }
+}

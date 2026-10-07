@@ -1,0 +1,37 @@
+//!
+//! # System Call Operations
+//!
+//! The small numbers the kernel uses for what a system call does, independent
+//! of any ABI.
+//!
+//! ## Overview
+//!
+//! Dispatch has two steps so the kernel can speak more than one convention.
+//! An ABI owns a table that turns its own system call number into one of these
+//! operations, and the kernel then runs the operation. A number the table does
+//! not know turns into `NONE`. The tables are `TABLE_SIZE` bytes long, so
+//! numbers 0 to 511 can be mapped.
+
+/// The kernel operations and the size of an ABI table.
+namespace Syscall::Operation {
+  /// System call numbers 0 to 511 can be mapped. The Linux table has fewer.
+  const TABLE_SIZE: u64 = 512;
+
+  /// Kernel operations. 0 is what a number the ABI does not know maps to.
+  const NONE: u8 = 0;
+
+  /// End the process.
+  const EXIT: u8 = 1;
+
+  /// Write bytes to the console.
+  const WRITE: u8 = 2;
+
+  /// Return the process id.
+  const GET_PID: u8 = 3;
+
+  /// Give up the processor.
+  const YIELD: u8 = 4;
+
+  /// Sleep for a time.
+  const SLEEP: u8 = 5;
+}

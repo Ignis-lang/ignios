@@ -66,3 +66,4 @@ emit = ["c"]
 "@time" = "kernel/src/time"
 "@sched" = "kernel/src/sched"
 "@proc" = "kernel/src/proc"
+"@syscall" = "kernel/src/syscall"
