@@ -12,11 +12,11 @@
 //! nest by saving the previous state:
 //!
 //! ```text
-//!   let saved = Cpu::saveAndDisableInterrupts();   // pushfq; pop; cli
+//!   let saved = Arch::Cpu::saveAndDisableInterrupts();   // pushfq; pop; cli
 //!       ... critical section ...
-//!       let inner = Cpu::saveAndDisableInterrupts();   // nested: saved IF = 0
-//!       Cpu::restoreInterrupts(inner);                 // IF stays off
-//!   Cpu::restoreInterrupts(saved);                 // IF back as it was
+//!       let inner = Arch::Cpu::saveAndDisableInterrupts();   // nested: saved IF = 0
+//!       Arch::Cpu::restoreInterrupts(inner);                 // IF stays off
+//!   Arch::Cpu::restoreInterrupts(saved);                     // IF back as it was
 //! ```
 //!
 //! ## Registers Touched
@@ -35,7 +35,7 @@
 //! Intel SDM Vol. 3A, "System Architecture Overview".
 
 /// The processor control API.
-export namespace Cpu {
+namespace Arch::Cpu {
   /// RFLAGS bit 9, the interrupt-enable flag.
   const FLAGS_INTERRUPT_ENABLE: u64 = 0x200;
 

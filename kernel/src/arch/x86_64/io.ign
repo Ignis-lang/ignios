@@ -28,7 +28,7 @@
 //! See concept doc 06.
 
 /// Namespace for the byte-wide port instructions.
-export namespace Port {
+namespace Arch::Port {
   /// Reads one byte from `port` (`in al, dx`). The port number travels in DX,
   /// which is why the operand is a register and not an immediate: an immediate
   /// port is limited to `0x00-0xFF`.

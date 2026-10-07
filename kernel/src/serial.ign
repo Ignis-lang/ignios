@@ -51,9 +51,8 @@
 //!
 //! See concept doc 06 and the National Semiconductor PC16550D datasheet.
 
+import Arch from "@arch";
 import Lib from "@lib";
-import Cpu from "./arch/x86_64/cpu";
-import Port from "./arch/x86_64/io";
 
 /// The serial port API.
 export namespace Serial {
@@ -98,35 +97,35 @@ export namespace Serial {
   /// Programs 115200 baud, 8N1 and the FIFOs, with UART interrupts off.
   /// Must run before any other function of this namespace.
   function initialize(): void {
-    Port::writeByte(COM1 + INTERRUPT_ENABLE, 0x00);
-    Port::writeByte(COM1 + LINE_CONTROL, DIVISOR_LATCH_ACCESS);
+    Arch::Port::writeByte(COM1 + INTERRUPT_ENABLE, 0x00);
+    Arch::Port::writeByte(COM1 + LINE_CONTROL, DIVISOR_LATCH_ACCESS);
 
     // With DLAB set, offsets 0 and 1 are the divisor latch: low byte 1 and (next
     // line) high byte 0 make the divisor 1, so 115200 / 1 = 115200 baud. The
     // second write to INTERRUPT_ENABLE is the divisor high byte, not an
     // interrupt mask.
-    Port::writeByte(COM1 + DATA, 0x01);
-    Port::writeByte(COM1 + INTERRUPT_ENABLE, 0x00);
+    Arch::Port::writeByte(COM1 + DATA, 0x01);
+    Arch::Port::writeByte(COM1 + INTERRUPT_ENABLE, 0x00);
 
     // This write clears DLAB, which gives offsets 0 and 1 back to the data and
     // interrupt enable registers.
-    Port::writeByte(COM1 + LINE_CONTROL, EIGHT_BITS_NO_PARITY_ONE_STOP);
-    Port::writeByte(COM1 + FIFO_CONTROL, FIFO_ENABLE_CLEAR_14_BYTES);
-    Port::writeByte(COM1 + MODEM_CONTROL, DATA_TERMINAL_READY_REQUEST_TO_SEND_OUT2);
+    Arch::Port::writeByte(COM1 + LINE_CONTROL, EIGHT_BITS_NO_PARITY_ONE_STOP);
+    Arch::Port::writeByte(COM1 + FIFO_CONTROL, FIFO_ENABLE_CLEAR_14_BYTES);
+    Arch::Port::writeByte(COM1 + MODEM_CONTROL, DATA_TERMINAL_READY_REQUEST_TO_SEND_OUT2);
   }
 
   /// Sends one raw byte, busy-waiting until the transmitter is ready. Does not
   /// translate line endings and does not disable interrupts.
   function writeByte(value: u8): void {
-    while ((Port::readByte(COM1 + LINE_STATUS) & TRANSMIT_HOLDING_EMPTY) == 0) {
+    while ((Arch::Port::readByte(COM1 + LINE_STATUS) & TRANSMIT_HOLDING_EMPTY) == 0) {
     }
 
-    Port::writeByte(COM1 + DATA, value);
+    Arch::Port::writeByte(COM1 + DATA, value);
   }
 
   /// Writes a NUL-terminated string, sending `\r\n` for each `\n`.
   function write(text: str): void {
-    let saved: u64 = Cpu::saveAndDisableInterrupts();
+    let saved: u64 = Arch::Cpu::saveAndDisableInterrupts();
     let mut cursor: *u8 = text as *u8;
 
     while (*cursor != 0) {
@@ -138,34 +137,34 @@ export namespace Serial {
       cursor = cursor + 1;
     }
 
-    Cpu::restoreInterrupts(saved);
+    Arch::Cpu::restoreInterrupts(saved);
   }
 
   /// Writes `text` followed by a newline, in one uninterrupted piece.
   function writeLine(text: str): void {
-    let saved: u64 = Cpu::saveAndDisableInterrupts();
+    let saved: u64 = Arch::Cpu::saveAndDisableInterrupts();
 
     write(text);
     write("\n");
 
-    Cpu::restoreInterrupts(saved);
+    Arch::Cpu::restoreInterrupts(saved);
   }
 
   /// Writes `value` in decimal (see `Lib::Format::decimal`).
   function writeDecimal(value: u64): void {
-    let saved: u64 = Cpu::saveAndDisableInterrupts();
+    let saved: u64 = Arch::Cpu::saveAndDisableInterrupts();
 
     Lib::Format::decimal(value, writeByte);
 
-    Cpu::restoreInterrupts(saved);
+    Arch::Cpu::restoreInterrupts(saved);
   }
 
   /// Writes `value` as `0x` and 16 hex digits (see `Lib::Format::hexadecimal`).
   function writeHex(value: u64): void {
-    let saved: u64 = Cpu::saveAndDisableInterrupts();
+    let saved: u64 = Arch::Cpu::saveAndDisableInterrupts();
 
     Lib::Format::hexadecimal(value, writeByte);
 
-    Cpu::restoreInterrupts(saved);
+    Arch::Cpu::restoreInterrupts(saved);
   }
 }

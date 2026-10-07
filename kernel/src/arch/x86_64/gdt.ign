@@ -87,7 +87,7 @@
 //! Management".
 
 /// The task state segment of the 64-bit mode. Packed to match the hardware
-/// layout exactly; the size is `Gdt::TSS_SIZE`.
+/// layout exactly; the size is `Arch::Gdt::TSS_SIZE`.
 @cLayout
 @packed
 record TaskStateSegment {
@@ -164,7 +164,7 @@ record GdtState {
     0,
   ];
 
-  /// The one TSS, initialized by `Gdt::initialize`.
+  /// The one TSS, initialized by `Arch::Gdt::initialize`.
   static mut tss: TaskStateSegment = TaskStateSegment {
     reserved0: 0,
     rsp0: 0,
@@ -200,7 +200,7 @@ record DoubleFaultStack {
 }
 
 /// The GDT and TSS API.
-export namespace Gdt {
+namespace Arch::Gdt {
   /// Selector of the kernel code segment (table index 1).
   const KERNEL_CODE: u16 = 0x08;
 

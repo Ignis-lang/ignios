@@ -46,8 +46,7 @@
 //! `initialize` fills, and the boot log prints `idt: 50 gates loaded`. See
 //! concept doc 04.
 
-import Gdt from "./gdt";
-import Lapic from "./lapic";
+import _ from "./gdt";
 
 /// Implemented in `interrupt_asm.S`: returns the entry address of the thunk
 /// for `vector`, which must be 0 to 48 or 255.
@@ -58,7 +57,7 @@ extern IdtAsm {
 
 /// The 256 gates, 16 bytes each, in zero-initialized storage.
 record IdtStorage {
-  /// 4096 bytes: 256 gates of 16 bytes. All zero until `Idt::initialize` fills
+  /// 4096 bytes: 256 gates of 16 bytes. All zero until `Arch::Idt::initialize` fills
   /// the gates that have a thunk.
   static mut GATES: u8[4096];
 }
@@ -76,7 +75,7 @@ record IdtPointer {
 }
 
 /// The IDT API. `initialize` is the only entry point the rest of the kernel uses.
-export namespace Idt {
+namespace Arch::Idt {
   /// Number of vectors the processor can deliver.
   const GATE_COUNT: u64 = 256;
 
@@ -98,9 +97,12 @@ export namespace Idt {
   /// Fills the gates that have a thunk and loads the table. The kernel GDT
   /// must be loaded first, because the gates name its code selector and the
   /// double fault gate its IST slot. Every other gate stays not present.
-  function initialize(): void {
-    let selector: u64 = Gdt::kernelCode() as u64;
-    let ist: u64 = Gdt::doubleFaultIst() as u64;
+  /// `spuriousVector` is the local APIC spurious vector, which has a gate of
+  /// its own; the architecture code does not know the APIC, so the caller
+  /// passes it in.
+  function initialize(spuriousVector: u64): void {
+    let selector: u64 = Arch::Gdt::kernelCode() as u64;
+    let ist: u64 = Arch::Gdt::doubleFaultIst() as u64;
 
     // Vectors 0 to 48 are contiguous. The double fault gate alone uses IST1.
     let mut vector: u64 = 0;
@@ -113,7 +115,7 @@ export namespace Idt {
     }
 
     // The spurious vector is far from the others, so it is installed on its own.
-    setGate(Lapic::spuriousVector(), IdtAsm::ignis_interrupt_thunk(Lapic::spuriousVector()), selector, 0, INTERRUPT_GATE);
+    setGate(spuriousVector, IdtAsm::ignis_interrupt_thunk(spuriousVector), selector, 0, INTERRUPT_GATE);
 
     let descriptor: IdtPointer = IdtPointer {
       limit: (GATE_COUNT * GATE_SIZE - 1) as u16,

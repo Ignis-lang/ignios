@@ -59,8 +59,8 @@
 //!
 //! See concept doc 14.
 
-import Cpu from "./cpu";
-import Gdt from "./gdt";
+import _ from "./cpu";
+import _ from "./gdt";
 
 /// Functions implemented in `usermode_asm.S`.
 extern UserModeAsm {
@@ -76,7 +76,7 @@ extern UserModeAsm {
 }
 
 /// The user mode API.
-export namespace UserMode {
+namespace Arch::UserMode {
   /// MSR number of IA32_EFER.
   const EFER_MSR: u32 = 0xC0000080;
 
@@ -115,37 +115,37 @@ export namespace UserMode {
   /// Enables `SYSCALL` and points it at the entry stub. The GDT must be
   /// loaded.
   function initialize(): void {
-    let sysretBase: u64 = (Gdt::USER_DATA - 8) as u64;
+    let sysretBase: u64 = (Arch::Gdt::USER_DATA - 8) as u64;
 
-    if (Gdt::USER_CODE as u64 != sysretBase + 16) {
+    if (Arch::Gdt::USER_CODE as u64 != sysretBase + 16) {
       @panic("usermode: the GDT order does not fit SYSRET");
     }
 
-    Cpu::writeMsr(STAR_MSR, (sysretBase << 48) | ((Gdt::KERNEL_CODE as u64) << 32));
-    Cpu::writeMsr(LSTAR_MSR, UserModeAsm::ignis_syscall_entry_address());
-    Cpu::writeMsr(FMASK_MSR, SYSCALL_FLAG_MASK);
-    Cpu::writeMsr(EFER_MSR, Cpu::readMsr(EFER_MSR) | EFER_SYSTEM_CALL_ENABLE);
+    Arch::Cpu::writeMsr(STAR_MSR, (sysretBase << 48) | ((Arch::Gdt::KERNEL_CODE as u64) << 32));
+    Arch::Cpu::writeMsr(LSTAR_MSR, UserModeAsm::ignis_syscall_entry_address());
+    Arch::Cpu::writeMsr(FMASK_MSR, SYSCALL_FLAG_MASK);
+    Arch::Cpu::writeMsr(EFER_MSR, Arch::Cpu::readMsr(EFER_MSR) | EFER_SYSTEM_CALL_ENABLE);
   }
 
   /// IA32_STAR as written by `initialize`.
   function starValue(): u64 {
-    return Cpu::readMsr(STAR_MSR);
+    return Arch::Cpu::readMsr(STAR_MSR);
   }
 
   /// IA32_LSTAR as written by `initialize`.
   function entryAddress(): u64 {
-    return Cpu::readMsr(LSTAR_MSR);
+    return Arch::Cpu::readMsr(LSTAR_MSR);
   }
 
   /// IA32_FMASK as written by `initialize`.
   function flagMask(): u64 {
-    return Cpu::readMsr(FMASK_MSR);
+    return Arch::Cpu::readMsr(FMASK_MSR);
   }
 
   /// Makes `top`, one past the end of a kernel stack, the stack the next
   /// ring 3 to ring 0 transition of any kind lands on.
   function setKernelStack(top: u64): void {
-    Gdt::setKernelStack(top);
+    Arch::Gdt::setKernelStack(top);
     UserModeAsm::ignis_set_syscall_kernel_stack(top);
   }
 

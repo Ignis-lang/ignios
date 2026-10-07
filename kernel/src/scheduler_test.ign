@@ -16,9 +16,8 @@
 //! takes where it is named, so every `spawn` here names its function.
 //! `main.ign` runs them in the order above and prints a line after each.
 
+import Arch from "@arch";
 import AddressSpace from "./address_space";
-import ContextAsm from "./arch/x86_64/context";
-import Cpu from "./arch/x86_64/cpu";
 import Hhdm from "./hhdm";
 import Pmm from "./pmm";
 import Scheduler from "./scheduler";
@@ -79,13 +78,13 @@ export namespace SchedulerTest {
   /// slots, sleeping, and a full table. The scheduler must be initialized
   /// and the timer running. Interrupts are left as they were found.
   function runCooperative(): void {
-    let saved: u64 = Cpu::saveAndDisableInterrupts();
+    let saved: u64 = Arch::Cpu::saveAndDisableInterrupts();
 
     testRoundRobin();
     testSleep();
     testFullTable();
 
-    Cpu::restoreInterrupts(saved);
+    Arch::Cpu::restoreInterrupts(saved);
   }
 
   /// Two threads in two address spaces read the same user address while
@@ -94,7 +93,7 @@ export namespace SchedulerTest {
   /// spaces' frames when the threads end and checks the PMM count. Interrupts
   /// are left as they were found.
   function runAddressSpaces(): void {
-    let saved: u64 = Cpu::saveAndDisableInterrupts();
+    let saved: u64 = Arch::Cpu::saveAndDisableInterrupts();
     let freeBefore: u64 = Pmm::freeFrameCount();
     let mut ids: u64[2];
     let mut index: u64 = 0;
@@ -111,7 +110,7 @@ export namespace SchedulerTest {
 
       *(Hhdm::toVirtual(frame) as *mut u64) = SPACE_MARKER + index;
 
-      ids[index] = Scheduler::spawnIn(ContextAsm::ignis_function_address(spaceReader), index, root);
+      ids[index] = Scheduler::spawnIn(Arch::ContextAsm::ignis_function_address(spaceReader), index, root);
 
       if (ids[index] == Scheduler::NO_THREAD) {
         @panic("address space switch self-test: cannot spawn");
@@ -126,7 +125,7 @@ export namespace SchedulerTest {
       @panic("address space switch self-test: a thread saw another thread's page");
     }
 
-    if (Cpu::readCr3() != Vmm::rootTable()) {
+    if (Arch::Cpu::readCr3() != Vmm::rootTable()) {
       @panic("address space switch self-test: CR3 is not back on the kernel space");
     }
 
@@ -134,7 +133,7 @@ export namespace SchedulerTest {
       @panic("address space switch self-test: an address space leaked frames");
     }
 
-    Cpu::restoreInterrupts(saved);
+    Arch::Cpu::restoreInterrupts(saved);
   }
 
   /// Two threads that spin without ever yielding must both get the processor
@@ -143,25 +142,25 @@ export namespace SchedulerTest {
   /// Interrupts are left as they were found. Returns how many times the
   /// timer took the processor away from a thread that had not given it up.
   function runPreemptive(): u64 {
-    let saved: u64 = Cpu::saveAndDisableInterrupts();
+    let saved: u64 = Arch::Cpu::saveAndDisableInterrupts();
     let preemptionsBefore: u64 = Scheduler::preemptionCount();
 
     SchedulerTestState::stop = 0;
     SchedulerTestState::spins[0] = 0;
     SchedulerTestState::spins[1] = 0;
 
-    let first: u64 = Scheduler::spawn(ContextAsm::ignis_function_address(spinner), 0);
-    let second: u64 = Scheduler::spawn(ContextAsm::ignis_function_address(spinner), 1);
+    let first: u64 = Scheduler::spawn(Arch::ContextAsm::ignis_function_address(spinner), 0);
+    let second: u64 = Scheduler::spawn(Arch::ContextAsm::ignis_function_address(spinner), 1);
 
     let end: u64 = Timer::ticks() + PREEMPTION_TICKS;
 
-    Cpu::enableInterrupts();
+    Arch::Cpu::enableInterrupts();
 
     while (Timer::ticks() < end) {
-      Cpu::waitForInterrupt();
+      Arch::Cpu::waitForInterrupt();
     }
 
-    Cpu::disableInterrupts();
+    Arch::Cpu::disableInterrupts();
     @writeVolatile<u64>(&mut SchedulerTestState::stop as *mut u64, 1);
 
     joinRange(first, second);
@@ -176,7 +175,7 @@ export namespace SchedulerTest {
       @panic("preemption self-test: the timer did not take the processor away");
     }
 
-    Cpu::restoreInterrupts(saved);
+    Arch::Cpu::restoreInterrupts(saved);
 
     return preemptions;
   }
@@ -189,9 +188,9 @@ export namespace SchedulerTest {
     SchedulerTestState::traceLength = 0;
 
     let threadsBefore: u64 = Scheduler::threadCount();
-    let first: u64 = Scheduler::spawn(ContextAsm::ignis_function_address(roundRobinWorker), 0);
-    let second: u64 = Scheduler::spawn(ContextAsm::ignis_function_address(roundRobinWorker), 1);
-    let third: u64 = Scheduler::spawn(ContextAsm::ignis_function_address(roundRobinWorker), 2);
+    let first: u64 = Scheduler::spawn(Arch::ContextAsm::ignis_function_address(roundRobinWorker), 0);
+    let second: u64 = Scheduler::spawn(Arch::ContextAsm::ignis_function_address(roundRobinWorker), 1);
+    let third: u64 = Scheduler::spawn(Arch::ContextAsm::ignis_function_address(roundRobinWorker), 2);
 
     if (second != first + 1 || third != second + 1) {
       @panic("scheduler self-test: thread ids are not sequential");
@@ -227,7 +226,7 @@ export namespace SchedulerTest {
   function testSleep(): void {
     SchedulerTestState::sleptTicks = 0;
 
-    let id: u64 = Scheduler::spawn(ContextAsm::ignis_function_address(sleepWorker), SLEEP_TICKS);
+    let id: u64 = Scheduler::spawn(Arch::ContextAsm::ignis_function_address(sleepWorker), SLEEP_TICKS);
 
     joinRange(id, id);
 
@@ -245,7 +244,7 @@ export namespace SchedulerTest {
     let mut spawned: u64 = 0;
 
     while (true) {
-      let id: u64 = Scheduler::spawn(ContextAsm::ignis_function_address(sleepWorker), 2);
+      let id: u64 = Scheduler::spawn(Arch::ContextAsm::ignis_function_address(sleepWorker), 2);
 
       if (id == Scheduler::NO_THREAD) {
         break;
@@ -265,7 +264,7 @@ export namespace SchedulerTest {
 
     joinRange(first, last);
 
-    let again: u64 = Scheduler::spawn(ContextAsm::ignis_function_address(sleepWorker), 1);
+    let again: u64 = Scheduler::spawn(Arch::ContextAsm::ignis_function_address(sleepWorker), 1);
 
     if (again == Scheduler::NO_THREAD) {
       @panic("scheduler self-test: a freed slot could not be reused");

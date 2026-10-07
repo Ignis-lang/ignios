@@ -1,0 +1,49 @@
+//!
+//! # Arch
+//!
+//! Everything that is specific to the x86_64 processor and its legacy chips:
+//! privileged instructions, port I/O, the descriptor tables, the 8259 and the
+//! PIT, the context switch and the entry into ring 3. The assembly files of
+//! the kernel live in `arch/x86_64/` next to the Ignis code that calls them.
+//!
+//! ## Public API
+//!
+//! | Name                  | File                 | Purpose                                              |
+//! |-----------------------|----------------------|------------------------------------------------------|
+//! | `Arch::Cpu`           | `cpu.ign`            | interrupt flag, `hlt`, MSRs, control registers        |
+//! | `Arch::Port`          | `io.ign`             | `in` and `out` on the I/O port space                 |
+//! | `Arch::Gdt`           | `gdt.ign`            | GDT, TSS and the segment registers                   |
+//! | `Arch::Idt`           | `idt.ign`            | the interrupt descriptor table                       |
+//! | `Arch::Pic`           | `pic.ign`            | the 8259 pair: remap, mask, acknowledge              |
+//! | `Arch::Pit`           | `pit.ign`            | PIT channel 2 as a one-shot countdown                |
+//! | `Arch::Context`       | `context.ign`        | thread stack preparation and the context switch      |
+//! | `Arch::ContextAsm`    | `context.ign`        | the routines of `context_asm.S`                      |
+//! | `Arch::UserMode`      | `usermode.ign`       | `SYSCALL` setup and the jump to ring 3               |
+//! | `Arch::InterruptFrame`| `interrupt_frame.ign`| the registers the entry stubs save                   |
+//!
+//! ## Dependencies
+//!
+//! None. `Arch` is a leaf: it imports no other subsystem. Where it needs a
+//! value that another subsystem owns it takes the value as a parameter. For
+//! example `Arch::Idt::initialize` receives the local APIC spurious vector
+//! from its caller, so the descriptor table does not import `Apic`.
+//!
+//! The interrupt dispatcher that the entry stubs call is not here, because it
+//! needs the scheduler, the processes and the console. It is `Trap`.
+//!
+//! The `import _` lines make the compiler read each file, which adds its
+//! namespace to `Arch`. A file that no import reaches is not compiled.
+
+import _ from "./x86_64/context";
+import _ from "./x86_64/cpu";
+import _ from "./x86_64/gdt";
+import _ from "./x86_64/idt";
+import _ from "./x86_64/interrupt_frame";
+import _ from "./x86_64/io";
+import _ from "./x86_64/pic";
+import _ from "./x86_64/pit";
+import _ from "./x86_64/usermode";
+
+/// Aggregate namespace of the architecture code. The files above contribute
+/// the sub-namespaces listed in the module header.
+export namespace Arch {}

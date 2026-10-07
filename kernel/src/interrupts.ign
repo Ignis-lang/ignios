@@ -30,7 +30,7 @@
 //! process.
 //!
 //! Device interrupts come from the IOAPIC and are acknowledged at the local
-//! APIC with `Lapic::endOfInterrupt`. The 8259 is fully masked, but its
+//! APIC with `Apic::Lapic::endOfInterrupt`. The 8259 is fully masked, but its
 //! vectors `0x20-0x2F` stay mapped to thunks so a spurious 8259 interrupt is
 //! absorbed. The local APIC's spurious vector is ignored without any
 //! acknowledgement.
@@ -84,121 +84,14 @@
 //! See concept doc 04 and Intel SDM Vol. 3A, "Interrupt and Exception
 //! Handling".
 
-import Cpu from "./arch/x86_64/cpu";
-import Lapic from "./arch/x86_64/lapic";
-import Pic from "./arch/x86_64/pic";
+import Apic from "@apic";
+import Arch from "@arch";
 import Color, Console from "./console";
 import Process from "./process";
 import Ps2 from "./ps2";
 import Scheduler from "./scheduler";
 import Serial from "./serial";
 import Timer from "./timer";
-
-/// The state `interrupt_asm.S` leaves on the stack, lowest address first.
-/// The registers are pushed by the common stub, `vector` by the thunk, and
-/// `errorCode` by the thunk when the processor did not push one. The last
-/// five fields are the processor's own frame.
-///
-/// ```text
-///   offset  field        pushed by
-///     0     rax          common stub (last push, lowest address)
-///     8     rbx          ...
-///    16     rcx
-///    24     rdx
-///    32     rsi
-///    40     rdi
-///    48     rbp
-///    56     r8
-///    64     r9
-///    72     r10
-///    80     r11
-///    88     r12
-///    96     r13
-///   104     r14
-///   112     r15          common stub (first push)
-///   120     vector       thunk
-///   128     errorCode    processor, or 0 from the thunk
-///   136     rip          processor: where to resume
-///   144     cs           processor: code segment; bits 1:0 are the CPL
-///   152     rflags       processor
-///   160     rsp          processor: stack pointer of the interrupted code
-///   168     ss           processor
-/// ```
-///
-/// The `SYSCALL` entry stub builds the same frame by hand, with vector 256,
-/// so system calls and interrupts share one record. A handler may change the
-/// saved values: the registers are reloaded from the frame on the way out.
-@cLayout
-export record InterruptFrame {
-  /// Saved general purpose registers. The `rsp` field further down is the stack
-  /// pointer of the interrupted code, not the register at the time of the call.
-  public rax: u64;
-
-  /// Saved `rbx`.
-  public rbx: u64;
-
-  /// Saved `rcx`.
-  public rcx: u64;
-
-  /// Saved `rdx`.
-  public rdx: u64;
-
-  /// Saved `rsi`.
-  public rsi: u64;
-
-  /// Saved `rdi`.
-  public rdi: u64;
-
-  /// Saved `rbp`.
-  public rbp: u64;
-
-  /// Saved `r8`.
-  public r8: u64;
-
-  /// Saved `r9`.
-  public r9: u64;
-
-  /// Saved `r10`.
-  public r10: u64;
-
-  /// Saved `r11`.
-  public r11: u64;
-
-  /// Saved `r12`.
-  public r12: u64;
-
-  /// Saved `r13`.
-  public r13: u64;
-
-  /// Saved `r14`.
-  public r14: u64;
-
-  /// Saved `r15`.
-  public r15: u64;
-
-  /// The vector number, 0 to 255, or 256 for a system call.
-  public vector: u64;
-
-  /// The processor's error code for the vectors that push one, otherwise 0.
-  public errorCode: u64;
-
-  /// Address of the instruction to resume at (for a fault, the one that
-  /// faulted).
-  public rip: u64;
-
-  /// Code segment selector of the interrupted code. Its low two bits are the
-  /// privilege level: 0 for the kernel, 3 for a user process.
-  public cs: u64;
-
-  /// RFLAGS of the interrupted code, including its interrupt flag.
-  public rflags: u64;
-
-  /// Stack pointer of the interrupted code.
-  public rsp: u64;
-
-  /// Stack segment selector of the interrupted code.
-  public ss: u64;
-}
 
 /// Interrupt vector numbers and the dispatcher.
 export namespace Interrupts {
@@ -277,22 +170,22 @@ export namespace Interrupts {
   /// with interrupts disabled. `frame` points at the saved registers and can be
   /// modified. See the module header for the routing.
   @externName("ignis_interrupt_dispatch")
-  function dispatch(frame: *mut InterruptFrame): void {
+  function dispatch(frame: *mut Arch::InterruptFrame): void {
     let vector: u64 = (*frame).vector;
 
-    if (vector == Lapic::spuriousVector()) {
+    if (vector == Apic::Lapic::spuriousVector()) {
       return;
     }
 
     if (vector == KEYBOARD_VECTOR) {
       Ps2::handleInterrupt();
-      Lapic::endOfInterrupt();
+      Apic::Lapic::endOfInterrupt();
       return;
     }
 
     if (vector == TIMER_VECTOR) {
       Timer::handleTick();
-      Lapic::endOfInterrupt();
+      Apic::Lapic::endOfInterrupt();
       Scheduler::onTick();
       return;
     }
@@ -308,14 +201,14 @@ export namespace Interrupts {
 
     reportException(frame);
 
-    Cpu::haltForever();
+    Arch::Cpu::haltForever();
   }
 
   /// True for a processor exception that interrupted ring 3 and that a
   /// process can cause on its own. NMI and machine check are the machine's
   /// business, not the process's, and stay fatal. A double fault is always
   /// fatal too: the CS it saves is undefined, so its RPL proves nothing.
-  function isUserFault(frame: *mut InterruptFrame): boolean {
+  function isUserFault(frame: *mut Arch::InterruptFrame): boolean {
     let vector: u64 = (*frame).vector;
 
     return ((*frame).cs & 3) == 3 && vector < FIRST_IRQ_VECTOR && vector != NMI && vector != DOUBLE_FAULT && vector != MACHINE_CHECK;
@@ -324,7 +217,7 @@ export namespace Interrupts {
   /// Reports what the process did and ends it. Never returns: the thread
   /// ends on its own kernel stack, which holds this frame, and the next
   /// thread frees the process's memory.
-  function killUserProcess(frame: *mut InterruptFrame): never {
+  function killUserProcess(frame: *mut Arch::InterruptFrame): never {
     let vector: u64 = (*frame).vector;
 
     Console::write("process ");
@@ -377,16 +270,16 @@ export namespace Interrupts {
   /// A spurious one skips the acknowledgement of its own controller; any
   /// other is acknowledged and dropped.
   function handleLegacyInterrupt(line: u8): void {
-    if (Pic::isSpurious(line)) {
-      Pic::endSpurious(line);
+    if (Arch::Pic::isSpurious(line)) {
+      Arch::Pic::endSpurious(line);
       return;
     }
 
-    Pic::endOfInterrupt(line);
+    Arch::Pic::endOfInterrupt(line);
   }
 
   /// Writes the exception to COM1 and to the console when it is up.
-  function reportException(frame: *mut InterruptFrame): void {
+  function reportException(frame: *mut Arch::InterruptFrame): void {
     let vector: u64 = (*frame).vector;
 
     if (Console::isInitialized()) {

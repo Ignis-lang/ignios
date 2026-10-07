@@ -25,8 +25,8 @@
 //!   kmain
 //!   │
 //!   ├─ Serial::initialize ........ COM1 up, first log line      serial.ign       doc 06
-//!   ├─ Gdt::initialize ........... own GDT, TSS, CS/SS/DS       gdt.ign           doc 03
-//!   ├─ Idt::initialize ........... 50 gates (49 thunks + spur.) idt.ign           doc 04
+//!   ├─ Arch::Gdt::initialize ........... own GDT, TSS, CS/SS/DS       gdt.ign           doc 03
+//!   ├─ Arch::Idt::initialize ........... 50 gates (49 thunks + spur.) idt.ign           doc 04
 //!   ├─ Limine::isBaseRevisionSupported                          limine.ign        doc 01
 //!   ├─ Console::initialize ....... framebuffer text console     console.ign       doc 07
 //!   ├─ printBanner ............... banner, framebuffer, memory map
@@ -37,13 +37,13 @@
 //!   │    ├─ Heap::initialize ..... kernel heap                  heap.ign          doc 10
 //!   │    └─ AddressSpace::selfTest                              address_space.ign doc 14
 //!   ├─ Scheduler::initialize, Process::initialize, Syscall::initialize
-//!   ├─ UserMode::initialize ...... EFER.SCE, STAR/LSTAR/FMASK   usermode.ign      doc 14
+//!   ├─ Arch::UserMode::initialize ...... EFER.SCE, STAR/LSTAR/FMASK   usermode.ign      doc 14
 //!   ├─ Acpi::initialize/report ... RSDP, XSDT, MADT             acpi.ign          doc 12
-//!   ├─ Pic::initialize ........... remap and mask the 8259      pic.ign           doc 05
-//!   ├─ Lapic::initialize ......... local APIC on                lapic.ign         doc 05
-//!   ├─ Ioapic::initialize + routeIsa(keyboard)                  ioapic.ign        doc 12
+//!   ├─ Arch::Pic::initialize ........... remap and mask the 8259      pic.ign           doc 05
+//!   ├─ Apic::Lapic::initialize ......... local APIC on                lapic.ign         doc 05
+//!   ├─ Apic::Ioapic::initialize + routeIsa(keyboard)                  ioapic.ign        doc 12
 //!   ├─ initializeTimer ........... APIC timer, 100 Hz           timer.ign         doc 12
-//!   ├─ Context::selfTest, SchedulerTest::*                      scheduler_test.ign doc 13
+//!   ├─ Arch::Context::selfTest, SchedulerTest::*                      scheduler_test.ign doc 13
 //!   ├─ Scheduler::enablePreemption
 //!   ├─ UserTest::run ............. ring 3 smoke tests           user_test.ign     doc 14
 //!   ├─ initializeKeyboard ........ 8042 enable, IRQ1 live       ps2.ign           doc 06
@@ -70,21 +70,15 @@
 //!
 //! `onPanic` is registered with `@panicHandler`, so every `@panic(...)` call in
 //! the kernel ends there. There is no unwinding: the machine stops in
-//! `Cpu::haltForever`.
+//! `Arch::Cpu::haltForever`.
 
+import Apic from "@apic";
+import Arch from "@arch";
 import Lib from "@lib";
 import Acpi from "./acpi";
 import AddressSpace from "./address_space";
-import Context from "./arch/x86_64/context";
-import Cpu from "./arch/x86_64/cpu";
-import Gdt from "./arch/x86_64/gdt";
-import Idt from "./arch/x86_64/idt";
-import Ioapic from "./arch/x86_64/ioapic";
-import Lapic from "./arch/x86_64/lapic";
-import Pic from "./arch/x86_64/pic";
 import Color, Console from "./console";
 import Heap from "./heap";
-import UserMode from "./arch/x86_64/usermode";
 import Interrupts from "./interrupts";
 import Keyboard from "./keyboard";
 import Limine from "./limine";
@@ -166,7 +160,7 @@ function onPanic(message: str, file: str, line: u32): never {
     Serial::writeDecimal(line);
     Serial::write("\n");
 
-    Cpu::haltForever();
+    Arch::Cpu::haltForever();
   }
 
   PanicState::active = true;
@@ -180,7 +174,7 @@ function onPanic(message: str, file: str, line: u32): never {
   Console::writeDecimal(line);
   Console::write("\n");
 
-  Cpu::haltForever();
+  Arch::Cpu::haltForever();
 }
 
 /// The first Limine framebuffer. Panics when the bootloader provided none,
@@ -266,12 +260,12 @@ function initializeKeyboard(): boolean {
 
 /// Logs the code segment selector and the task register read back from the
 /// CPU. On a correct boot they are `0x8` and `0x28`, which proves the far
-/// return and `ltr` in `Gdt::initialize` took effect.
+/// return and `ltr` in `Arch::Gdt::initialize` took effect.
 function reportGdt(): void {
   Serial::write("gdt: cs=");
-  Serial::writeHex(Gdt::currentCode() as u64);
+  Serial::writeHex(Arch::Gdt::currentCode() as u64);
   Serial::write(" tr=");
-  Serial::writeHex(Gdt::currentTask() as u64);
+  Serial::writeHex(Arch::Gdt::currentTask() as u64);
   Serial::write("\n");
 }
 
@@ -299,7 +293,7 @@ function initializeMemory(framebuffer: *mut Limine::Framebuffer): void {
   Vmm::initialize(framebuffer);
 
   Console::write("vmm: cr3 switched, cr3 ");
-  Console::writeHex(Cpu::readCr3());
+  Console::writeHex(Arch::Cpu::readCr3());
   Console::write(", pml4 ");
   Console::writeHex(Vmm::rootTable());
   Console::writeLine("");
@@ -328,15 +322,15 @@ function initializeMemory(framebuffer: *mut Limine::Framebuffer): void {
 /// bit 8). LINT0 is masked because the PIC is not used, LINT1 is set to NMI.
 function reportLapic(): void {
   Console::write("lapic: base ");
-  Console::writeHex(Lapic::physicalBase());
+  Console::writeHex(Apic::Lapic::physicalBase());
   Console::write(", id ");
-  Console::writeDecimal(Lapic::id() as u64);
+  Console::writeDecimal(Apic::Lapic::id() as u64);
   Console::write(", version ");
-  Console::writeHex(Lapic::version() as u64);
+  Console::writeHex(Apic::Lapic::version() as u64);
   Console::write(", msr enabled ");
-  Console::writeDecimal(Lapic::isGloballyEnabled() ? 1 : 0);
+  Console::writeDecimal(Apic::Lapic::isGloballyEnabled() ? 1 : 0);
   Console::write(", svr enabled ");
-  Console::writeDecimal(Lapic::isSoftwareEnabled() ? 1 : 0);
+  Console::writeDecimal(Apic::Lapic::isSoftwareEnabled() ? 1 : 0);
   Console::writeLine(", LINT0 masked, LINT1 NMI");
 }
 
@@ -349,11 +343,11 @@ function reportIoapic(keyboardGsi: u32): void {
 
   while (index < Acpi::ioapicCount()) {
     Console::write("ioapic: id ");
-    Console::writeDecimal(Ioapic::id(index) as u64);
+    Console::writeDecimal(Apic::Ioapic::id(index) as u64);
     Console::write(", version ");
-    Console::writeHex(Ioapic::version(index) as u64);
+    Console::writeHex(Apic::Ioapic::version(index) as u64);
     Console::write(", ");
-    Console::writeDecimal(Ioapic::entryCount(index));
+    Console::writeDecimal(Apic::Ioapic::entryCount(index));
     Console::write(" redirection entries, gsi base ");
     Console::writeDecimal(Acpi::ioapicGsiBase(index) as u64);
     Console::writeLine("");
@@ -367,11 +361,11 @@ function reportIoapic(keyboardGsi: u32): void {
   Console::write(", vector ");
   Console::writeHex(Interrupts::KEYBOARD_VECTOR);
   Console::write(", entry ");
-  Console::writeHex(Ioapic::redirection(keyboardGsi));
+  Console::writeHex(Apic::Ioapic::redirection(keyboardGsi));
   Console::writeLine("");
 
   Console::write("pic: masked, imr ");
-  Console::writeHex(Pic::masks() as u64);
+  Console::writeHex(Arch::Pic::masks() as u64);
   Console::writeLine("");
 }
 
@@ -513,14 +507,14 @@ function runTerminal(): void {
   printPrompt();
 
   while (true) {
-    Cpu::disableInterrupts();
+    Arch::Cpu::disableInterrupts();
 
     if (Lib::ScancodeQueue::isEmpty()) {
-      Cpu::waitForInterrupt();
+      Arch::Cpu::waitForInterrupt();
       continue;
     }
 
-    Cpu::enableInterrupts();
+    Arch::Cpu::enableInterrupts();
 
     let character: u8 = Keyboard::decode(Lib::ScancodeQueue::pop());
 
@@ -547,7 +541,7 @@ function runTerminal(): void {
 /// The ELF entry point. Limine jumps here in long mode on its own stack, with
 /// interrupts disabled and every request already answered. The function never
 /// returns: it ends in the terminal loop or, on a fatal error, in
-/// `Cpu::haltForever`.
+/// `Arch::Cpu::haltForever`.
 ///
 /// `@externName("kmain")` keeps the C symbol name unmangled, which is the
 /// name `ENTRY(kmain)` in `kernel/linker.ld` refers to.
@@ -558,13 +552,13 @@ function kmain(): void {
 
   // The IDT gates installed next name the kernel's code selector, and the double
   // fault gate names IST1 of the kernel's TSS, so the GDT comes first.
-  Gdt::initialize();
+  Arch::Gdt::initialize();
   reportGdt();
 
   // From here every CPU exception reaches `Interrupts::dispatch`. The IDT state
   // Limine leaves is not specified by the protocol, so the kernel installs its
   // own before it does anything that can fault.
-  Idt::initialize();
+  Arch::Idt::initialize(Apic::Lapic::spuriousVector());
   Serial::writeLine("idt: 50 gates loaded");
 
   // Limine overwrites the third word of the base revision tag with 0 when it
@@ -587,13 +581,13 @@ function kmain(): void {
 
   // Sets IA32_EFER.SCE and programs IA32_STAR, IA32_LSTAR and IA32_FMASK. See
   // `usermode.ign`. The values are logged to COM1 only.
-  UserMode::initialize();
+  Arch::UserMode::initialize();
   Serial::write("usermode: syscall enabled, star ");
-  Serial::writeHex(UserMode::starValue());
+  Serial::writeHex(Arch::UserMode::starValue());
   Serial::write(", lstar ");
-  Serial::writeHex(UserMode::entryAddress());
+  Serial::writeHex(Arch::UserMode::entryAddress());
   Serial::write(", fmask ");
-  Serial::writeHex(UserMode::flagMask());
+  Serial::writeHex(Arch::UserMode::flagMask());
   Serial::write("\n");
 
   Acpi::initialize();
@@ -602,15 +596,15 @@ function kmain(): void {
   // The 8259 is remapped to vectors 0x20-0x2F, away from the CPU exceptions
   // 0-31, and fully masked. The kernel receives device interrupts through the
   // IOAPIC instead.
-  Pic::initialize();
-  Lapic::initialize();
+  Arch::Pic::initialize();
+  Apic::Lapic::initialize();
   reportLapic();
 
-  Ioapic::initialize();
+  Apic::Ioapic::initialize();
 
-  let keyboardGsi: u32 = Ioapic::routeIsa(KEYBOARD_IRQ, Interrupts::KEYBOARD_VECTOR as u8);
+  let keyboardGsi: u32 = Apic::Ioapic::routeIsa(KEYBOARD_IRQ, Interrupts::KEYBOARD_VECTOR as u8);
 
-  if (keyboardGsi == Ioapic::NO_GSI) {
+  if (keyboardGsi == Apic::Ioapic::NO_GSI) {
     @panic("no IOAPIC serves the keyboard interrupt");
   }
 
@@ -618,7 +612,7 @@ function kmain(): void {
 
   initializeTimer();
 
-  Context::selfTest();
+  Arch::Context::selfTest();
   Console::writeLine("context: self-test ok, stack switch, argument, alignment and registers checked");
 
   SchedulerTest::runCooperative();
@@ -645,7 +639,7 @@ function kmain(): void {
   // The keyboard is initialized last: its interrupt is live from here on, and
   // the terminal is the first code that consumes it.
   if (!initializeKeyboard()) {
-    Cpu::haltForever();
+    Arch::Cpu::haltForever();
   }
 
   runTerminal();

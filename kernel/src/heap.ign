@@ -74,7 +74,7 @@
 //!
 //! See concept doc 10.
 
-import Cpu from "./arch/x86_64/cpu";
+import Arch from "@arch";
 import Pmm from "./pmm";
 import Vmm from "./vmm";
 
@@ -140,10 +140,10 @@ export namespace Heap {
   /// two. Returns null when the alignment is invalid or the heap cannot grow
   /// any further.
   function allocate(size: u64, align: u64): *mut u8 {
-    let saved: u64 = Cpu::saveAndDisableInterrupts();
+    let saved: u64 = Arch::Cpu::saveAndDisableInterrupts();
     let pointer: *mut u8 = allocateLocked(size, align);
 
-    Cpu::restoreInterrupts(saved);
+    Arch::Cpu::restoreInterrupts(saved);
 
     return pointer;
   }
@@ -179,7 +179,7 @@ export namespace Heap {
       return;
     }
 
-    let saved: u64 = Cpu::saveAndDisableInterrupts();
+    let saved: u64 = Arch::Cpu::saveAndDisableInterrupts();
 
     let payload: u64 = @integerFromPointer(pointer);
     let block: u64 = payload - HEADER_SIZE;
@@ -191,7 +191,7 @@ export namespace Heap {
     HeapState::allocatedBytes -= readSize(block);
     insertFree(block, readSize(block));
 
-    Cpu::restoreInterrupts(saved);
+    Arch::Cpu::restoreInterrupts(saved);
   }
 
   /// Bytes in live blocks, headers included.

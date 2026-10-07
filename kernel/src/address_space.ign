@@ -52,11 +52,11 @@
 //!
 //! See concept doc 14.
 
+import Arch from "@arch";
 import Lib from "@lib";
 import Hhdm from "./hhdm";
 import Pmm from "./pmm";
 import Vmm from "./vmm";
-import Cpu from "./arch/x86_64/cpu";
 
 /// The address space API. A space is identified by the physical address of
 /// its PML4, which every function here takes as `root`.
@@ -118,7 +118,7 @@ export namespace AddressSpace {
   /// Frees every user page and page table of the space and its PML4. The
   /// space must not be the one the processor is running in.
   function destroy(root: u64): void {
-    if (Cpu::readCr3() == root) {
+    if (Arch::Cpu::readCr3() == root) {
       @panic("address space: destroying the active space");
     }
 
@@ -140,7 +140,7 @@ export namespace AddressSpace {
 
   /// Loads the space into CR3.
   function activate(root: u64): void {
-    Cpu::writeCr3(root);
+    Arch::Cpu::writeCr3(root);
   }
 
   /// Maps the page at `virtualAddress` in the space to the frame `frame`
@@ -312,7 +312,7 @@ export namespace AddressSpace {
   /// created, pages carry the U/S bit, and `destroy` gives back every frame.
   /// Panics on the first violation. Interrupts are left as they were found.
   function selfTest(): void {
-    let saved: u64 = Cpu::saveAndDisableInterrupts();
+    let saved: u64 = Arch::Cpu::saveAndDisableInterrupts();
     let freeBefore: u64 = Pmm::freeFrameCount();
     let kernelRoot: u64 = Vmm::rootTable();
 
@@ -334,7 +334,7 @@ export namespace AddressSpace {
       @panic("address space self-test: destroy leaked frames");
     }
 
-    Cpu::restoreInterrupts(saved);
+    Arch::Cpu::restoreInterrupts(saved);
   }
 
   /// The two spaces start with the kernel's upper-half entries and nothing

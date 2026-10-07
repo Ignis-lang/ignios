@@ -39,10 +39,10 @@
 //!
 //! See concept doc 12 and the OSDev wiki page "Programmable Interval Timer".
 
-import Port from "./io";
+import _ from "./io";
 
 /// The PIT API: a countdown on channel 2 that can be polled.
-export namespace Pit {
+namespace Arch::Pit {
   /// The frequency of the PIT input clock in Hz.
   const FREQUENCY: u64 = 1193182;
 
@@ -72,22 +72,22 @@ export namespace Pit {
   /// Loads `count` into channel 2 and starts it counting down. The speaker
   /// stays off. The countdown takes `count / FREQUENCY` seconds.
   function startCountdown(count: u16): void {
-    let control: u8 = Port::readByte(CONTROL) & ~(GATE_ENABLE | SPEAKER_ENABLE);
+    let control: u8 = Arch::Port::readByte(CONTROL) & ~(GATE_ENABLE | SPEAKER_ENABLE);
 
-    Port::writeByte(CONTROL, control);
-    Port::writeByte(COMMAND, CHANNEL_2_MODE_0);
-    Port::writeByte(CHANNEL_2_DATA, (count & 0xFF) as u8);
-    Port::writeByte(CHANNEL_2_DATA, (count >> 8) as u8);
-    Port::writeByte(CONTROL, control | GATE_ENABLE);
+    Arch::Port::writeByte(CONTROL, control);
+    Arch::Port::writeByte(COMMAND, CHANNEL_2_MODE_0);
+    Arch::Port::writeByte(CHANNEL_2_DATA, (count & 0xFF) as u8);
+    Arch::Port::writeByte(CHANNEL_2_DATA, (count >> 8) as u8);
+    Arch::Port::writeByte(CONTROL, control | GATE_ENABLE);
   }
 
   /// True once the countdown started by `startCountdown` reached zero.
   function hasExpired(): boolean {
-    return (Port::readByte(CONTROL) & OUTPUT_HIGH) != 0;
+    return (Arch::Port::readByte(CONTROL) & OUTPUT_HIGH) != 0;
   }
 
   /// Closes the channel 2 gate again.
   function stop(): void {
-    Port::writeByte(CONTROL, Port::readByte(CONTROL) & ~GATE_ENABLE);
+    Arch::Port::writeByte(CONTROL, Arch::Port::readByte(CONTROL) & ~GATE_ENABLE);
   }
 }

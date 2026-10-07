@@ -1,0 +1,31 @@
+//!
+//! # Apic
+//!
+//! The local APIC and the IOAPIC: the interrupt controllers that replace the
+//! 8259 on every modern x86_64 machine.
+//!
+//! ## Public API
+//!
+//! | Name           | File          | Purpose                                                  |
+//! |----------------|---------------|----------------------------------------------------------|
+//! | `Apic::Lapic`  | `lapic.ign`   | the per-processor controller: enable, EOI, timer         |
+//! | `Apic::Ioapic` | `ioapic.ign`  | the device-side controller: routes a GSI to a vector     |
+//!
+//! ## Dependencies
+//!
+//! | Imports | Why                                                                  |
+//! |---------|----------------------------------------------------------------------|
+//! | `Arch`  | MSR access for `IA32_APIC_BASE`                                      |
+//! | `Mm`    | `Mm::Vmm::map` maps the uncached register pages                      |
+//! | `Acpi`  | the MADT says where the IOAPICs are and how the ISA IRQs are wired   |
+//!
+//! These files would belong in `Arch` if they did not need the memory manager
+//! and ACPI. `Arch` is a leaf, so they form their own subsystem. `Time` and
+//! `Trap` import `Apic`.
+
+import _ from "./ioapic";
+import _ from "./lapic";
+
+/// Aggregate namespace of the interrupt controllers. The files above
+/// contribute `Apic::Lapic` and `Apic::Ioapic`.
+export namespace Apic {}

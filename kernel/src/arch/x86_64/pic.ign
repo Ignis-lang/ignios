@@ -53,10 +53,10 @@
 //!
 //! See concept doc 05 and the OSDev wiki page "8259 PIC".
 
-import Port from "./io";
+import _ from "./io";
 
 /// The 8259 pair API.
-export namespace Pic {
+namespace Arch::Pic {
   /// I/O port of the master chip's command register.
   const MASTER_COMMAND: u16 = 0x20;
 
@@ -120,35 +120,35 @@ export namespace Pic {
 
   /// Remaps both controllers and masks every line.
   function initialize(): void {
-    Port::writeByte(MASTER_COMMAND, INITIALIZE);
+    Arch::Port::writeByte(MASTER_COMMAND, INITIALIZE);
     delay();
-    Port::writeByte(SLAVE_COMMAND, INITIALIZE);
-    delay();
-
-    Port::writeByte(MASTER_DATA, MASTER_OFFSET);
-    delay();
-    Port::writeByte(SLAVE_DATA, SLAVE_OFFSET);
+    Arch::Port::writeByte(SLAVE_COMMAND, INITIALIZE);
     delay();
 
-    Port::writeByte(MASTER_DATA, MASTER_HAS_SLAVE_ON_LINE_2);
+    Arch::Port::writeByte(MASTER_DATA, MASTER_OFFSET);
     delay();
-    Port::writeByte(SLAVE_DATA, SLAVE_CASCADE_IDENTITY);
-    delay();
-
-    Port::writeByte(MASTER_DATA, MODE_8086);
-    delay();
-    Port::writeByte(SLAVE_DATA, MODE_8086);
+    Arch::Port::writeByte(SLAVE_DATA, SLAVE_OFFSET);
     delay();
 
-    Port::writeByte(MASTER_DATA, MASTER_MASK);
-    Port::writeByte(SLAVE_DATA, SLAVE_MASK);
+    Arch::Port::writeByte(MASTER_DATA, MASTER_HAS_SLAVE_ON_LINE_2);
+    delay();
+    Arch::Port::writeByte(SLAVE_DATA, SLAVE_CASCADE_IDENTITY);
+    delay();
+
+    Arch::Port::writeByte(MASTER_DATA, MODE_8086);
+    delay();
+    Arch::Port::writeByte(SLAVE_DATA, MODE_8086);
+    delay();
+
+    Arch::Port::writeByte(MASTER_DATA, MASTER_MASK);
+    Arch::Port::writeByte(SLAVE_DATA, SLAVE_MASK);
   }
 
   /// The interrupt mask register of both controllers: the master in bits
   /// 0-7, the slave in bits 8-15, a set bit meaning the line is masked.
   function masks(): u16 {
-    let master: u16 = Port::readByte(MASTER_DATA) as u16;
-    let slave: u16 = Port::readByte(SLAVE_DATA) as u16;
+    let master: u16 = Arch::Port::readByte(MASTER_DATA) as u16;
+    let slave: u16 = Arch::Port::readByte(SLAVE_DATA) as u16;
 
     return master | ((slave as u16) << 8);
   }
@@ -157,10 +157,10 @@ export namespace Pic {
   /// the slave needs the acknowledgement on both.
   function endOfInterrupt(line: u8): void {
     if (line >= SLAVE_FIRST_LINE) {
-      Port::writeByte(SLAVE_COMMAND, END_OF_INTERRUPT);
+      Arch::Port::writeByte(SLAVE_COMMAND, END_OF_INTERRUPT);
     }
 
-    Port::writeByte(MASTER_COMMAND, END_OF_INTERRUPT);
+    Arch::Port::writeByte(MASTER_COMMAND, END_OF_INTERRUPT);
   }
 
   /// True when `line` is the last line of a controller and its in-service
@@ -183,20 +183,20 @@ export namespace Pic {
   /// the master's cascade line, which needs its acknowledgement.
   function endSpurious(line: u8): void {
     if (line == SPURIOUS_SLAVE_LINE) {
-      Port::writeByte(MASTER_COMMAND, END_OF_INTERRUPT);
+      Arch::Port::writeByte(MASTER_COMMAND, END_OF_INTERRUPT);
     }
   }
 
   /// Reads the in-service register of the chip at `command` and returns whether
   /// its line 7 (the spurious candidate) is being serviced.
   function isLine7InService(command: u16): boolean {
-    Port::writeByte(command, READ_IN_SERVICE);
+    Arch::Port::writeByte(command, READ_IN_SERVICE);
 
-    return (Port::readByte(command) & LINE_7_BIT) != 0;
+    return (Arch::Port::readByte(command) & LINE_7_BIT) != 0;
   }
 
   /// Waits about one I/O cycle by writing to the unused port `0x80`.
   function delay(): void {
-    Port::writeByte(DELAY_PORT, 0);
+    Arch::Port::writeByte(DELAY_PORT, 0);
   }
 }

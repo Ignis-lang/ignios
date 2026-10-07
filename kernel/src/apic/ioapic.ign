@@ -60,9 +60,9 @@
 //!
 //! See concept doc 12 and the OSDev wiki page "IOAPIC".
 
-import Acpi from "../../acpi";
-import Lapic from "./lapic";
-import Vmm from "../../vmm";
+import Acpi from "../acpi";
+import Vmm from "../vmm";
+import _ from "./lapic";
 
 /// Per-chip data read once at start-up.
 record IoapicState {
@@ -75,7 +75,7 @@ record IoapicState {
 }
 
 /// The IOAPIC API. Call `initialize`, then `routeIsa` for each device line.
-export namespace Ioapic {
+namespace Apic::Ioapic {
   /// Where the kernel maps the first IOAPIC page, then one page per further
   /// IOAPIC. It lies in the same higher-half region as the local APIC page.
   const MAPPING: u64 = 0xFFFFA00000010000;
@@ -190,7 +190,7 @@ export namespace Ioapic {
       low |= LEVEL_TRIGGERED;
     }
 
-    writeRegister(index, FIRST_REDIRECTION_REGISTER + pin * 2 + 1, Lapic::id() << DESTINATION_SHIFT);
+    writeRegister(index, FIRST_REDIRECTION_REGISTER + pin * 2 + 1, Apic::Lapic::id() << DESTINATION_SHIFT);
     writeRegister(index, FIRST_REDIRECTION_REGISTER + pin * 2, low);
 
     return true;

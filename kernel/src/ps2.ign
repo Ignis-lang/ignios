@@ -57,9 +57,8 @@
 //! See concept doc 06 and the OSDev wiki pages "I8042 PS/2 Controller" and
 //! "PS/2 Keyboard".
 
+import Arch from "@arch";
 import Lib from "@lib";
-import Cpu from "./arch/x86_64/cpu";
-import Port from "./arch/x86_64/io";
 
 /// The PS/2 controller API.
 export namespace Ps2 {
@@ -114,7 +113,7 @@ export namespace Ps2 {
   /// auxiliary one and makes sure the keyboard port is clocked and enabled.
   /// Returns false when there is no controller or it stops answering.
   function initialize(): boolean {
-    if (Port::readByte(STATUS) == NO_CONTROLLER) {
+    if (Arch::Port::readByte(STATUS) == NO_CONTROLLER) {
       return false;
     }
 
@@ -124,7 +123,7 @@ export namespace Ps2 {
       return false;
     }
 
-    let configuration: u8 = Port::readByte(DATA);
+    let configuration: u8 = Arch::Port::readByte(DATA);
     let cleared: u8 = CONFIGURATION_SECOND_INTERRUPT | CONFIGURATION_FIRST_CLOCK_DISABLED;
     let updated: u8 = (configuration & ~cleared) | CONFIGURATION_FIRST_INTERRUPT;
 
@@ -145,13 +144,13 @@ export namespace Ps2 {
   /// scancode queue, dropping auxiliary ones.
   function handleInterrupt(): void {
     while (true) {
-      let status: u8 = Port::readByte(STATUS);
+      let status: u8 = Arch::Port::readByte(STATUS);
 
       if ((status & OUTPUT_FULL) == 0) {
         return;
       }
 
-      let value: u8 = Port::readByte(DATA);
+      let value: u8 = Arch::Port::readByte(DATA);
 
       if ((status & AUXILIARY_DATA) == 0) {
         Lib::ScancodeQueue::push(value);
@@ -163,8 +162,8 @@ export namespace Ps2 {
   function flush(): void {
     let mut drained: u64 = 0;
 
-    while (drained < FLUSH_LIMIT && (Port::readByte(STATUS) & OUTPUT_FULL) != 0) {
-      Port::readByte(DATA);
+    while (drained < FLUSH_LIMIT && (Arch::Port::readByte(STATUS) & OUTPUT_FULL) != 0) {
+      Arch::Port::readByte(DATA);
       drained += 1;
     }
   }
@@ -176,7 +175,7 @@ export namespace Ps2 {
       return false;
     }
 
-    Port::writeByte(COMMAND, command);
+    Arch::Port::writeByte(COMMAND, command);
 
     return true;
   }
@@ -188,7 +187,7 @@ export namespace Ps2 {
       return false;
     }
 
-    Port::writeByte(DATA, value);
+    Arch::Port::writeByte(DATA, value);
 
     return true;
   }
@@ -198,12 +197,12 @@ export namespace Ps2 {
   function waitForInputSpace(): boolean {
     let mut spins: u64 = 0;
 
-    while ((Port::readByte(STATUS) & INPUT_FULL) != 0) {
+    while ((Arch::Port::readByte(STATUS) & INPUT_FULL) != 0) {
       if (spins == WAIT_LIMIT) {
         return false;
       }
 
-      Cpu::pause();
+      Arch::Cpu::pause();
       spins += 1;
     }
 
@@ -215,12 +214,12 @@ export namespace Ps2 {
   function waitForOutput(): boolean {
     let mut spins: u64 = 0;
 
-    while ((Port::readByte(STATUS) & OUTPUT_FULL) == 0) {
+    while ((Arch::Port::readByte(STATUS) & OUTPUT_FULL) == 0) {
       if (spins == WAIT_LIMIT) {
         return false;
       }
 
-      Cpu::pause();
+      Arch::Cpu::pause();
       spins += 1;
     }
 

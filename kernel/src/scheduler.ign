@@ -22,7 +22,7 @@
 //! run frees it right after the switch.
 //!
 //! Mutual exclusion is "interrupts off": every public operation runs inside
-//! `Cpu::saveAndDisableInterrupts` and `Cpu::restoreInterrupts`. That is
+//! `Arch::Cpu::saveAndDisableInterrupts` and `Arch::Cpu::restoreInterrupts`. That is
 //! enough because the kernel has one processor, and the only other code that
 //! could touch the table in the middle of an operation is an interrupt
 //! handler. Each thread keeps the interrupt state it saved on its own stack,
@@ -83,7 +83,7 @@
 //! ```text
 //!   LAPIC timer ──► vector 0x30 ──► Interrupts::dispatch
 //!                                     ├─ Timer::handleTick       ticks += 1
-//!                                     ├─ Lapic::endOfInterrupt
+//!                                     ├─ Apic::Lapic::endOfInterrupt
 //!                                     └─ Scheduler::onTick       (interrupts still off)
 //!                                           ├─ count the tick against the thread
 //!                                           ├─ wake sleepers
@@ -97,10 +97,8 @@
 //!
 //! See concept doc 13.
 
+import Arch from "@arch";
 import AddressSpace from "./address_space";
-import Context, ContextAsm from "./arch/x86_64/context";
-import Cpu from "./arch/x86_64/cpu";
-import UserMode from "./arch/x86_64/usermode";
 import Pmm from "./pmm";
 import Timer from "./timer";
 import Vmm from "./vmm";
@@ -232,7 +230,7 @@ export namespace Scheduler {
     SchedulerState::current = BOOT_SLOT;
     SchedulerState::nextId = 1;
 
-    if (!createThread(IDLE_SLOT, ContextAsm::ignis_function_address(idleLoop), 0, 0)) {
+    if (!createThread(IDLE_SLOT, Arch::ContextAsm::ignis_function_address(idleLoop), 0, 0)) {
       @panic("scheduler: cannot create the idle thread");
     }
 
@@ -242,12 +240,12 @@ export namespace Scheduler {
   /// Lets the timer interrupt switch threads. Until it is called, threads
   /// change only when one of them yields, sleeps or exits.
   function enablePreemption(): void {
-    let saved: u64 = Cpu::saveAndDisableInterrupts();
+    let saved: u64 = Arch::Cpu::saveAndDisableInterrupts();
 
     SchedulerState::sliceLeft = TIME_SLICE_TICKS;
     SchedulerState::preemptive = true;
 
-    Cpu::restoreInterrupts(saved);
+    Arch::Cpu::restoreInterrupts(saved);
   }
 
   /// Called from the timer interrupt after the end-of-interrupt, with
@@ -292,7 +290,7 @@ export namespace Scheduler {
   }
 
   /// Creates a thread that runs `entry(argument)` and puts it at the end of
-  /// the run queue. `entry` comes from `ContextAsm::ignis_function_address`.
+  /// the run queue. `entry` comes from `Arch::ContextAsm::ignis_function_address`.
   /// Returns the thread id, or `NO_THREAD` when every slot is taken or the
   /// stack cannot be mapped.
   function spawn(entry: u64, argument: u64): u64 {
@@ -303,7 +301,7 @@ export namespace Scheduler {
   /// thread then owns: it is destroyed when the thread ends, and also when
   /// the thread cannot be created. 0 means the kernel's own address space.
   function spawnIn(entry: u64, argument: u64, root: u64): u64 {
-    let saved: u64 = Cpu::saveAndDisableInterrupts();
+    let saved: u64 = Arch::Cpu::saveAndDisableInterrupts();
     let slot: u64 = findFreeSlot();
 
     if (slot == NO_THREAD || !createThread(slot, entry, argument, root)) {
@@ -311,7 +309,7 @@ export namespace Scheduler {
         AddressSpace::destroy(root);
       }
 
-      Cpu::restoreInterrupts(saved);
+      Arch::Cpu::restoreInterrupts(saved);
       return NO_THREAD;
     }
 
@@ -319,7 +317,7 @@ export namespace Scheduler {
 
     let id: u64 = (*slotPointer(slot)).id;
 
-    Cpu::restoreInterrupts(saved);
+    Arch::Cpu::restoreInterrupts(saved);
 
     return id;
   }
@@ -327,7 +325,7 @@ export namespace Scheduler {
   /// Gives the processor to the next ready thread and goes to the end of the
   /// queue. Returns at once when no other thread is ready.
   function yield(): void {
-    let saved: u64 = Cpu::saveAndDisableInterrupts();
+    let saved: u64 = Arch::Cpu::saveAndDisableInterrupts();
 
     wakeSleepers();
 
@@ -336,7 +334,7 @@ export namespace Scheduler {
       switchToNext();
     }
 
-    Cpu::restoreInterrupts(saved);
+    Arch::Cpu::restoreInterrupts(saved);
   }
 
   /// Blocks the calling thread for at least `ticks` timer ticks. Sleeping
@@ -347,7 +345,7 @@ export namespace Scheduler {
       return;
     }
 
-    let saved: u64 = Cpu::saveAndDisableInterrupts();
+    let saved: u64 = Arch::Cpu::saveAndDisableInterrupts();
     let current: *mut Thread = slotPointer(SchedulerState::current);
 
     if (SchedulerState::current == IDLE_SLOT) {
@@ -358,7 +356,7 @@ export namespace Scheduler {
     (*current).state = BLOCKED;
     switchToNext();
 
-    Cpu::restoreInterrupts(saved);
+    Arch::Cpu::restoreInterrupts(saved);
   }
 
   /// Ends the calling thread. The trampoline calls it when a thread function
@@ -366,7 +364,7 @@ export namespace Scheduler {
   /// runs.
   @externName("ignis_thread_exit")
   function exitCurrent(): never {
-    Cpu::disableInterrupts();
+    Arch::Cpu::disableInterrupts();
 
     if (SchedulerState::current == BOOT_SLOT || SchedulerState::current == IDLE_SLOT) {
       @panic("scheduler: the boot or idle thread cannot exit");
@@ -394,7 +392,7 @@ export namespace Scheduler {
   /// True while a thread with this id is in the table, dead or not yet
   /// freed included.
   function isAlive(id: u64): boolean {
-    let saved: u64 = Cpu::saveAndDisableInterrupts();
+    let saved: u64 = Arch::Cpu::saveAndDisableInterrupts();
     let mut alive: boolean = false;
     let mut slot: u64 = 0;
 
@@ -408,7 +406,7 @@ export namespace Scheduler {
       slot += 1;
     }
 
-    Cpu::restoreInterrupts(saved);
+    Arch::Cpu::restoreInterrupts(saved);
 
     return alive;
   }
@@ -494,7 +492,7 @@ export namespace Scheduler {
   function idleLoop(argument: u64): void {
     while (true) {
       yield();
-      Cpu::waitForInterrupt();
+      Arch::Cpu::waitForInterrupt();
     }
   }
 
@@ -515,7 +513,7 @@ export namespace Scheduler {
     (*thread).wakeTick = 0;
     (*thread).runTicks = 0;
     (*thread).root = root;
-    (*thread).savedRsp = Context::prepareStack(base + STACK_SPAN, entry, argument);
+    (*thread).savedRsp = Arch::Context::prepareStack(base + STACK_SPAN, entry, argument);
 
     SchedulerState::nextId += 1;
 
@@ -591,11 +589,11 @@ export namespace Scheduler {
     if (root == 0) {
       root = Vmm::rootTable();
     } else {
-      UserMode::setKernelStack((*thread).stackBase + STACK_SPAN);
+      Arch::UserMode::setKernelStack((*thread).stackBase + STACK_SPAN);
     }
 
-    if (Cpu::readCr3() != root) {
-      Cpu::writeCr3(root);
+    if (Arch::Cpu::readCr3() != root) {
+      Arch::Cpu::writeCr3(root);
     }
   }
 
@@ -626,7 +624,7 @@ export namespace Scheduler {
 
     activateSpaceOf(next);
 
-    Context::switchTo(&mut (*slotPointer(outgoing)).savedRsp as *mut u64, (*slotPointer(next)).savedRsp);
+    Arch::Context::switchTo(&mut (*slotPointer(outgoing)).savedRsp as *mut u64, (*slotPointer(next)).savedRsp);
 
     reapZombie();
   }

@@ -46,8 +46,8 @@
 //!
 //! See concept doc 08.
 
+import Arch from "@arch";
 import Lib from "@lib";
-import Cpu from "./arch/x86_64/cpu";
 import Hhdm from "./hhdm";
 import Limine from "./limine";
 
@@ -137,10 +137,10 @@ export namespace Pmm {
   /// The physical address of a free frame, or `NO_FRAME`. The frame is not
   /// zeroed.
   function allocateFrame(): u64 {
-    let saved: u64 = Cpu::saveAndDisableInterrupts();
+    let saved: u64 = Arch::Cpu::saveAndDisableInterrupts();
     let frame: u64 = takeFrame();
 
-    Cpu::restoreInterrupts(saved);
+    Arch::Cpu::restoreInterrupts(saved);
 
     return frame;
   }
@@ -180,7 +180,7 @@ export namespace Pmm {
   /// check cannot tell an allocated frame from one that was never usable: both
   /// are "used" in the bitmap.
   function freeFrame(address: u64): void {
-    let saved: u64 = Cpu::saveAndDisableInterrupts();
+    let saved: u64 = Arch::Cpu::saveAndDisableInterrupts();
     let frame: u64 = address / FRAME_SIZE;
 
     if (address % FRAME_SIZE != 0 || frame >= PmmState::wordCount * BITS_PER_WORD || !isUsed(frame)) {
@@ -194,7 +194,7 @@ export namespace Pmm {
       PmmState::searchWord = frame / BITS_PER_WORD;
     }
 
-    Cpu::restoreInterrupts(saved);
+    Arch::Cpu::restoreInterrupts(saved);
   }
 
   /// Frames the allocator manages: every usable frame at boot, including the

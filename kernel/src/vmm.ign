@@ -117,8 +117,8 @@
 //!
 //! See concept doc 09 and Intel SDM Vol. 3A, "Paging".
 
+import Arch from "@arch";
 import Lib from "@lib";
-import Cpu from "./arch/x86_64/cpu";
 import Hhdm from "./hhdm";
 import Limine from "./limine";
 import Pmm from "./pmm";
@@ -271,8 +271,8 @@ export namespace Vmm {
   /// 4. The upper half is populated, then CR3 is loaded. The load drops every
   ///    TLB entry that is not global, so the old Limine mappings are gone.
   function initialize(framebuffer: *mut Limine::Framebuffer): void {
-    Cpu::writeMsr(EFER_MSR, Cpu::readMsr(EFER_MSR) | EFER_NO_EXECUTE_ENABLE);
-    Cpu::writeCr0(Cpu::readCr0() | CR0_WRITE_PROTECT);
+    Arch::Cpu::writeMsr(EFER_MSR, Arch::Cpu::readMsr(EFER_MSR) | EFER_NO_EXECUTE_ENABLE);
+    Arch::Cpu::writeCr0(Arch::Cpu::readCr0() | CR0_WRITE_PROTECT);
 
     programPat();
 
@@ -287,7 +287,7 @@ export namespace Vmm {
     mapDirectMap();
     populateKernelHalf();
 
-    Cpu::writeCr3(VmmState::root);
+    Arch::Cpu::writeCr3(VmmState::root);
   }
 
   /// Gives every upper-half PML4 entry a page directory pointer table now, so
@@ -312,7 +312,7 @@ export namespace Vmm {
   /// the kernel keeps using, see the same memory types. Writing the MSR does
   /// not flush the TLB, but the CR3 load that follows does.
   function programPat(): void {
-    Cpu::writeMsr(PAT_MSR, PAT_LAYOUT);
+    Arch::Cpu::writeMsr(PAT_MSR, PAT_LAYOUT);
   }
 
   /// The physical address of the PML4 in use.
@@ -457,7 +457,7 @@ export namespace Vmm {
   /// change is not visible to the processor until its old translation is gone
   /// from the TLB (`invlpg`). Single processor: no shootdown is needed.
   function flush(virtualAddress: u64): void {
-    Cpu::invalidatePage(virtualAddress);
+    Arch::Cpu::invalidatePage(virtualAddress);
   }
 
   /// Maps and unmaps a fresh frame and checks that `translate` and the

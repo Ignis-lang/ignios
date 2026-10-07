@@ -26,8 +26,7 @@
 //! Thread ids keep counting up from the boot self-tests, so the demo threads
 //! do not start at 2.
 
-import ContextAsm from "./arch/x86_64/context";
-import Cpu from "./arch/x86_64/cpu";
+import Arch from "@arch";
 import Console from "./console";
 import Scheduler from "./scheduler";
 import Timer from "./timer";
@@ -52,7 +51,7 @@ export namespace ThreadCommands {
   /// Prints one row per thread in the table: id, state, the ticks it was
   /// running at, and the tick a sleeper wakes at.
   function printThreads(): void {
-    let saved: u64 = Cpu::saveAndDisableInterrupts();
+    let saved: u64 = Arch::Cpu::saveAndDisableInterrupts();
 
     Console::writeLine("  id  state     ticks   wake");
 
@@ -75,7 +74,7 @@ export namespace ThreadCommands {
       slot += 1;
     }
 
-    Cpu::restoreInterrupts(saved);
+    Arch::Cpu::restoreInterrupts(saved);
   }
 
   /// Starts two threads that print a line every 0.5 s and 0.7 s, and a third
@@ -84,9 +83,9 @@ export namespace ThreadCommands {
   /// interrupt makes possible. Returns false when a thread could not be
   /// created.
   function startDemo(): boolean {
-    let first: u64 = Scheduler::spawn(ContextAsm::ignis_function_address(printer), 50);
-    let second: u64 = Scheduler::spawn(ContextAsm::ignis_function_address(printer), 70);
-    let busy: u64 = Scheduler::spawn(ContextAsm::ignis_function_address(busySpinner), BUSY_TICKS);
+    let first: u64 = Scheduler::spawn(Arch::ContextAsm::ignis_function_address(printer), 50);
+    let second: u64 = Scheduler::spawn(Arch::ContextAsm::ignis_function_address(printer), 70);
+    let busy: u64 = Scheduler::spawn(Arch::ContextAsm::ignis_function_address(busySpinner), BUSY_TICKS);
 
     return first != Scheduler::NO_THREAD && second != Scheduler::NO_THREAD && busy != Scheduler::NO_THREAD;
   }
@@ -121,7 +120,7 @@ export namespace ThreadCommands {
   /// One line, written in one critical section so other threads cannot cut
   /// it.
   function printTick(label: str): void {
-    let saved: u64 = Cpu::saveAndDisableInterrupts();
+    let saved: u64 = Arch::Cpu::saveAndDisableInterrupts();
 
     Console::write("thread ");
     Console::writeDecimal(Scheduler::currentId());
@@ -131,7 +130,7 @@ export namespace ThreadCommands {
     Console::writeDecimal(Timer::ticks());
     Console::writeLine("");
 
-    Cpu::restoreInterrupts(saved);
+    Arch::Cpu::restoreInterrupts(saved);
   }
 
   /// Writes `value` in decimal, then spaces up to `width` columns.

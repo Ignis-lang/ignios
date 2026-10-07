@@ -62,8 +62,8 @@
 //! x86_64 syscall table, `arch/x86/entry/syscalls/syscall_64.tbl`. See concept
 //! doc 15.
 
+import Arch from "@arch";
 import AddressSpace from "./address_space";
-import InterruptFrame from "./interrupts";
 import Console from "./console";
 import Process from "./process";
 import Scheduler from "./scheduler";
@@ -181,7 +181,7 @@ export namespace Syscall {
   /// Called by the entry stub with interrupts off, on the kernel stack of
   /// the calling thread.
   @externName("ignis_syscall_dispatch")
-  function dispatch(frame: *mut InterruptFrame): void {
+  function dispatch(frame: *mut Arch::InterruptFrame): void {
     let operation: u8 = lookup(Process::currentAbi(), (*frame).rax);
 
     let first: u64 = (*frame).rdi;

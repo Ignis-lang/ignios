@@ -64,11 +64,11 @@
 //! See concept doc 05 and Intel SDM Vol. 3A, "Advanced Programmable Interrupt
 //! Controller (APIC)".
 
-import Cpu from "./cpu";
-import Vmm from "../../vmm";
+import Arch from "@arch";
+import Vmm from "../vmm";
 
 /// The local APIC API. All register access is volatile MMIO.
-export namespace Lapic {
+namespace Apic::Lapic {
   /// Vector of the spurious interrupt the APIC raises when an interrupt
   /// disappears before the processor takes it. Its handler must not signal
   /// end of interrupt.
@@ -149,7 +149,7 @@ export namespace Lapic {
   /// kernel page tables must be active. Panics when the APIC is in x2APIC
   /// mode, which has no memory-mapped registers.
   function initialize(): void {
-    let base: u64 = Cpu::readMsr(APIC_BASE_MSR);
+    let base: u64 = Arch::Cpu::readMsr(APIC_BASE_MSR);
 
     if ((base & APIC_BASE_X2APIC) != 0) {
       @panic("lapic: x2APIC mode is not supported");
@@ -161,7 +161,7 @@ export namespace Lapic {
       @panic("lapic: cannot map the APIC page");
     }
 
-    Cpu::writeMsr(APIC_BASE_MSR, base | APIC_BASE_ENABLE);
+    Arch::Cpu::writeMsr(APIC_BASE_MSR, base | APIC_BASE_ENABLE);
 
     writeRegister(TASK_PRIORITY_REGISTER, 0);
     writeRegister(LINT0_REGISTER, DELIVERY_EXTINT | LVT_MASKED);
@@ -210,12 +210,12 @@ export namespace Lapic {
 
   /// The physical address of the APIC page, from the APIC base MSR.
   function physicalBase(): u64 {
-    return Cpu::readMsr(APIC_BASE_MSR) & APIC_BASE_ADDRESS_MASK;
+    return Arch::Cpu::readMsr(APIC_BASE_MSR) & APIC_BASE_ADDRESS_MASK;
   }
 
   /// True when the global enable bit of the APIC base MSR is set.
   function isGloballyEnabled(): boolean {
-    return (Cpu::readMsr(APIC_BASE_MSR) & APIC_BASE_ENABLE) != 0;
+    return (Arch::Cpu::readMsr(APIC_BASE_MSR) & APIC_BASE_ENABLE) != 0;
   }
 
   /// True when the software enable bit of the spurious vector register is

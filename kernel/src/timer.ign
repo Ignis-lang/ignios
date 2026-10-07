@@ -38,9 +38,8 @@
 //!
 //! See concept doc 12.
 
-import Cpu from "./arch/x86_64/cpu";
-import Lapic from "./arch/x86_64/lapic";
-import Pit from "./arch/x86_64/pit";
+import Apic from "@apic";
+import Arch from "@arch";
 
 /// Tick counter and the calibration result.
 record TimerState {
@@ -79,12 +78,12 @@ export namespace Timer {
   /// have an IDT gate. Panics when the PIT never finishes counting or the
   /// result does not fit a 32-bit initial count.
   function initialize(vector: u8): void {
-    Lapic::startTimerOneShotMasked(CALIBRATION_START);
-    Pit::startCountdown(CALIBRATION_COUNT as u16);
+    Apic::Lapic::startTimerOneShotMasked(CALIBRATION_START);
+    Arch::Pit::startCountdown(CALIBRATION_COUNT as u16);
 
     let mut polls: u64 = 0;
 
-    while (!Pit::hasExpired()) {
+    while (!Arch::Pit::hasExpired()) {
       if (polls == CALIBRATION_POLL_LIMIT) {
         @panic("timer: the PIT did not finish counting");
       }
@@ -92,12 +91,12 @@ export namespace Timer {
       polls += 1;
     }
 
-    let elapsed: u64 = (CALIBRATION_START - Lapic::timerCurrentCount()) as u64;
+    let elapsed: u64 = (CALIBRATION_START - Apic::Lapic::timerCurrentCount()) as u64;
 
-    Lapic::stopTimer();
-    Pit::stop();
+    Apic::Lapic::stopTimer();
+    Arch::Pit::stop();
 
-    let countRate: u64 = elapsed * Pit::FREQUENCY / CALIBRATION_COUNT;
+    let countRate: u64 = elapsed * Arch::Pit::FREQUENCY / CALIBRATION_COUNT;
     let initialCount: u64 = countRate / FREQUENCY;
 
     if (initialCount == 0 || initialCount > 0xFFFFFFFF) {
@@ -107,7 +106,7 @@ export namespace Timer {
     TimerState::countRate = countRate;
     TimerState::initialCount = initialCount;
 
-    Lapic::startTimerPeriodic(vector, initialCount as u32);
+    Apic::Lapic::startTimerPeriodic(vector, initialCount as u32);
   }
 
   /// The APIC timer counting rate in Hz at the divide setting in use.
@@ -144,12 +143,12 @@ export namespace Timer {
   function selfTest(): void {
     let target: u64 = ticks() + SELF_TEST_TICKS;
 
-    Cpu::enableInterrupts();
+    Arch::Cpu::enableInterrupts();
 
     while (ticks() < target) {
-      Cpu::waitForInterrupt();
+      Arch::Cpu::waitForInterrupt();
     }
 
-    Cpu::disableInterrupts();
+    Arch::Cpu::disableInterrupts();
   }
 }

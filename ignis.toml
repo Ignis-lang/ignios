@@ -57,3 +57,5 @@ emit = ["c"]
 # never import a file inside it.
 [aliases]
 "@lib" = "kernel/src/lib"
+"@arch" = "kernel/src/arch"
+"@apic" = "kernel/src/apic"

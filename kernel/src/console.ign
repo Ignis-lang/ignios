@@ -80,8 +80,8 @@
 //! of pixels in normal memory would be the fix once the kernel can allocate
 //! one. See concept doc 07.
 
+import Arch from "@arch";
 import Lib from "@lib";
-import Cpu from "./arch/x86_64/cpu";
 import Font from "./font";
 import Limine from "./limine";
 import Serial from "./serial";
@@ -336,7 +336,7 @@ export namespace Console {
   /// Sets the palette colors of the characters written from now on. Cells that
   /// are already drawn keep their colors.
   function setColors(foreground: u8, background: u8): void {
-    let saved: u64 = Cpu::saveAndDisableInterrupts();
+    let saved: u64 = Arch::Cpu::saveAndDisableInterrupts();
     let cursorWasDrawn: boolean = ConsoleState::cursorDrawn;
 
     hideCursor();
@@ -349,13 +349,13 @@ export namespace Console {
       showCursor();
     }
 
-    Cpu::restoreInterrupts(saved);
+    Arch::Cpu::restoreInterrupts(saved);
   }
 
   /// Fills the screen with the background color and moves the cursor home.
   /// The serial mirror is not cleared.
   function clear(): void {
-    let saved: u64 = Cpu::saveAndDisableInterrupts();
+    let saved: u64 = Arch::Cpu::saveAndDisableInterrupts();
 
     ConsoleState::cursorDrawn = false;
     fillPixels(0, 0, ConsoleState::width, ConsoleState::height, ConsoleState::background);
@@ -364,7 +364,7 @@ export namespace Console {
     ConsoleState::row = 0;
     showCursor();
 
-    Cpu::restoreInterrupts(saved);
+    Arch::Cpu::restoreInterrupts(saved);
   }
 
   /// Writes one byte: printable ASCII is drawn, `\n` starts a new line, `\r`
@@ -372,7 +372,7 @@ export namespace Console {
   /// TAB_WIDTH and backspace erases the previous cell. Other bytes draw `?`.
   /// Before `initialize`, the byte only goes to the serial mirror.
   function writeChar(character: u8): void {
-    let saved: u64 = Cpu::saveAndDisableInterrupts();
+    let saved: u64 = Arch::Cpu::saveAndDisableInterrupts();
 
     mirror(character);
 
@@ -382,12 +382,12 @@ export namespace Console {
       showCursor();
     }
 
-    Cpu::restoreInterrupts(saved);
+    Arch::Cpu::restoreInterrupts(saved);
   }
 
   /// Writes a NUL-terminated string.
   function write(text: str): void {
-    let saved: u64 = Cpu::saveAndDisableInterrupts();
+    let saved: u64 = Arch::Cpu::saveAndDisableInterrupts();
     let mut cursor: *u8 = text as *u8;
 
     while (*cursor != 0) {
@@ -395,35 +395,35 @@ export namespace Console {
       cursor = cursor + 1;
     }
 
-    Cpu::restoreInterrupts(saved);
+    Arch::Cpu::restoreInterrupts(saved);
   }
 
   /// Writes `text` followed by a newline.
   function writeLine(text: str): void {
-    let saved: u64 = Cpu::saveAndDisableInterrupts();
+    let saved: u64 = Arch::Cpu::saveAndDisableInterrupts();
 
     write(text);
     writeChar(NEWLINE);
 
-    Cpu::restoreInterrupts(saved);
+    Arch::Cpu::restoreInterrupts(saved);
   }
 
   /// Writes `value` in decimal.
   function writeDecimal(value: u64): void {
-    let saved: u64 = Cpu::saveAndDisableInterrupts();
+    let saved: u64 = Arch::Cpu::saveAndDisableInterrupts();
 
     Lib::Format::decimal(value, writeChar);
 
-    Cpu::restoreInterrupts(saved);
+    Arch::Cpu::restoreInterrupts(saved);
   }
 
   /// Writes `value` as `0x` and 16 hex digits.
   function writeHex(value: u64): void {
-    let saved: u64 = Cpu::saveAndDisableInterrupts();
+    let saved: u64 = Arch::Cpu::saveAndDisableInterrupts();
 
     Lib::Format::hexadecimal(value, writeChar);
 
-    Cpu::restoreInterrupts(saved);
+    Arch::Cpu::restoreInterrupts(saved);
   }
 
   /// Sends `character` to COM1 with the same editing a terminal would do:

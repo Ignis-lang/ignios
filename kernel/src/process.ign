@@ -30,7 +30,7 @@
 //!               ├─ slot := RUNNING, id := nextId++
 //!               └─ Scheduler::spawnIn(userMain, slot, root)   thread owns `root`
 //!
-//!   the new thread:  userMain ─► UserMode::enter ─► ring 3 ...
+//!   the new thread:  userMain ─► Arch::UserMode::enter ─► ring 3 ...
 //!                                    ... syscall exit(n) or a fault ...
 //!   finishCurrent:   status := n, state := EXITED, print "process N exited"
 //!                      └─ Scheduler::exitCurrent   thread DEAD
@@ -54,11 +54,9 @@
 //!
 //! See concept doc 14.
 
+import Arch from "@arch";
 import Lib from "@lib";
 import AddressSpace from "./address_space";
-import ContextAsm from "./arch/x86_64/context";
-import Cpu from "./arch/x86_64/cpu";
-import UserMode from "./arch/x86_64/usermode";
 import Console from "./console";
 import Elf, LoadedImage from "./elf";
 import Hhdm from "./hhdm";
@@ -231,12 +229,12 @@ export namespace Process {
   /// first instruction. Returns the process id, or `NO_PROCESS`; the space is
   /// destroyed on failure.
   function launch(root: u64, entry: u64): u64 {
-    let saved: u64 = Cpu::saveAndDisableInterrupts();
+    let saved: u64 = Arch::Cpu::saveAndDisableInterrupts();
     let slot: u64 = findFreeSlot();
 
     if (slot == NO_PROCESS) {
       AddressSpace::destroy(root);
-      Cpu::restoreInterrupts(saved);
+      Arch::Cpu::restoreInterrupts(saved);
       return NO_PROCESS;
     }
 
@@ -249,11 +247,11 @@ export namespace Process {
     (*process).status = 0;
     (*process).abi = ABI_LINUX;
 
-    let thread: u64 = Scheduler::spawnIn(ContextAsm::ignis_function_address(userMain), slot, root);
+    let thread: u64 = Scheduler::spawnIn(Arch::ContextAsm::ignis_function_address(userMain), slot, root);
 
     if (thread == Scheduler::NO_THREAD) {
       (*process).state = FREE;
-      Cpu::restoreInterrupts(saved);
+      Arch::Cpu::restoreInterrupts(saved);
       return NO_PROCESS;
     }
 
@@ -262,7 +260,7 @@ export namespace Process {
 
     let id: u64 = (*process).id;
 
-    Cpu::restoreInterrupts(saved);
+    Arch::Cpu::restoreInterrupts(saved);
 
     return id;
   }
@@ -319,7 +317,7 @@ export namespace Process {
       return 0;
     }
 
-    return Cpu::readCr3();
+    return Arch::Cpu::readCr3();
   }
 
   /// Ends the running process with `status` and never returns.
@@ -368,7 +366,7 @@ export namespace Process {
   function userMain(slot: u64): void {
     let process: *mut ProcessEntry = slotPointer(slot);
 
-    UserMode::enter((*process).entry, (*process).stackPointer);
+    Arch::UserMode::enter((*process).entry, (*process).stackPointer);
   }
 
   /// The slot of the process whose thread is running, or `NO_PROCESS`.

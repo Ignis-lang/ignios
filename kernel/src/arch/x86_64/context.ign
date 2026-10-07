@@ -5,9 +5,9 @@
 //!
 //! ## Overview
 //!
-//! A thread that is not running is a stack pointer. `Context::switchTo`
+//! A thread that is not running is a stack pointer. `Arch::Context::switchTo`
 //! stores the callee-saved registers and RSP of the running code and resumes
-//! another stack pointer, and `Context::prepareStack` builds the stack of a
+//! another stack pointer, and `Arch::Context::prepareStack` builds the stack of a
 //! thread that has never run so that the first switch into it starts its
 //! function. The layout and the alignment rule are described in
 //! `context_asm.S`.
@@ -20,7 +20,7 @@
 //! ## What a Switch Does
 //!
 //! ```text
-//!   thread A calls Context::switchTo(&A.savedRsp, B.savedRsp)
+//!   thread A calls Arch::Context::switchTo(&A.savedRsp, B.savedRsp)
 //!
 //!   A's stack                              B's stack
 //!   ┌────────────────┐                     ┌────────────────┐
@@ -57,7 +57,7 @@
 //! `entry(argument)` and, when it returns, calls `Scheduler::exitCurrent`.
 //! See concept doc 13.
 
-import Cpu from "./cpu";
+import _ from "./cpu";
 
 /// Storage for the self-test: a stack, the two saved stack pointers and what
 /// the test thread reports back. `STACK` is the stack of the test thread, 8192
@@ -87,24 +87,26 @@ record ContextTestState {
   static mut interruptsOnEntry: boolean = false;
 }
 
-/// Functions implemented in `context_asm.S`.
-export extern ContextAsm {
-  /// Saves the callee-saved registers on the current stack, stores RSP in
-  /// `*saveRsp`, loads `nextRsp` and resumes that context. Interrupts must be
-  /// off.
-  function ignis_switch_context(saveRsp: *mut u64, nextRsp: u64): void;
+namespace Arch {
+  /// Functions implemented in `context_asm.S`.
+  extern ContextAsm {
+    /// Saves the callee-saved registers on the current stack, stores RSP in
+    /// `*saveRsp`, loads `nextRsp` and resumes that context. Interrupts must be
+    /// off.
+    function ignis_switch_context(saveRsp: *mut u64, nextRsp: u64): void;
 
-  /// The address of the code every new thread starts in.
-  function ignis_thread_trampoline_address(): u64;
+    /// The address of the code every new thread starts in.
+    function ignis_thread_trampoline_address(): u64;
 
-  /// The address of a thread function. It has to be called with the function
-  /// named at the call site, because an extern function takes only a
-  /// capture-free function written there, not a function value passed on.
-  function ignis_function_address(entry: (u64) -> void): u64;
+    /// The address of a thread function. It has to be called with the function
+    /// named at the call site, because an extern function takes only a
+    /// capture-free function written there, not a function value passed on.
+    function ignis_function_address(entry: (u64) -> void): u64;
+  }
 }
 
 /// The context switching API.
-export namespace Context {
+namespace Arch::Context {
   /// Registers the first switch pops, plus the return address it jumps to.
   const INITIAL_SLOTS: u64 = 7;
 
@@ -121,11 +123,11 @@ export namespace Context {
   /// `nextRsp`. Returns when some other context switches back to the stored
   /// value. Interrupts must be disabled.
   function switchTo(saveRsp: *mut u64, nextRsp: u64): void {
-    if (Cpu::interruptsEnabled()) {
+    if (Arch::Cpu::interruptsEnabled()) {
       @panic("context: switch with interrupts enabled");
     }
 
-    ContextAsm::ignis_switch_context(saveRsp, nextRsp);
+    Arch::ContextAsm::ignis_switch_context(saveRsp, nextRsp);
   }
 
   /// Lays out the stack of a thread that has never run and returns the stack
@@ -151,7 +153,7 @@ export namespace Context {
 
     @write<u64>(slots + ARGUMENT_SLOT, argument);
     @write<u64>(slots + FUNCTION_SLOT, entry);
-    @write<u64>(slots + RETURN_SLOT, ContextAsm::ignis_thread_trampoline_address());
+    @write<u64>(slots + RETURN_SLOT, Arch::ContextAsm::ignis_thread_trampoline_address());
 
     return base;
   }
@@ -168,7 +170,7 @@ export namespace Context {
     const ARGUMENT: u64 = 0xC0FFEE;
 
     let stackEnd: u64 = @integerFromPointer(&mut ContextTestState::STACK as *mut u8) + 8192;
-    let entry: u64 = ContextAsm::ignis_function_address(selfTestThread);
+    let entry: u64 = Arch::ContextAsm::ignis_function_address(selfTestThread);
 
     ContextTestState::rounds = 0;
     ContextTestState::threadRsp = prepareStack(stackEnd, entry, ARGUMENT);
@@ -203,7 +205,7 @@ export namespace Context {
       @panic("context self-test: the thread function started on a misaligned stack");
     }
 
-    if (Cpu::interruptsEnabled()) {
+    if (Arch::Cpu::interruptsEnabled()) {
       @panic("context self-test: interrupts came back on");
     }
   }
@@ -216,11 +218,11 @@ export namespace Context {
     let second: u64 = 0xBBBBBBBBBBBBBBBB;
 
     ContextTestState::argument = argument;
-    ContextTestState::interruptsOnEntry = Cpu::interruptsEnabled();
+    ContextTestState::interruptsOnEntry = Arch::Cpu::interruptsEnabled();
     ContextTestState::framePointer = asm () -> (value: u64 in rax) { mov {value}, rbp };
 
     while (true) {
-      Cpu::disableInterrupts();
+      Arch::Cpu::disableInterrupts();
       ContextTestState::rounds += 1;
       switchTo(&mut ContextTestState::threadRsp as *mut u64, ContextTestState::mainRsp);
 
