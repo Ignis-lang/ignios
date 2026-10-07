@@ -50,6 +50,9 @@ export namespace Vmm {
   const USER: u64 = 0x4;
   const NO_EXECUTE: u64 = 0x8000000000000000;
 
+  /// Strong uncached memory type (PCD and PWT), for device registers.
+  const UNCACHED: u64 = 0x18;
+
   /// Selects PAT entry 5, which Limine programs as write-combining. It is
   /// kept in an ignored entry bit and turned into the PAT, PCD and PWT bits
   /// that fit the page size.

@@ -1,36 +1,105 @@
-//! The local APIC, only as far as the legacy PIC needs it.
+//! The local APIC in xAPIC mode, set up so the legacy 8259 keeps delivering
+//! interrupts ("virtual wire" mode).
 //!
-//! UEFI firmware enables the local APIC and masks its LINT0 input, which is
-//! the line the 8259 drives, so the PIC cannot reach the processor. LINT0 is
-//! a memory-mapped register and the bootloader's higher half direct map does
-//! not cover the APIC page, so the kernel cannot unmask it before it has its
-//! own page tables. Turning the local APIC off through the APIC base MSR
-//! makes the 8259 drive the processor directly instead. Whoever brings up the
-//! APIC later turns it back on through the same MSR.
+//! UEFI firmware leaves the local APIC enabled with its LINT0 input masked.
+//! LINT0 is the line the 8259 drives, so until it is unmasked the PIC cannot
+//! reach the processor. The registers are memory mapped, so `initialize`
+//! first maps the APIC page uncached into the kernel address space. It then
+//! enables the APIC through the spurious interrupt vector register, routes
+//! LINT0 as an external interrupt (the processor takes the vector from the
+//! 8259) and LINT1 as a non-maskable interrupt, which is the wiring a PC
+//! expects. The IOAPIC is not used yet: keyboard interrupts still arrive
+//! through the PIC.
+
+import Cpu from "./cpu";
+import Vmm from "../../vmm";
 
 export namespace Lapic {
+  /// Vector of the spurious interrupt the APIC raises when an interrupt
+  /// disappears before the processor takes it. Its handler must not signal
+  /// end of interrupt.
+  const SPURIOUS_VECTOR: u64 = 0xFF;
+
   const APIC_BASE_MSR: u32 = 0x1B;
   const APIC_BASE_ENABLE: u64 = 0x800;
+  const APIC_BASE_X2APIC: u64 = 0x400;
+  const APIC_BASE_ADDRESS_MASK: u64 = 0x000FFFFFFFFFF000;
 
-  /// Disables the local APIC so the 8259 reaches the processor.
-  function disable(): void {
-    writeMsr(APIC_BASE_MSR, readMsr(APIC_BASE_MSR) & ~APIC_BASE_ENABLE);
-  }
+  /// Where the kernel maps the APIC page. It lies in its own region of the
+  /// higher half, away from the direct map, the heap and the kernel image.
+  const MAPPING: u64 = 0xFFFFA00000000000;
 
-  function readMsr(msr: u32): u64 {
-    asm (msr in ecx) -> (low: u32 in eax, high: u32 in edx) {
-      rdmsr
+  const ID_REGISTER: u64 = 0x20;
+  const VERSION_REGISTER: u64 = 0x30;
+  const TASK_PRIORITY_REGISTER: u64 = 0x80;
+  const SPURIOUS_REGISTER: u64 = 0xF0;
+  const LINT0_REGISTER: u64 = 0x350;
+  const LINT1_REGISTER: u64 = 0x360;
+
+  const SOFTWARE_ENABLE: u32 = 0x100;
+  const DELIVERY_EXTINT: u32 = 0x700;
+  const DELIVERY_NMI: u32 = 0x400;
+
+  /// Maps the APIC page, enables the APIC and wires LINT0 and LINT1. The
+  /// kernel page tables must be active. Panics when the APIC is in x2APIC
+  /// mode, which has no memory-mapped registers.
+  function initialize(): void {
+    let base: u64 = Cpu::readMsr(APIC_BASE_MSR);
+
+    if ((base & APIC_BASE_X2APIC) != 0) {
+      @panic("lapic: x2APIC mode is not supported");
     }
 
-    return ((high as u64) << 32) | (low as u64);
+    let flags: u64 = Vmm::WRITABLE | Vmm::NO_EXECUTE | Vmm::UNCACHED;
+
+    if (!Vmm::map(MAPPING, base & APIC_BASE_ADDRESS_MASK, flags)) {
+      @panic("lapic: cannot map the APIC page");
+    }
+
+    Cpu::writeMsr(APIC_BASE_MSR, base | APIC_BASE_ENABLE);
+
+    writeRegister(TASK_PRIORITY_REGISTER, 0);
+    writeRegister(LINT0_REGISTER, DELIVERY_EXTINT);
+    writeRegister(LINT1_REGISTER, DELIVERY_NMI);
+    writeRegister(SPURIOUS_REGISTER, SOFTWARE_ENABLE | (SPURIOUS_VECTOR as u32));
   }
 
-  function writeMsr(msr: u32, value: u64): void {
-    let low: u32 = value as u32;
-    let high: u32 = (value >> 32) as u32;
+  /// The vector the APIC raises for spurious interrupts.
+  function spuriousVector(): u64 {
+    return SPURIOUS_VECTOR;
+  }
 
-    asm (msr in ecx, low in eax, high in edx) clobber(memory) {
-      wrmsr
-    }
+  /// The physical address of the APIC page, from the APIC base MSR.
+  function physicalBase(): u64 {
+    return Cpu::readMsr(APIC_BASE_MSR) & APIC_BASE_ADDRESS_MASK;
+  }
+
+  /// True when the global enable bit of the APIC base MSR is set.
+  function isGloballyEnabled(): boolean {
+    return (Cpu::readMsr(APIC_BASE_MSR) & APIC_BASE_ENABLE) != 0;
+  }
+
+  /// True when the software enable bit of the spurious vector register is
+  /// set.
+  function isSoftwareEnabled(): boolean {
+    return (readRegister(SPURIOUS_REGISTER) & SOFTWARE_ENABLE) != 0;
+  }
+
+  /// The APIC id of this processor.
+  function id(): u32 {
+    return readRegister(ID_REGISTER) >> 24;
+  }
+
+  /// The version register: version in bits 0-7, last LVT entry in 16-23.
+  function version(): u32 {
+    return readRegister(VERSION_REGISTER);
+  }
+
+  function readRegister(offset: u64): u32 {
+    return @readVolatile<u32>(@pointerFromInteger<*mut u32>(MAPPING + offset));
+  }
+
+  function writeRegister(offset: u64, value: u32): void {
+    @writeVolatile<u32>(@pointerFromInteger<*mut u32>(MAPPING + offset), value);
   }
 }

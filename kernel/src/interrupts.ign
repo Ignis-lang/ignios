@@ -3,9 +3,11 @@
 //!
 //! Every CPU exception is fatal for now: it is reported on COM1 and on the
 //! console, then the processor halts. Hardware interrupts come from the PIC
-//! at vectors 0x20-0x2F, and only the keyboard line is unmasked.
+//! at vectors 0x20-0x2F, and only the keyboard line is unmasked. The local
+//! APIC's spurious vector is ignored without any acknowledgement.
 
 import Cpu from "./arch/x86_64/cpu";
+import Lapic from "./arch/x86_64/lapic";
 import Pic from "./arch/x86_64/pic";
 import Color, Console from "./console";
 import Ps2 from "./ps2";
@@ -51,6 +53,10 @@ export namespace Interrupts {
   @externName("ignis_interrupt_dispatch")
   function dispatch(frame: *mut InterruptFrame): void {
     let vector: u64 = (*frame).vector;
+
+    if (vector == Lapic::spuriousVector()) {
+      return;
+    }
 
     if (vector >= FIRST_IRQ_VECTOR && vector < FIRST_IRQ_VECTOR + IRQ_VECTOR_COUNT) {
       handleHardwareInterrupt((vector - FIRST_IRQ_VECTOR) as u8);

@@ -6,6 +6,7 @@
 //! every element.
 
 import Gdt from "./gdt";
+import Lapic from "./lapic";
 
 extern IdtAsm {
   function ignis_interrupt_thunk(vector: u64): u64;
@@ -28,8 +29,8 @@ export namespace Idt {
   const GATE_COUNT: u64 = 256;
   const GATE_SIZE: u64 = 16;
 
-  /// Vectors 0-31 are exceptions and 32-47 the remapped PIC lines. Those are
-  /// the only vectors that have a thunk.
+  /// Vectors 0-31 are exceptions and 32-47 the remapped PIC lines. Those and
+  /// the local APIC spurious vector are the only vectors that have a thunk.
   const THUNK_COUNT: u64 = 48;
 
   const DOUBLE_FAULT: u64 = 8;
@@ -53,6 +54,8 @@ export namespace Idt {
       setGate(vector, IdtAsm::ignis_interrupt_thunk(vector), selector, stack, INTERRUPT_GATE);
       vector += 1;
     }
+
+    setGate(Lapic::spuriousVector(), IdtAsm::ignis_interrupt_thunk(Lapic::spuriousVector()), selector, 0, INTERRUPT_GATE);
 
     let descriptor: IdtPointer = IdtPointer {
       limit: (GATE_COUNT * GATE_SIZE - 1) as u16,

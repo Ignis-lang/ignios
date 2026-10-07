@@ -28,6 +28,8 @@ ignis_interrupt_thunk_\vector:
     THUNK \vector
 .endr
 
+    THUNK 255
+
 ignis_interrupt_common:
     push r15
     push r14
@@ -68,9 +70,15 @@ ignis_interrupt_common:
     add rsp, 16
     iretq
 
-/* u64 ignis_interrupt_thunk(u64 vector): the entry address of a vector 0-47. */
+/* u64 ignis_interrupt_thunk(u64 vector): the entry address of a vector 0-47,
+ * or of vector 255, the local APIC spurious vector. */
 .global ignis_interrupt_thunk
 ignis_interrupt_thunk:
+    cmp rdi, 255
+    jne 1f
+    lea rax, [rip + ignis_interrupt_thunk_255]
+    ret
+1:
     lea rax, [rip + ignis_interrupt_thunk_table]
     mov rax, [rax + rdi * 8]
     ret

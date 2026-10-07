@@ -176,6 +176,20 @@ function initializeMemory(framebuffer: *mut Limine::Framebuffer): void {
   Console::writeLine(" bytes in use");
 }
 
+function reportLapic(): void {
+  Console::write("lapic: base ");
+  Console::writeHex(Lapic::physicalBase());
+  Console::write(", id ");
+  Console::writeDecimal(Lapic::id() as u64);
+  Console::write(", version ");
+  Console::writeHex(Lapic::version() as u64);
+  Console::write(", msr enabled ");
+  Console::writeDecimal(Lapic::isGloballyEnabled() ? 1 : 0);
+  Console::write(", svr enabled ");
+  Console::writeDecimal(Lapic::isSoftwareEnabled() ? 1 : 0);
+  Console::writeLine(", virtual wire (LINT0 ExtINT, LINT1 NMI)");
+}
+
 function printPrompt(): void {
   Console::setColors(Color::BRIGHT_GREEN, Color::BLACK);
   Console::write("> ");
@@ -247,12 +261,13 @@ function kmain(): void {
 
   initializeMemory(framebuffer);
 
+  Pic::initialize();
+  Lapic::initialize();
+  reportLapic();
+
   if (!initializeKeyboard()) {
     Cpu::haltForever();
   }
-
-  Pic::initialize();
-  Lapic::disable();
 
   runTerminal();
 }
