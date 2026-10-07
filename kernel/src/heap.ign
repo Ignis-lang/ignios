@@ -6,12 +6,14 @@
 //! in address order through a pointer stored in their payload, which lets
 //! `free` merge a block with both neighbours. A request for a larger
 //! alignment splits the space in front of the aligned payload off as a free
-//! block of its own. The heap is not synchronized: the kernel has one
-//! processor and nothing allocates in an interrupt handler.
+//! block of its own. `allocate` and `free` run with
+//! interrupts disabled, which is all the mutual exclusion the single
+//! processor needs: no other thread can run in the middle of a list update.
 //!
 //! The compiler's allocation handlers sit on top of it, so escaping capturing
 //! closures allocate here.
 
+import Cpu from "./arch/x86_64/cpu";
 import Pmm from "./pmm";
 import Vmm from "./vmm";
 
@@ -61,6 +63,16 @@ export namespace Heap {
   /// two. Returns null when the alignment is invalid or the heap cannot grow
   /// any further.
   function allocate(size: u64, align: u64): *mut u8 {
+    let saved: u64 = Cpu::saveAndDisableInterrupts();
+    let pointer: *mut u8 = allocateLocked(size, align);
+
+    Cpu::restoreInterrupts(saved);
+
+    return pointer;
+  }
+
+  /// The body of `allocate`. Interrupts must be disabled.
+  function allocateLocked(size: u64, align: u64): *mut u8 {
     if (align == 0 || (align & (align - 1)) != 0) {
       return null;
     }
@@ -89,6 +101,8 @@ export namespace Heap {
       return;
     }
 
+    let saved: u64 = Cpu::saveAndDisableInterrupts();
+
     let payload: u64 = @integerFromPointer(pointer);
     let block: u64 = payload - HEADER_SIZE;
 
@@ -98,6 +112,8 @@ export namespace Heap {
 
     HeapState::allocatedBytes -= readSize(block);
     insertFree(block, readSize(block));
+
+    Cpu::restoreInterrupts(saved);
   }
 
   /// Bytes in live blocks, headers included.

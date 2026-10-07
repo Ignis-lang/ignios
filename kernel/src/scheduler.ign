@@ -1,4 +1,4 @@
-//! Kernel threads on one processor, switched cooperatively.
+//! Kernel threads on one processor, switched cooperatively and by the timer.
 //!
 //! A thread is a slot in a fixed table: an id, a state, the stack pointer it
 //! was switched out with, and a kernel stack of its own. Slot 0 is the boot
@@ -7,7 +7,9 @@
 //! slot is free until `spawn` fills it.
 //!
 //! Ready threads wait in a FIFO run queue and run in the order they entered
-//! it. A thread leaves the processor by calling `yield` (back to the end of
+//! it. Once `enablePreemption` is called, the timer interrupt also takes the
+//! processor from a thread that has used `TIME_SLICE_TICKS` ticks, so a
+//! thread that never yields cannot starve the others. A thread leaves the processor by calling `yield` (back to the end of
 //! the queue), `sleep` (blocked until a tick count) or by returning from its
 //! function, which ends in `exitCurrent`. The stack of a dead thread cannot
 //! be freed while it is still running on it, so the dead thread is recorded
@@ -39,6 +41,7 @@ record Thread {
   public savedRsp: u64;
   public stackBase: u64;
   public wakeTick: u64;
+  public runTicks: u64;
 }
 
 /// The scheduler state. The array sizes must equal `Scheduler::MAX_THREADS`,
@@ -52,7 +55,10 @@ record SchedulerState {
   static mut zombie: u64;
   static mut nextId: u64;
   static mut switches: u64;
+  static mut preemptions: u64;
+  static mut sliceLeft: u64;
   static mut started: boolean;
+  static mut preemptive: boolean;
 }
 
 export namespace Scheduler {
@@ -80,6 +86,10 @@ export namespace Scheduler {
   /// Finished, waiting for the next thread to free its stack.
   const DEAD: u64 = 4;
 
+  /// Timer ticks a thread may run before the timer interrupt hands the
+  /// processor to the next ready thread: 10 ticks at 100 Hz is 100 ms.
+  const TIME_SLICE_TICKS: u64 = 10;
+
   const PAGE_SIZE: u64 = 4096;
   const STACK_PAGES: u64 = 4;
 
@@ -106,6 +116,58 @@ export namespace Scheduler {
     }
 
     SchedulerState::started = true;
+  }
+
+  /// Lets the timer interrupt switch threads. Until it is called, threads
+  /// change only when one of them yields, sleeps or exits.
+  function enablePreemption(): void {
+    let saved: u64 = Cpu::saveAndDisableInterrupts();
+
+    SchedulerState::sliceLeft = TIME_SLICE_TICKS;
+    SchedulerState::preemptive = true;
+
+    Cpu::restoreInterrupts(saved);
+  }
+
+  /// Called from the timer interrupt after the end-of-interrupt, with
+  /// interrupts still disabled by the interrupt gate. Counts the tick
+  /// against the running thread, wakes sleepers, and switches threads when
+  /// the time slice is over or the idle thread is running while another
+  /// thread is ready. The interrupt then returns in whichever thread was
+  /// switched in, which finishes its own interrupt return later.
+  function onTick(): void {
+    if (!SchedulerState::started || !SchedulerState::preemptive) {
+      return;
+    }
+
+    let current: *mut Thread = slotPointer(SchedulerState::current);
+
+    (*current).runTicks += 1;
+    wakeSleepers();
+
+    if (SchedulerState::current == IDLE_SLOT) {
+      if (SchedulerState::queueLength > 0) {
+        makeReady(IDLE_SLOT);
+        switchToNext();
+      }
+
+      return;
+    }
+
+    SchedulerState::sliceLeft -= 1;
+
+    if (SchedulerState::sliceLeft > 0) {
+      return;
+    }
+
+    if (SchedulerState::queueLength == 0) {
+      SchedulerState::sliceLeft = TIME_SLICE_TICKS;
+      return;
+    }
+
+    SchedulerState::preemptions += 1;
+    makeReady(SchedulerState::current);
+    switchToNext();
   }
 
   /// Creates a thread that runs `entry(argument)` and puts it at the end of
@@ -224,6 +286,12 @@ export namespace Scheduler {
     return SchedulerState::switches;
   }
 
+  /// How many times the timer interrupt took the processor from a thread
+  /// that had used its time slice.
+  function preemptionCount(): u64 {
+    return SchedulerState::preemptions;
+  }
+
   /// Threads currently in the table, idle and boot included.
   function threadCount(): u64 {
     let mut count: u64 = 0;
@@ -264,6 +332,7 @@ export namespace Scheduler {
     (*thread).state = READY;
     (*thread).stackBase = base;
     (*thread).wakeTick = 0;
+    (*thread).runTicks = 0;
     (*thread).savedRsp = Context::prepareStack(base + STACK_SPAN, entry, argument);
 
     SchedulerState::nextId += 1;
@@ -341,6 +410,7 @@ export namespace Scheduler {
     }
 
     (*slotPointer(next)).state = RUNNING;
+    SchedulerState::sliceLeft = TIME_SLICE_TICKS;
 
     if (next == outgoing) {
       return;

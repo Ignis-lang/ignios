@@ -4,15 +4,18 @@
 //! Every CPU exception is fatal for now: it is reported on COM1 and on the
 //! console, then the processor halts. Device interrupts come from the IOAPIC
 //! and are acknowledged at the local APIC: the keyboard arrives at vector
-//! 0x21 and the local APIC timer at vector 0x30. The 8259 is fully masked, but its vectors 0x20-0x2F stay mapped to
-//! thunks so a spurious 8259 interrupt is absorbed. The local APIC's
-//! spurious vector is ignored without any acknowledgement.
+//! 0x21 and the local APIC timer at vector 0x30, whose handler may switch to
+//! another thread after acknowledging the interrupt. The 8259 is fully
+//! masked, but its vectors 0x20-0x2F stay mapped to thunks so a spurious 8259
+//! interrupt is absorbed. The local APIC's spurious vector is ignored without
+//! any acknowledgement.
 
 import Cpu from "./arch/x86_64/cpu";
 import Lapic from "./arch/x86_64/lapic";
 import Pic from "./arch/x86_64/pic";
 import Color, Console from "./console";
 import Ps2 from "./ps2";
+import Scheduler from "./scheduler";
 import Serial from "./serial";
 import Timer from "./timer";
 
@@ -77,6 +80,7 @@ export namespace Interrupts {
     if (vector == TIMER_VECTOR) {
       Timer::handleTick();
       Lapic::endOfInterrupt();
+      Scheduler::onTick();
       return;
     }
 

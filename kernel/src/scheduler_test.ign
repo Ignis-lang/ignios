@@ -14,12 +14,17 @@ record SchedulerTestState {
   static mut trace: u8[16];
   static mut traceLength: u64;
   static mut sleptTicks: u64;
+  static mut stop: u64;
+  static mut spins: u64[2];
 }
 
 export namespace SchedulerTest {
   const WORKERS: u64 = 3;
   const STEPS: u64 = 3;
   const SLEEP_TICKS: u64 = 5;
+
+  /// Ticks the preemption check lets two threads that never yield compete.
+  const PREEMPTION_TICKS: u64 = 40;
 
   /// Runs the cooperative checks: round-robin order, exit and reuse of
   /// slots, sleeping, and a full table. The scheduler must be initialized
@@ -32,6 +37,50 @@ export namespace SchedulerTest {
     testFullTable();
 
     Cpu::restoreInterrupts(saved);
+  }
+
+  /// Two threads that spin without ever yielding must both get the processor
+  /// from the timer interrupt while the boot thread, which is waiting for
+  /// time to pass, keeps getting it back. Preemption must be enabled.
+  /// Interrupts are left as they were found. Returns how many times the
+  /// timer took the processor away from a thread that had not given it up.
+  function runPreemptive(): u64 {
+    let saved: u64 = Cpu::saveAndDisableInterrupts();
+    let preemptionsBefore: u64 = Scheduler::preemptionCount();
+
+    SchedulerTestState::stop = 0;
+    SchedulerTestState::spins[0] = 0;
+    SchedulerTestState::spins[1] = 0;
+
+    let first: u64 = Scheduler::spawn(ContextAsm::ignis_function_address(spinner), 0);
+    let second: u64 = Scheduler::spawn(ContextAsm::ignis_function_address(spinner), 1);
+
+    let end: u64 = Timer::ticks() + PREEMPTION_TICKS;
+
+    Cpu::enableInterrupts();
+
+    while (Timer::ticks() < end) {
+      Cpu::waitForInterrupt();
+    }
+
+    Cpu::disableInterrupts();
+    @writeVolatile<u64>(&mut SchedulerTestState::stop as *mut u64, 1);
+
+    joinRange(first, second);
+
+    if (spinCount(0) == 0 || spinCount(1) == 0) {
+      @panic("preemption self-test: a spinning thread never got the processor");
+    }
+
+    let preemptions: u64 = Scheduler::preemptionCount() - preemptionsBefore;
+
+    if (preemptions < 2) {
+      @panic("preemption self-test: the timer did not take the processor away");
+    }
+
+    Cpu::restoreInterrupts(saved);
+
+    return preemptions;
   }
 
   /// Three workers that yield after every step must interleave in the order
@@ -139,6 +188,21 @@ export namespace SchedulerTest {
       }
 
       id += 1;
+    }
+  }
+
+  /// How many loop iterations spinner `index` completed.
+  function spinCount(index: u64): u64 {
+    return @readVolatile<u64>(&mut SchedulerTestState::spins as *mut u64 + index);
+  }
+
+  /// Counts iterations until told to stop and never yields, sleeps or
+  /// blocks.
+  function spinner(index: u64): void {
+    let counter: *mut u64 = &mut SchedulerTestState::spins as *mut u64 + index;
+
+    while (@readVolatile<u64>(&mut SchedulerTestState::stop as *mut u64) == 0) {
+      @writeVolatile<u64>(counter, @readVolatile<u64>(counter) + 1);
     }
   }
 

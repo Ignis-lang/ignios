@@ -8,10 +8,12 @@
 //!
 //! The bitmap lives in the first usable region at or above 1 MiB that is big
 //! enough, reached through the higher half direct map. That sizes it to the
-//! machine instead of to a compile-time maximum. The allocator is not
-//! synchronized: the kernel has one processor and no allocation in interrupt
-//! handlers.
+//! machine instead of to a compile-time maximum. `allocateFrame` and
+//! `freeFrame` run with interrupts disabled, which is all the mutual
+//! exclusion the single processor needs: no other thread can run in the
+//! middle of a bitmap update.
 
+import Cpu from "./arch/x86_64/cpu";
 import Hhdm from "./hhdm";
 import Limine from "./limine";
 import Mem from "./lib/mem";
@@ -78,6 +80,16 @@ export namespace Pmm {
 
   /// The physical address of a free frame, or `NO_FRAME`.
   function allocateFrame(): u64 {
+    let saved: u64 = Cpu::saveAndDisableInterrupts();
+    let frame: u64 = takeFrame();
+
+    Cpu::restoreInterrupts(saved);
+
+    return frame;
+  }
+
+  /// Finds and marks a free frame. Interrupts must be disabled.
+  function takeFrame(): u64 {
     let words: u64 = PmmState::wordCount;
     let mut word: u64 = PmmState::searchWord;
     let mut scanned: u64 = 0;
@@ -109,6 +121,7 @@ export namespace Pmm {
   /// Returns a frame to the allocator. Freeing an address that is not an
   /// allocated frame is a kernel bug and panics.
   function freeFrame(address: u64): void {
+    let saved: u64 = Cpu::saveAndDisableInterrupts();
     let frame: u64 = address / FRAME_SIZE;
 
     if (address % FRAME_SIZE != 0 || frame >= PmmState::wordCount * BITS_PER_WORD || !isUsed(frame)) {
@@ -121,6 +134,8 @@ export namespace Pmm {
     if (frame / BITS_PER_WORD < PmmState::searchWord) {
       PmmState::searchWord = frame / BITS_PER_WORD;
     }
+
+    Cpu::restoreInterrupts(saved);
   }
 
   /// Frames the allocator manages: every usable frame at boot, including the

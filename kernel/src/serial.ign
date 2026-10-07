@@ -1,5 +1,10 @@
 //! Polled driver for the COM1 16550 UART.
+//!
+//! `write`, `writeLine`, `writeDecimal` and `writeHex` run with interrupts
+//! disabled, so the text of one call is never split by another thread's
+//! output. `writeByte` alone is not guarded.
 
+import Cpu from "./arch/x86_64/cpu";
 import Port from "./arch/x86_64/io";
 import Format from "./lib/format";
 
@@ -39,6 +44,7 @@ export namespace Serial {
 
   /// Writes a NUL-terminated string, sending `\r\n` for each `\n`.
   function write(text: str): void {
+    let saved: u64 = Cpu::saveAndDisableInterrupts();
     let mut cursor: *u8 = text as *u8;
 
     while (*cursor != 0) {
@@ -49,18 +55,32 @@ export namespace Serial {
       writeByte(*cursor);
       cursor = cursor + 1;
     }
+
+    Cpu::restoreInterrupts(saved);
   }
 
   function writeLine(text: str): void {
+    let saved: u64 = Cpu::saveAndDisableInterrupts();
+
     write(text);
     write("\n");
+
+    Cpu::restoreInterrupts(saved);
   }
 
   function writeDecimal(value: u64): void {
+    let saved: u64 = Cpu::saveAndDisableInterrupts();
+
     Format::decimal(value, writeByte);
+
+    Cpu::restoreInterrupts(saved);
   }
 
   function writeHex(value: u64): void {
+    let saved: u64 = Cpu::saveAndDisableInterrupts();
+
     Format::hexadecimal(value, writeByte);
+
+    Cpu::restoreInterrupts(saved);
   }
 }

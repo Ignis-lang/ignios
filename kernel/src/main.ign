@@ -404,6 +404,14 @@ function kmain(): void {
   Console::writeDecimal(Scheduler::switchCount());
   Console::writeLine(" switches");
 
+  Scheduler::enablePreemption();
+
+  let preemptions: u64 = SchedulerTest::runPreemptive();
+
+  Console::write("scheduler: preemption self-test ok, two threads that never yield shared the processor, ");
+  Console::writeDecimal(preemptions);
+  Console::writeLine(" preemptions");
+
   if (!initializeKeyboard()) {
     Cpu::haltForever();
   }

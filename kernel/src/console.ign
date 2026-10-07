@@ -12,11 +12,17 @@
 //! framebuffer, which is slow on write-combining memory. A framebuffer with
 //! more than `MAX_COLUMNS` x `MAX_ROWS` cells uses only that many.
 //!
+//! Every public operation runs with interrupts disabled, so the cell copy, the
+//! cursor and the serial mirror are never touched by two threads at once. A
+//! whole string, number or color change is one critical section, which keeps
+//! the text of one call together on the screen and on COM1.
+//!
 //! Scrolling still moves the framebuffer itself, reading video memory back.
 //! That is cheap under QEMU but slow on real hardware, where a shadow buffer
 //! of pixels in normal memory would be the fix once the kernel can allocate
 //! one.
 
+import Cpu from "./arch/x86_64/cpu";
 import Font from "./font";
 import Limine from "./limine";
 import Serial from "./serial";
@@ -170,6 +176,7 @@ export namespace Console {
 
   /// Sets the palette colors of the characters written from now on.
   function setColors(foreground: u8, background: u8): void {
+    let saved: u64 = Cpu::saveAndDisableInterrupts();
     let cursorWasDrawn: boolean = ConsoleState::cursorDrawn;
 
     hideCursor();
@@ -181,17 +188,23 @@ export namespace Console {
     if (cursorWasDrawn) {
       showCursor();
     }
+
+    Cpu::restoreInterrupts(saved);
   }
 
   /// Fills the screen with the background color and moves the cursor home.
   /// The serial mirror is not cleared.
   function clear(): void {
+    let saved: u64 = Cpu::saveAndDisableInterrupts();
+
     ConsoleState::cursorDrawn = false;
     fillPixels(0, 0, ConsoleState::width, ConsoleState::height, ConsoleState::background);
     fillCells(0, ConsoleState::rows);
     ConsoleState::column = 0;
     ConsoleState::row = 0;
     showCursor();
+
+    Cpu::restoreInterrupts(saved);
   }
 
   /// Writes one byte: printable ASCII is drawn, `\n` starts a new line, `\r`
@@ -199,38 +212,55 @@ export namespace Console {
   /// TAB_WIDTH and backspace erases the previous cell. Other bytes draw `?`.
   /// Before `initialize`, the byte only goes to the serial mirror.
   function writeChar(character: u8): void {
+    let saved: u64 = Cpu::saveAndDisableInterrupts();
+
     mirror(character);
 
-    if (!ConsoleState::initialized) {
-      return;
+    if (ConsoleState::initialized) {
+      hideCursor();
+      render(character);
+      showCursor();
     }
 
-    hideCursor();
-    render(character);
-    showCursor();
+    Cpu::restoreInterrupts(saved);
   }
 
   /// Writes a NUL-terminated string.
   function write(text: str): void {
+    let saved: u64 = Cpu::saveAndDisableInterrupts();
     let mut cursor: *u8 = text as *u8;
 
     while (*cursor != 0) {
       writeChar(*cursor);
       cursor = cursor + 1;
     }
+
+    Cpu::restoreInterrupts(saved);
   }
 
   function writeLine(text: str): void {
+    let saved: u64 = Cpu::saveAndDisableInterrupts();
+
     write(text);
     writeChar(NEWLINE);
+
+    Cpu::restoreInterrupts(saved);
   }
 
   function writeDecimal(value: u64): void {
+    let saved: u64 = Cpu::saveAndDisableInterrupts();
+
     Format::decimal(value, writeChar);
+
+    Cpu::restoreInterrupts(saved);
   }
 
   function writeHex(value: u64): void {
+    let saved: u64 = Cpu::saveAndDisableInterrupts();
+
     Format::hexadecimal(value, writeChar);
+
+    Cpu::restoreInterrupts(saved);
   }
 
   function mirror(character: u8): void {
