@@ -108,6 +108,19 @@ export namespace Limine {
     public response: *mut ExecutableAddressResponse;
   }
 
+  @cLayout
+  record RsdpResponse {
+    public revision: u64;
+    public address: *mut u8;
+  }
+
+  @cLayout
+  record RsdpRequest {
+    public id: u64[4];
+    public revision: u64;
+    public response: *mut RsdpResponse;
+  }
+
   record Requests {
     static mut baseRevision: BaseRevision = BaseRevision {
       magic: [0xf9562b2d5c95a6c8, 0x6a7b384944536bdc],
@@ -134,6 +147,12 @@ export namespace Limine {
 
     static mut executableAddress: ExecutableAddressRequest = ExecutableAddressRequest {
       id: [COMMON_MAGIC_0, COMMON_MAGIC_1, 0x71ba76863cc55f63, 0xb2644a48c516a487],
+      revision: 0,
+      response: null,
+    };
+
+    static mut rsdp: RsdpRequest = RsdpRequest {
+      id: [COMMON_MAGIC_0, COMMON_MAGIC_1, 0xc5e77b6b397e7b43, 0x27637845accdcf3c],
       revision: 0,
       response: null,
     };
@@ -184,5 +203,12 @@ export namespace Limine {
     return readResponse<ExecutableAddressResponse>(
       &mut Requests::executableAddress.response as *mut *mut ExecutableAddressResponse,
     );
+  }
+
+  /// The ACPI RSDP, or null when the bootloader found no ACPI tables. For
+  /// base revision 4 and later the pointer is a higher half direct map
+  /// address, not a physical one.
+  function rsdp(): *mut RsdpResponse {
+    return readResponse<RsdpResponse>(&mut Requests::rsdp.response as *mut *mut RsdpResponse);
   }
 }

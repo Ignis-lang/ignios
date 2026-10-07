@@ -1,0 +1,477 @@
+//! ACPI table discovery: the RSDP from Limine, the XSDT (or the RSDT on a
+//! revision 0 RSDP), and the MADT, the one table the interrupt setup needs.
+//!
+//! Limine answers the RSDP request with a higher half direct map address (base
+//! revision 4 and later). Every other table address in ACPI is physical, so
+//! the tables are reached through `Hhdm::toVirtual`. Base revision 4 also
+//! guarantees that the RSDP, the RSDT or XSDT and every table they list are
+//! inside memory the direct map covers.
+//!
+//! The tables are packed and byte aligned, so every field is read byte by
+//! byte in little-endian order instead of through a typed pointer.
+//!
+//! `initialize` parses the MADT once into fixed-size arrays: the local APIC
+//! address, the processor count, each IOAPIC and each interrupt source
+//! override (ISO). Later code reads the result through the accessors.
+
+import Hhdm from "./hhdm";
+import Limine from "./limine";
+import Console from "./console";
+
+record AcpiState {
+  static mut rsdp: *mut u8 = null;
+  static mut rsdpPhysical: u64 = 0;
+  static mut rsdpRevision: u64 = 0;
+  static mut rootAddress: u64 = 0;
+  static mut rootUsesXsdt: boolean = false;
+  static mut rootEntryCount: u64 = 0;
+
+  static mut madtAddress: u64 = 0;
+  static mut madtFlags: u64 = 0;
+  static mut lapicAddress: u64 = 0;
+  static mut processorsEnabled: u64 = 0;
+  static mut processorsTotal: u64 = 0;
+
+  static mut ioapicCount: u64 = 0;
+  static mut ioapicIds: u8[8];
+  static mut ioapicAddresses: u32[8];
+  static mut ioapicGsiBases: u32[8];
+
+  static mut overrideCount: u64 = 0;
+  static mut overrideSources: u8[16];
+  static mut overrideGsis: u32[16];
+  static mut overrideFlags: u16[16];
+}
+
+export namespace Acpi {
+  /// Capacity of the IOAPIC and override arrays in `AcpiState`. They must
+  /// equal the array sizes there, which have to be integer literals.
+  const MAX_IOAPICS: u64 = 8;
+  const MAX_OVERRIDES: u64 = 16;
+
+  /// "RSD PTR " and "APIC" read as little-endian integers.
+  const RSDP_SIGNATURE: u64 = 0x2052545020445352;
+  const MADT_SIGNATURE: u64 = 0x43495041;
+
+  const RSDP_V1_LENGTH: u64 = 20;
+  const RSDP_REVISION_OFFSET: u64 = 15;
+  const RSDP_RSDT_OFFSET: u64 = 16;
+  const RSDP_LENGTH_OFFSET: u64 = 20;
+  const RSDP_XSDT_OFFSET: u64 = 24;
+  const RSDP_OEM_OFFSET: u64 = 9;
+
+  const HEADER_LENGTH_OFFSET: u64 = 4;
+  const HEADER_REVISION_OFFSET: u64 = 8;
+  const HEADER_SIZE: u64 = 36;
+
+  /// A table longer than this is treated as corrupt before its checksum is
+  /// read.
+  const MAX_TABLE_LENGTH: u64 = 0x100000;
+
+  const MADT_LAPIC_ADDRESS_OFFSET: u64 = 36;
+  const MADT_FLAGS_OFFSET: u64 = 40;
+  const MADT_ENTRIES_OFFSET: u64 = 44;
+
+  const ENTRY_LOCAL_APIC: u8 = 0;
+  const ENTRY_IOAPIC: u8 = 1;
+  const ENTRY_INTERRUPT_SOURCE_OVERRIDE: u8 = 2;
+  const ENTRY_LOCAL_APIC_ADDRESS_OVERRIDE: u8 = 5;
+
+  const LOCAL_APIC_ENABLED: u64 = 0x1;
+
+  /// Bit 0 of the MADT flags: the machine also has a dual 8259 setup.
+  const MADT_PC_AT_COMPATIBLE: u64 = 0x1;
+
+  /// Interrupt source override flags: polarity in bits 0-1, trigger mode in
+  /// bits 2-3. Zero in either field means "as the bus specifies", which for
+  /// ISA is active high and edge triggered.
+  const FLAGS_POLARITY_MASK: u16 = 0x3;
+  const FLAGS_TRIGGER_MASK: u16 = 0xC;
+  const POLARITY_ACTIVE_HIGH: u16 = 0x1;
+  const POLARITY_ACTIVE_LOW: u16 = 0x3;
+  const TRIGGER_EDGE: u16 = 0x4;
+  const TRIGGER_LEVEL: u16 = 0xC;
+
+  /// Finds the RSDP, walks to the MADT and parses it. Panics when there are
+  /// no ACPI tables, a checksum fails, or the MADT is missing: without them
+  /// the kernel cannot find the IOAPIC.
+  function initialize(): void {
+    let response: *mut Limine::RsdpResponse = Limine::rsdp();
+
+    if (response == null) {
+      @panic("acpi: Limine provided no RSDP");
+    }
+
+    readRsdp((*response).address);
+
+    let madt: *mut u8 = findTable(MADT_SIGNATURE);
+
+    if (madt == null) {
+      @panic("acpi: no MADT");
+    }
+
+    AcpiState::madtAddress = @integerFromPointer(madt) - Hhdm::offset();
+
+    readMadt(madt);
+  }
+
+  /// Prints the RSDP, the root table and the MADT contents.
+  function report(): void {
+    Console::write("acpi: rsdp ");
+    Console::writeHex(AcpiState::rsdpPhysical);
+    Console::write(", revision ");
+    Console::writeDecimal(AcpiState::rsdpRevision);
+    Console::write(", oem ");
+    writeText(AcpiState::rsdp, RSDP_OEM_OFFSET, 6);
+    Console::write(", ");
+    Console::write(AcpiState::rootUsesXsdt ? "xsdt " : "rsdt ");
+    Console::writeHex(AcpiState::rootAddress);
+    Console::write(" with ");
+    Console::writeDecimal(AcpiState::rootEntryCount);
+    Console::write(" tables, madt ");
+    Console::writeHex(AcpiState::madtAddress);
+    Console::writeLine("");
+
+    Console::write("madt: lapic ");
+    Console::writeHex(AcpiState::lapicAddress);
+    Console::write(", ");
+    Console::writeDecimal(AcpiState::processorsEnabled);
+    Console::write(" of ");
+    Console::writeDecimal(AcpiState::processorsTotal);
+    Console::write(" processors enabled, ");
+    Console::write((AcpiState::madtFlags & MADT_PC_AT_COMPATIBLE) != 0 ? "8259 present" : "no 8259");
+    Console::write(", ");
+    Console::writeDecimal(AcpiState::ioapicCount);
+    Console::write(" ioapic, ");
+    Console::writeDecimal(AcpiState::overrideCount);
+    Console::writeLine(" overrides");
+
+    let mut index: u64 = 0;
+
+    while (index < AcpiState::ioapicCount) {
+      Console::write("madt: ioapic id ");
+      Console::writeDecimal(ioapicId(index) as u64);
+      Console::write(" at ");
+      Console::writeHex(ioapicAddress(index));
+      Console::write(", gsi base ");
+      Console::writeDecimal(ioapicGsiBase(index) as u64);
+      Console::writeLine("");
+      index += 1;
+    }
+
+    index = 0;
+
+    while (index < AcpiState::overrideCount) {
+      reportOverride(index);
+      index += 1;
+    }
+  }
+
+  function ioapicCount(): u64 {
+    return AcpiState::ioapicCount;
+  }
+
+  function ioapicId(index: u64): u8 {
+    return *((&mut AcpiState::ioapicIds as *mut u8) + index);
+  }
+
+  /// The physical address of IOAPIC `index`.
+  function ioapicAddress(index: u64): u64 {
+    return *((&mut AcpiState::ioapicAddresses as *mut u32) + index) as u64;
+  }
+
+  /// The first global system interrupt (GSI) IOAPIC `index` serves.
+  function ioapicGsiBase(index: u64): u32 {
+    return *((&mut AcpiState::ioapicGsiBases as *mut u32) + index);
+  }
+
+  /// The global system interrupt an ISA interrupt request line is wired to:
+  /// the line number itself unless the MADT has an override for it.
+  function isaIrqGsi(irq: u8): u32 {
+    let index: u64 = findOverride(irq);
+
+    if (index == MAX_OVERRIDES) {
+      return irq as u32;
+    }
+
+    return *((&mut AcpiState::overrideGsis as *mut u32) + index);
+  }
+
+  /// The override flags of an ISA line, or zero when the MADT has none.
+  /// Zero means ISA defaults: active high, edge triggered.
+  function isaIrqFlags(irq: u8): u16 {
+    let index: u64 = findOverride(irq);
+
+    if (index == MAX_OVERRIDES) {
+      return 0;
+    }
+
+    return *((&mut AcpiState::overrideFlags as *mut u16) + index);
+  }
+
+  /// True when override flags ask for an active low line. Bus default and
+  /// active high both give false, which is what ISA wants.
+  function flagsActiveLow(flags: u16): boolean {
+    return (flags & FLAGS_POLARITY_MASK) == POLARITY_ACTIVE_LOW;
+  }
+
+  /// True when override flags ask for a level triggered line. Bus default and
+  /// edge both give false, which is what ISA wants.
+  function flagsLevelTriggered(flags: u16): boolean {
+    return (flags & FLAGS_TRIGGER_MASK) == TRIGGER_LEVEL;
+  }
+
+  /// Validates the RSDP, then records which root table to walk. The XSDT is
+  /// preferred when the RSDP is revision 2 or later and names one.
+  function readRsdp(address: *mut u8): void {
+    if (readU64(address, 0) != RSDP_SIGNATURE) {
+      @panic("acpi: bad RSDP signature");
+    }
+
+    let revision: u64 = readU8(address, RSDP_REVISION_OFFSET) as u64;
+    let mut length: u64 = RSDP_V1_LENGTH;
+
+    if (revision >= 2) {
+      length = readU32(address, RSDP_LENGTH_OFFSET) as u64;
+    }
+
+    if (!checksumValid(address, RSDP_V1_LENGTH) || (revision >= 2 && !checksumValid(address, length))) {
+      @panic("acpi: bad RSDP checksum");
+    }
+
+    AcpiState::rsdp = address;
+    AcpiState::rsdpPhysical = @integerFromPointer(address) - Hhdm::offset();
+    AcpiState::rsdpRevision = revision;
+
+    let xsdt: u64 = revision >= 2 ? readU64(address, RSDP_XSDT_OFFSET) : 0;
+
+    if (xsdt != 0) {
+      AcpiState::rootAddress = xsdt;
+      AcpiState::rootUsesXsdt = true;
+    } else {
+      AcpiState::rootAddress = readU32(address, RSDP_RSDT_OFFSET) as u64;
+      AcpiState::rootUsesXsdt = false;
+    }
+
+    let root: *mut u8 = Hhdm::toVirtual(AcpiState::rootAddress);
+
+    if (!isTableValid(root)) {
+      @panic("acpi: bad root table");
+    }
+
+    let entrySize: u64 = AcpiState::rootUsesXsdt ? 8 : 4;
+
+    AcpiState::rootEntryCount = (readU32(root, HEADER_LENGTH_OFFSET) as u64 - HEADER_SIZE) / entrySize;
+  }
+
+  /// The virtual address of the first table with `signature` listed in the
+  /// root table, or null when none matches.
+  function findTable(signature: u64): *mut u8 {
+    let root: *mut u8 = Hhdm::toVirtual(AcpiState::rootAddress);
+    let entrySize: u64 = AcpiState::rootUsesXsdt ? 8 : 4;
+
+    let mut index: u64 = 0;
+
+    while (index < AcpiState::rootEntryCount) {
+      let physical: u64 = readLittleEndian(root, HEADER_SIZE + index * entrySize, entrySize);
+      let table: *mut u8 = Hhdm::toVirtual(physical);
+
+      if (readU32(table, 0) as u64 == signature) {
+        return table;
+      }
+
+      index += 1;
+    }
+
+    return null;
+  }
+
+  /// Walks the MADT entries and fills the state. Entry types this kernel
+  /// does not use are skipped by their length byte.
+  function readMadt(madt: *mut u8): void {
+    if (!isTableValid(madt)) {
+      @panic("acpi: bad MADT");
+    }
+
+    AcpiState::lapicAddress = readU32(madt, MADT_LAPIC_ADDRESS_OFFSET) as u64;
+    AcpiState::madtFlags = readU32(madt, MADT_FLAGS_OFFSET) as u64;
+
+    let length: u64 = readU32(madt, HEADER_LENGTH_OFFSET) as u64;
+    let mut offset: u64 = MADT_ENTRIES_OFFSET;
+
+    while (offset + 2 <= length) {
+      let kind: u8 = readU8(madt, offset);
+      let size: u64 = readU8(madt, offset + 1) as u64;
+
+      if (size < 2 || offset + size > length) {
+        @panic("acpi: malformed MADT entry");
+      }
+
+      readMadtEntry(madt + offset, kind, size);
+      offset += size;
+    }
+  }
+
+  function readMadtEntry(entry: *mut u8, kind: u8, size: u64): void {
+    if (kind == ENTRY_LOCAL_APIC && size >= 8) {
+      let flags: u64 = readU32(entry, 4) as u64;
+
+      AcpiState::processorsTotal += 1;
+
+      if ((flags & LOCAL_APIC_ENABLED) != 0) {
+        AcpiState::processorsEnabled += 1;
+      }
+    } else if (kind == ENTRY_IOAPIC && size >= 12) {
+      addIoapic(readU8(entry, 2), readU32(entry, 4), readU32(entry, 8));
+    } else if (kind == ENTRY_INTERRUPT_SOURCE_OVERRIDE && size >= 10) {
+      addOverride(readU8(entry, 3), readU32(entry, 4), readU16(entry, 8));
+    } else if (kind == ENTRY_LOCAL_APIC_ADDRESS_OVERRIDE && size >= 12) {
+      AcpiState::lapicAddress = readU64(entry, 4);
+    }
+  }
+
+  function addIoapic(id: u8, address: u32, gsiBase: u32): void {
+    let index: u64 = AcpiState::ioapicCount;
+
+    if (index == MAX_IOAPICS) {
+      @panic("acpi: more IOAPICs than the kernel tracks");
+    }
+
+    @write<u8>((&mut AcpiState::ioapicIds as *mut u8) + index, id);
+    @write<u32>((&mut AcpiState::ioapicAddresses as *mut u32) + index, address);
+    @write<u32>((&mut AcpiState::ioapicGsiBases as *mut u32) + index, gsiBase);
+
+    AcpiState::ioapicCount = index + 1;
+  }
+
+  function addOverride(source: u8, gsi: u32, flags: u16): void {
+    let index: u64 = AcpiState::overrideCount;
+
+    if (index == MAX_OVERRIDES) {
+      @panic("acpi: more interrupt overrides than the kernel tracks");
+    }
+
+    @write<u8>((&mut AcpiState::overrideSources as *mut u8) + index, source);
+    @write<u32>((&mut AcpiState::overrideGsis as *mut u32) + index, gsi);
+    @write<u16>((&mut AcpiState::overrideFlags as *mut u16) + index, flags);
+
+    AcpiState::overrideCount = index + 1;
+  }
+
+  /// The index of the override for ISA line `irq`, or MAX_OVERRIDES.
+  function findOverride(irq: u8): u64 {
+    let mut index: u64 = 0;
+
+    while (index < AcpiState::overrideCount) {
+      if (*((&mut AcpiState::overrideSources as *mut u8) + index) == irq) {
+        return index;
+      }
+
+      index += 1;
+    }
+
+    return MAX_OVERRIDES;
+  }
+
+  function reportOverride(index: u64): void {
+    let source: u8 = *((&mut AcpiState::overrideSources as *mut u8) + index);
+    let flags: u16 = *((&mut AcpiState::overrideFlags as *mut u16) + index);
+
+    Console::write("madt: override ISA IRQ ");
+    Console::writeDecimal(source as u64);
+    Console::write(" -> GSI ");
+    Console::writeDecimal(*((&mut AcpiState::overrideGsis as *mut u32) + index) as u64);
+    Console::write(", ");
+    Console::write(polarityName(flags));
+    Console::write(", ");
+    Console::write(triggerName(flags));
+    Console::writeLine("");
+  }
+
+  function polarityName(flags: u16): str {
+    let polarity: u16 = flags & FLAGS_POLARITY_MASK;
+
+    if (polarity == POLARITY_ACTIVE_HIGH) {
+      return "active high";
+    }
+
+    if (polarity == POLARITY_ACTIVE_LOW) {
+      return "active low";
+    }
+
+    return "default polarity";
+  }
+
+  function triggerName(flags: u16): str {
+    let trigger: u16 = flags & FLAGS_TRIGGER_MASK;
+
+    if (trigger == TRIGGER_EDGE) {
+      return "edge";
+    }
+
+    if (trigger == TRIGGER_LEVEL) {
+      return "level";
+    }
+
+    return "default trigger";
+  }
+
+  /// False when the table's length is implausible or its checksum does not
+  /// add up.
+  function isTableValid(table: *mut u8): boolean {
+    let length: u64 = readU32(table, HEADER_LENGTH_OFFSET) as u64;
+
+    return length >= HEADER_SIZE && length <= MAX_TABLE_LENGTH && checksumValid(table, length);
+  }
+
+  /// True when the bytes sum to zero modulo 256, how every ACPI table is
+  /// validated.
+  function checksumValid(base: *mut u8, length: u64): boolean {
+    let mut sum: u64 = 0;
+    let mut index: u64 = 0;
+
+    while (index < length) {
+      sum += *(base + index) as u64;
+      index += 1;
+    }
+
+    return (sum & 0xFF) == 0;
+  }
+
+  function writeText(base: *mut u8, offset: u64, count: u64): void {
+    let mut index: u64 = 0;
+
+    while (index < count) {
+      Console::writeChar(*(base + offset + index));
+      index += 1;
+    }
+  }
+
+  function readU8(base: *mut u8, offset: u64): u8 {
+    return *(base + offset);
+  }
+
+  function readU16(base: *mut u8, offset: u64): u16 {
+    return readLittleEndian(base, offset, 2) as u16;
+  }
+
+  function readU32(base: *mut u8, offset: u64): u32 {
+    return readLittleEndian(base, offset, 4) as u32;
+  }
+
+  function readU64(base: *mut u8, offset: u64): u64 {
+    return readLittleEndian(base, offset, 8);
+  }
+
+  function readLittleEndian(base: *mut u8, offset: u64, width: u64): u64 {
+    let mut value: u64 = 0;
+    let mut index: u64 = width;
+
+    while (index > 0) {
+      index -= 1;
+      value = (value << 8) | (*(base + offset + index) as u64);
+    }
+
+    return value;
+  }
+}

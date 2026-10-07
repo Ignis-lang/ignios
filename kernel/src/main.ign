@@ -1,5 +1,6 @@
 //! IgniOS kernel entry point.
 
+import Acpi from "./acpi";
 import Cpu from "./arch/x86_64/cpu";
 import Gdt from "./arch/x86_64/gdt";
 import Idt from "./arch/x86_64/idt";
@@ -260,6 +261,9 @@ function kmain(): void {
   printBanner(framebuffer);
 
   initializeMemory(framebuffer);
+
+  Acpi::initialize();
+  Acpi::report();
 
   Pic::initialize();
   Lapic::initialize();
