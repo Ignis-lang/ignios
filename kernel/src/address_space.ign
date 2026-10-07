@@ -47,14 +47,14 @@
 //!           ├─ no leaf entry, not present ....... fail
 //!           ├─ U/S clear ........................ fail
 //!           └─ otherwise physical = frame | offset
-//!       Lib::Mem::copy(dst + done, Hhdm::toVirtual(physical), chunk)
+//!       Lib::Mem::copy(dst + done, Boot::Hhdm::toVirtual(physical), chunk)
 //! ```
 //!
 //! See concept doc 14.
 
 import Arch from "@arch";
+import Boot from "@boot";
 import Lib from "@lib";
-import Hhdm from "./hhdm";
 import Pmm from "./pmm";
 import Vmm from "./vmm";
 
@@ -164,7 +164,7 @@ export namespace AddressSpace {
       return Pmm::NO_FRAME;
     }
 
-    Lib::Mem::fill(Hhdm::toVirtual(frame), 0, PAGE_SIZE);
+    Lib::Mem::fill(Boot::Hhdm::toVirtual(frame), 0, PAGE_SIZE);
 
     if (!mapPage(root, virtualAddress, frame, flags)) {
       Pmm::freeFrame(frame);
@@ -245,7 +245,7 @@ export namespace AddressSpace {
 
       let chunk: u64 = bytesToPageEnd(address, length - done);
 
-      Lib::Mem::copy(destination + done, Hhdm::toVirtual(physical) as *u8, chunk);
+      Lib::Mem::copy(destination + done, Boot::Hhdm::toVirtual(physical) as *u8, chunk);
       done += chunk;
     }
 
@@ -273,7 +273,7 @@ export namespace AddressSpace {
 
       let chunk: u64 = bytesToPageEnd(address, length - done);
 
-      Lib::Mem::copy(Hhdm::toVirtual(physical), source + done, chunk);
+      Lib::Mem::copy(Boot::Hhdm::toVirtual(physical), source + done, chunk);
       done += chunk;
     }
 
@@ -300,7 +300,7 @@ export namespace AddressSpace {
 
       let chunk: u64 = bytesToPageEnd(destination + done, length - done);
 
-      Lib::Mem::copy(Hhdm::toVirtual(physical), source + done, chunk);
+      Lib::Mem::copy(Boot::Hhdm::toVirtual(physical), source + done, chunk);
       done += chunk;
     }
 
@@ -372,8 +372,8 @@ export namespace AddressSpace {
       @panic("address space self-test: no distinct frames");
     }
 
-    *(Hhdm::toVirtual(frameA) as *mut u64) = SELF_TEST_MARKER_A;
-    *(Hhdm::toVirtual(frameB) as *mut u64) = SELF_TEST_MARKER_B;
+    *(Boot::Hhdm::toVirtual(frameA) as *mut u64) = SELF_TEST_MARKER_A;
+    *(Boot::Hhdm::toVirtual(frameB) as *mut u64) = SELF_TEST_MARKER_B;
 
     if (Vmm::translateIn(first, SELF_TEST_ADDRESS) != frameA || Vmm::translateIn(second, SELF_TEST_ADDRESS) != frameB) {
       @panic("address space self-test: a page maps to the wrong frame");

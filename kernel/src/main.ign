@@ -27,7 +27,7 @@
 //!   ├─ Serial::initialize ........ COM1 up, first log line      serial.ign       doc 06
 //!   ├─ Arch::Gdt::initialize ........... own GDT, TSS, CS/SS/DS       gdt.ign           doc 03
 //!   ├─ Arch::Idt::initialize ........... 50 gates (49 thunks + spur.) idt.ign           doc 04
-//!   ├─ Limine::isBaseRevisionSupported                          limine.ign        doc 01
+//!   ├─ Boot::Limine::isBaseRevisionSupported                          limine.ign        doc 01
 //!   ├─ Console::initialize ....... framebuffer text console     console.ign       doc 07
 //!   ├─ printBanner ............... banner, framebuffer, memory map
 //!   ├─ initializeMemory
@@ -74,6 +74,7 @@
 
 import Apic from "@apic";
 import Arch from "@arch";
+import Boot from "@boot";
 import Lib from "@lib";
 import Acpi from "./acpi";
 import AddressSpace from "./address_space";
@@ -81,7 +82,6 @@ import Color, Console from "./console";
 import Heap from "./heap";
 import Interrupts from "./interrupts";
 import Keyboard from "./keyboard";
-import Limine from "./limine";
 import Modules from "./modules";
 import Pmm from "./pmm";
 import Process from "./process";
@@ -179,8 +179,8 @@ function onPanic(message: str, file: str, line: u32): never {
 
 /// The first Limine framebuffer. Panics when the bootloader provided none,
 /// because the console has nowhere to draw.
-function requireFramebuffer(): *mut Limine::Framebuffer {
-  let framebuffer: *mut Limine::Framebuffer = Limine::firstFramebuffer();
+function requireFramebuffer(): *mut Boot::Limine::Framebuffer {
+  let framebuffer: *mut Boot::Limine::Framebuffer = Boot::Limine::firstFramebuffer();
 
   if (framebuffer == null) {
     @panic("Limine provided no framebuffer");
@@ -192,7 +192,7 @@ function requireFramebuffer(): *mut Limine::Framebuffer {
 /// Prints the framebuffer geometry and the resulting cell grid, for example
 /// `framebuffer: 1280x800, pitch 5120, bpp 32, 160x50 cells`. The pitch is
 /// the number of bytes between two pixel rows and can exceed `width * 4`.
-function reportFramebuffer(framebuffer: *mut Limine::Framebuffer): void {
+function reportFramebuffer(framebuffer: *mut Boot::Limine::Framebuffer): void {
   Console::write("framebuffer: ");
   Console::writeDecimal((*framebuffer).width);
   Console::write("x");
@@ -211,13 +211,13 @@ function reportFramebuffer(framebuffer: *mut Limine::Framebuffer): void {
 /// Prints the number of memory-map entries and the higher half direct map
 /// offset. Panics when Limine answered neither request.
 function reportMemory(): void {
-  let memmap: *mut Limine::MemmapResponse = Limine::memmap();
+  let memmap: *mut Boot::Limine::MemmapResponse = Boot::Limine::memmap();
 
   if (memmap == null) {
     @panic("Limine provided no memory map");
   }
 
-  let hhdm: *mut Limine::HhdmResponse = Limine::hhdm();
+  let hhdm: *mut Boot::Limine::HhdmResponse = Boot::Limine::hhdm();
 
   if (hhdm == null) {
     @panic("Limine provided no higher half direct map");
@@ -232,7 +232,7 @@ function reportMemory(): void {
 
 /// Draws the colored banner and the framebuffer and memory lines. This is the
 /// first console output of the boot.
-function printBanner(framebuffer: *mut Limine::Framebuffer): void {
+function printBanner(framebuffer: *mut Boot::Limine::Framebuffer): void {
   Console::setColors(Color::BRIGHT_YELLOW, Color::BLUE);
   Console::write(" IgniOS ");
   Console::setColors(Color::BRIGHT_CYAN, Color::BLACK);
@@ -276,7 +276,7 @@ function reportGdt(): void {
 /// PMM, and `Modules::initialize` and the heap map their pages through the
 /// VMM. Every self-test panics on failure, so a boot that continues has
 /// passed them.
-function initializeMemory(framebuffer: *mut Limine::Framebuffer): void {
+function initializeMemory(framebuffer: *mut Boot::Limine::Framebuffer): void {
   Pmm::initialize();
 
   Console::write("pmm: ");
@@ -564,11 +564,11 @@ function kmain(): void {
   // Limine overwrites the third word of the base revision tag with 0 when it
   // supports the revision requested. Anything else means the responses below
   // cannot be trusted.
-  if (!Limine::isBaseRevisionSupported()) {
+  if (!Boot::Limine::isBaseRevisionSupported()) {
     @panic("Limine base revision 6 is not supported");
   }
 
-  let framebuffer: *mut Limine::Framebuffer = requireFramebuffer();
+  let framebuffer: *mut Boot::Limine::Framebuffer = requireFramebuffer();
 
   Console::initialize(framebuffer);
   printBanner(framebuffer);

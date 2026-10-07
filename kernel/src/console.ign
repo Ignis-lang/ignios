@@ -81,9 +81,9 @@
 //! one. See concept doc 07.
 
 import Arch from "@arch";
+import Boot from "@boot";
 import Lib from "@lib";
 import Font from "./font";
-import Limine from "./limine";
 import Serial from "./serial";
 
 /// Palette indices, in ANSI order, with the classic VGA text-mode colors.
@@ -280,7 +280,7 @@ export namespace Console {
   /// Takes over `framebuffer`, which must be 32 bits per pixel with RGB
   /// masks, and clears it to white on black. Panics on any other format or when
   /// the screen is smaller than one cell.
-  function initialize(framebuffer: *mut Limine::Framebuffer): void {
+  function initialize(framebuffer: *mut Boot::Limine::Framebuffer): void {
     if ((*framebuffer).bpp != BITS_PER_PIXEL || (*framebuffer).memoryModel != MEMORY_MODEL_RGB) {
       @panic("console needs a 32 bpp RGB framebuffer");
     }

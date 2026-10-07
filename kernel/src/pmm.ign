@@ -47,9 +47,8 @@
 //! See concept doc 08.
 
 import Arch from "@arch";
+import Boot from "@boot";
 import Lib from "@lib";
-import Hhdm from "./hhdm";
-import Limine from "./limine";
 
 /// Allocator state. Every field is touched only with interrupts disabled.
 record PmmState {
@@ -95,7 +94,7 @@ export namespace Pmm {
   /// Builds the bitmap from the Limine memory map. Everything starts as
   /// used; only usable frames are cleared.
   function initialize(): void {
-    let memmap: *mut Limine::MemmapResponse = Limine::memmap();
+    let memmap: *mut Boot::Limine::MemmapResponse = Boot::Limine::memmap();
 
     if (memmap == null) {
       @panic("Limine provided no memory map");
@@ -111,7 +110,7 @@ export namespace Pmm {
     let bytes: u64 = words * 8;
     let bitmapBase: u64 = findBitmapRegion(memmap, bytes);
 
-    PmmState::bitmap = Hhdm::toVirtual(bitmapBase) as *mut u64;
+    PmmState::bitmap = Boot::Hhdm::toVirtual(bitmapBase) as *mut u64;
     PmmState::wordCount = words;
     PmmState::usableFrames = 0;
     PmmState::freeFrames = 0;
@@ -122,9 +121,9 @@ export namespace Pmm {
     let mut index: u64 = 0;
 
     while (index < (*memmap).entryCount) {
-      let entry: *mut Limine::MemmapEntry = Limine::memmapEntry(memmap, index);
+      let entry: *mut Boot::Limine::MemmapEntry = Boot::Limine::memmapEntry(memmap, index);
 
-      if ((*entry).kind == Limine::MEMMAP_USABLE) {
+      if ((*entry).kind == Boot::Limine::MEMMAP_USABLE) {
         releaseRange((*entry).base, (*entry).length);
       }
 
@@ -264,15 +263,15 @@ export namespace Pmm {
   }
 
   /// The end of the highest usable entry.
-  function highestUsableEnd(memmap: *mut Limine::MemmapResponse): u64 {
+  function highestUsableEnd(memmap: *mut Boot::Limine::MemmapResponse): u64 {
     let mut highest: u64 = 0;
     let mut index: u64 = 0;
 
     while (index < (*memmap).entryCount) {
-      let entry: *mut Limine::MemmapEntry = Limine::memmapEntry(memmap, index);
+      let entry: *mut Boot::Limine::MemmapEntry = Boot::Limine::memmapEntry(memmap, index);
       let end: u64 = (*entry).base + (*entry).length;
 
-      if ((*entry).kind == Limine::MEMMAP_USABLE && end > highest) {
+      if ((*entry).kind == Boot::Limine::MEMMAP_USABLE && end > highest) {
         highest = end;
       }
 
@@ -284,15 +283,15 @@ export namespace Pmm {
 
   /// The base of the first usable entry that can hold `bytes`, preferring
   /// memory above 1 MiB so the scarce low memory stays free.
-  function findBitmapRegion(memmap: *mut Limine::MemmapResponse, bytes: u64): u64 {
+  function findBitmapRegion(memmap: *mut Boot::Limine::MemmapResponse, bytes: u64): u64 {
     let needed: u64 = (bytes + FRAME_SIZE - 1) / FRAME_SIZE * FRAME_SIZE;
     let mut lowFallback: u64 = 0;
     let mut index: u64 = 0;
 
     while (index < (*memmap).entryCount) {
-      let entry: *mut Limine::MemmapEntry = Limine::memmapEntry(memmap, index);
+      let entry: *mut Boot::Limine::MemmapEntry = Boot::Limine::memmapEntry(memmap, index);
 
-      if ((*entry).kind == Limine::MEMMAP_USABLE && (*entry).length >= needed) {
+      if ((*entry).kind == Boot::Limine::MEMMAP_USABLE && (*entry).length >= needed) {
         if ((*entry).base >= LOW_MEMORY_LIMIT) {
           return (*entry).base;
         }

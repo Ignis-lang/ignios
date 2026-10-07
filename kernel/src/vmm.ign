@@ -111,16 +111,15 @@
 //!                       └──────────────────────────────────────────┘
 //! ```
 //!
-//! The direct map starts at the offset Limine chose (`Hhdm::offset`), which
+//! The direct map starts at the offset Limine chose (`Boot::Hhdm::offset`), which
 //! is `0xFFFF800000000000` with 4-level paging. The other kernel regions each
 //! sit in a PML4 entry of their own so they cannot collide.
 //!
 //! See concept doc 09 and Intel SDM Vol. 3A, "Paging".
 
 import Arch from "@arch";
+import Boot from "@boot";
 import Lib from "@lib";
-import Hhdm from "./hhdm";
-import Limine from "./limine";
 import Pmm from "./pmm";
 
 /// The one piece of VMM state: the physical address of the kernel PML4.
@@ -270,7 +269,7 @@ export namespace Vmm {
   ///    mapping is the one that stays (`mapRange` leaves existing pages alone).
   /// 4. The upper half is populated, then CR3 is loaded. The load drops every
   ///    TLB entry that is not global, so the old Limine mappings are gone.
-  function initialize(framebuffer: *mut Limine::Framebuffer): void {
+  function initialize(framebuffer: *mut Boot::Limine::Framebuffer): void {
     Arch::Cpu::writeMsr(EFER_MSR, Arch::Cpu::readMsr(EFER_MSR) | EFER_NO_EXECUTE_ENABLE);
     Arch::Cpu::writeCr0(Arch::Cpu::readCr0() | CR0_WRITE_PROTECT);
 
@@ -486,7 +485,7 @@ export namespace Vmm {
     }
 
     let mapped: *mut u64 = @pointerFromInteger<*mut u64>(TEST_ADDRESS);
-    let direct: *mut u64 = Hhdm::toVirtual(frame) as *mut u64;
+    let direct: *mut u64 = Boot::Hhdm::toVirtual(frame) as *mut u64;
 
     *mapped = 0x1234567890ABCDEF;
 
@@ -504,7 +503,7 @@ export namespace Vmm {
   /// Maps text, rodata and data plus bss at the addresses Limine loaded the
   /// image at.
   function mapKernelImage(): void {
-    let response: *mut Limine::ExecutableAddressResponse = Limine::executableAddress();
+    let response: *mut Boot::Limine::ExecutableAddressResponse = Boot::Limine::executableAddress();
 
     if (response == null) {
       @panic("Limine provided no executable address");
@@ -556,7 +555,7 @@ export namespace Vmm {
   /// physical frames Limine loaded the image at, with `flags`. The offset
   /// between the two is constant: `physicalBase - virtualBase`.
   function mapSegment(start: u64, end: u64, flags: u64): void {
-    let response: *mut Limine::ExecutableAddressResponse = Limine::executableAddress();
+    let response: *mut Boot::Limine::ExecutableAddressResponse = Boot::Limine::executableAddress();
     let delta: u64 = (*response).physicalBase - (*response).virtualBase;
 
     let mut address: u64 = start;
@@ -573,25 +572,25 @@ export namespace Vmm {
   /// Maps the framebuffer write-combining through the direct map. It is
   /// mapped before the memory map pass so that its mapping is the one that
   /// stays.
-  function mapFramebuffer(framebuffer: *mut Limine::Framebuffer): void {
+  function mapFramebuffer(framebuffer: *mut Boot::Limine::Framebuffer): void {
     let virtualStart: u64 = @integerFromPointer((*framebuffer).address);
     let size: u64 = (*framebuffer).pitch * (*framebuffer).height;
 
     let start: u64 = virtualStart / PAGE_SIZE * PAGE_SIZE;
     let end: u64 = (virtualStart + size + PAGE_SIZE - 1) / PAGE_SIZE * PAGE_SIZE;
 
-    mapRange(start, start - Hhdm::offset(), end - start, WRITABLE | NO_EXECUTE | WRITE_COMBINING);
+    mapRange(start, start - Boot::Hhdm::offset(), end - start, WRITABLE | NO_EXECUTE | WRITE_COMBINING);
   }
 
   /// Maps every memory map entry that Limine maps in its direct map.
   function mapDirectMap(): void {
-    let memmap: *mut Limine::MemmapResponse = Limine::memmap();
-    let offset: u64 = Hhdm::offset();
+    let memmap: *mut Boot::Limine::MemmapResponse = Boot::Limine::memmap();
+    let offset: u64 = Boot::Hhdm::offset();
 
     let mut index: u64 = 0;
 
     while (index < (*memmap).entryCount) {
-      let entry: *mut Limine::MemmapEntry = Limine::memmapEntry(memmap, index);
+      let entry: *mut Boot::Limine::MemmapEntry = Boot::Limine::memmapEntry(memmap, index);
 
       if (isDirectMapped((*entry).kind)) {
         let start: u64 = (*entry).base / PAGE_SIZE * PAGE_SIZE;
@@ -599,7 +598,7 @@ export namespace Vmm {
 
         let mut flags: u64 = WRITABLE | NO_EXECUTE;
 
-        if ((*entry).kind == Limine::MEMMAP_FRAMEBUFFER) {
+        if ((*entry).kind == Boot::Limine::MEMMAP_FRAMEBUFFER) {
           flags = flags | WRITE_COMBINING;
         }
 
@@ -722,14 +721,14 @@ export namespace Vmm {
       @panic("vmm: out of frames for page tables");
     }
 
-    Lib::Mem::fill(Hhdm::toVirtual(frame), 0, PAGE_SIZE);
+    Lib::Mem::fill(Boot::Hhdm::toVirtual(frame), 0, PAGE_SIZE);
 
     return frame;
   }
 
   /// The direct-map pointer to the table in the frame at `physical`.
   function tableAt(physical: u64): *mut u64 {
-    return Hhdm::toVirtual(physical) as *mut u64;
+    return Boot::Hhdm::toVirtual(physical) as *mut u64;
   }
 
   /// Index into the PML4: address bits 47..39.

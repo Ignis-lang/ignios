@@ -1,0 +1,33 @@
+//!
+//! # Boot
+//!
+//! What the bootloader hands to the kernel: the Limine requests and responses
+//! and the higher half direct map.
+//!
+//! ## Public API
+//!
+//! | Name           | File          | Purpose                                                   |
+//! |----------------|---------------|-----------------------------------------------------------|
+//! | `Boot::Limine` | `limine.ign`  | the requests the kernel makes, the response layouts, typed readers |
+//! | `Boot::Hhdm`   | `hhdm.ign`    | physical address to direct-map pointer                    |
+//!
+//! ## Dependencies
+//!
+//! None in the kernel. `Boot` only reads memory that Limine wrote, so every
+//! subsystem that needs boot information may import it:
+//!
+//! ```ignis
+//! import Boot from "@boot";
+//!
+//! let memmap: *mut Boot::Limine::MemmapResponse = Boot::Limine::memmap();
+//! ```
+//!
+//! The Limine modules are not here. Mapping them needs the virtual memory
+//! manager, so `Mm::Modules` owns them.
+
+import _ from "./hhdm";
+import _ from "./limine";
+
+/// Aggregate namespace of the boot information. The files above contribute
+/// `Boot::Limine` and `Boot::Hhdm`.
+export namespace Boot {}

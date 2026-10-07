@@ -13,7 +13,7 @@
 //!
 //! Limine answers the RSDP request with a higher half direct map address (base
 //! revision 4 and later). Every other table address in ACPI is physical, so
-//! the tables are reached through `Hhdm::toVirtual`. Base revision 4 also
+//! the tables are reached through `Boot::Hhdm::toVirtual`. Base revision 4 also
 //! guarantees that the RSDP, the RSDT or XSDT and every table they list are
 //! inside memory the direct map covers.
 //!
@@ -90,8 +90,7 @@
 //! See concept doc 12 and the ACPI specification, "ACPI System Description
 //! Tables" (RSDP, XSDT, MADT).
 
-import Hhdm from "./hhdm";
-import Limine from "./limine";
+import Boot from "@boot";
 import Console from "./console";
 
 /// Everything `initialize` learned. The arrays are sized for the machines the
@@ -258,7 +257,7 @@ export namespace Acpi {
   /// no ACPI tables, a checksum fails, or the MADT is missing: without them
   /// the kernel cannot find the IOAPIC.
   function initialize(): void {
-    let response: *mut Limine::RsdpResponse = Limine::rsdp();
+    let response: *mut Boot::Limine::RsdpResponse = Boot::Limine::rsdp();
 
     if (response == null) {
       @panic("acpi: Limine provided no RSDP");
@@ -272,7 +271,7 @@ export namespace Acpi {
       @panic("acpi: no MADT");
     }
 
-    AcpiState::madtAddress = @integerFromPointer(madt) - Hhdm::offset();
+    AcpiState::madtAddress = @integerFromPointer(madt) - Boot::Hhdm::offset();
 
     readMadt(madt);
   }
@@ -404,7 +403,7 @@ export namespace Acpi {
     }
 
     AcpiState::rsdp = address;
-    AcpiState::rsdpPhysical = @integerFromPointer(address) - Hhdm::offset();
+    AcpiState::rsdpPhysical = @integerFromPointer(address) - Boot::Hhdm::offset();
     AcpiState::rsdpRevision = revision;
 
     let xsdt: u64 = revision >= 2 ? readU64(address, RSDP_XSDT_OFFSET) : 0;
@@ -417,7 +416,7 @@ export namespace Acpi {
       AcpiState::rootUsesXsdt = false;
     }
 
-    let root: *mut u8 = Hhdm::toVirtual(AcpiState::rootAddress);
+    let root: *mut u8 = Boot::Hhdm::toVirtual(AcpiState::rootAddress);
 
     if (!isTableValid(root)) {
       @panic("acpi: bad root table");
@@ -431,14 +430,14 @@ export namespace Acpi {
   /// The virtual address of the first table with `signature` listed in the
   /// root table, or null when none matches.
   function findTable(signature: u64): *mut u8 {
-    let root: *mut u8 = Hhdm::toVirtual(AcpiState::rootAddress);
+    let root: *mut u8 = Boot::Hhdm::toVirtual(AcpiState::rootAddress);
     let entrySize: u64 = AcpiState::rootUsesXsdt ? 8 : 4;
 
     let mut index: u64 = 0;
 
     while (index < AcpiState::rootEntryCount) {
       let physical: u64 = readLittleEndian(root, HEADER_SIZE + index * entrySize, entrySize);
-      let table: *mut u8 = Hhdm::toVirtual(physical);
+      let table: *mut u8 = Boot::Hhdm::toVirtual(physical);
 
       if (readU32(table, 0) as u64 == signature) {
         return table;

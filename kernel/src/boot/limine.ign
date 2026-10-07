@@ -53,7 +53,7 @@
 //! See concept doc 01.
 
 /// The Limine requests, their response layouts and readers.
-export namespace Limine {
+namespace Boot::Limine {
   /// First two identifier words shared by every Limine request
   /// (`LIMINE_COMMON_MAGIC` in the protocol header).
   const COMMON_MAGIC_0: u64 = 0xc7b1dd30df4c8b88;

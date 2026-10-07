@@ -62,7 +62,6 @@
 //! x86_64 syscall table, `arch/x86/entry/syscalls/syscall_64.tbl`. See concept
 //! doc 15.
 
-import Arch from "@arch";
 import AddressSpace from "./address_space";
 import Console from "./console";
 import Process from "./process";

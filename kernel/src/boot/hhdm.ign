@@ -21,14 +21,14 @@
 //! tables, touch memory-mapped device registers and hand out physical frames
 //! as ordinary pointers. See concept doc 09.
 
-import Limine from "./limine";
+import _ from "./limine";
 
 /// Conversions between physical addresses and direct-map pointers.
-export namespace Hhdm {
+namespace Boot::Hhdm {
   /// The virtual address of physical address zero. Panics when Limine provided
   /// no direct map; the answer is read from the response on every call.
   function offset(): u64 {
-    let response: *mut Limine::HhdmResponse = Limine::hhdm();
+    let response: *mut Boot::Limine::HhdmResponse = Boot::Limine::hhdm();
 
     if (response == null) {
       @panic("Limine provided no higher half direct map");

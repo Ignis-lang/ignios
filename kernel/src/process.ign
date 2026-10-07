@@ -55,11 +55,11 @@
 //! See concept doc 14.
 
 import Arch from "@arch";
+import Boot from "@boot";
 import Lib from "@lib";
 import AddressSpace from "./address_space";
 import Console from "./console";
 import Elf, LoadedImage from "./elf";
-import Hhdm from "./hhdm";
 import Pmm from "./pmm";
 import Scheduler from "./scheduler";
 import Vmm from "./vmm";
@@ -159,7 +159,7 @@ export namespace Process {
       return NO_PROCESS;
     }
 
-    Lib::Mem::copy(Hhdm::toVirtual(frame), code, length);
+    Lib::Mem::copy(Boot::Hhdm::toVirtual(frame), code, length);
 
     return launch(root, CODE_BASE);
   }

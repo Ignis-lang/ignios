@@ -17,8 +17,8 @@
 //! `main.ign` runs them in the order above and prints a line after each.
 
 import Arch from "@arch";
+import Boot from "@boot";
 import AddressSpace from "./address_space";
-import Hhdm from "./hhdm";
 import Pmm from "./pmm";
 import Scheduler from "./scheduler";
 import Timer from "./timer";
@@ -108,7 +108,7 @@ export namespace SchedulerTest {
         @panic("address space switch self-test: no memory");
       }
 
-      *(Hhdm::toVirtual(frame) as *mut u64) = SPACE_MARKER + index;
+      *(Boot::Hhdm::toVirtual(frame) as *mut u64) = SPACE_MARKER + index;
 
       ids[index] = Scheduler::spawnIn(Arch::ContextAsm::ignis_function_address(spaceReader), index, root);
 
