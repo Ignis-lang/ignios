@@ -1,0 +1,172 @@
+//! Kernel stack switching, the part of a thread that is machine specific.
+//!
+//! A thread that is not running is a stack pointer. `Context::switchTo`
+//! stores the callee-saved registers and RSP of the running code and resumes
+//! another stack pointer, and `Context::prepareStack` builds the stack of a
+//! thread that has never run so that the first switch into it starts its
+//! function. The layout and the alignment rule are described in
+//! `context_asm.S`.
+//!
+//! Switching must happen with interrupts disabled, and `switchTo` panics when
+//! they are not. Interrupt-disabled sections are also the only mutual
+//! exclusion the kernel has: it runs on one processor, so nothing else can
+//! touch the data while interrupts are off.
+
+import Cpu from "./cpu";
+
+/// Storage for the self-test: a stack, the two saved stack pointers and what
+/// the test thread reports back.
+record ContextTestState {
+  @aligned(16)
+  static mut STACK: u8[8192];
+  static mut mainRsp: u64 = 0;
+  static mut threadRsp: u64 = 0;
+  static mut rounds: u64 = 0;
+  static mut argument: u64 = 0;
+  static mut framePointer: u64 = 0;
+  static mut interruptsOnEntry: boolean = false;
+}
+
+export extern ContextAsm {
+  function ignis_switch_context(saveRsp: *mut u64, nextRsp: u64): void;
+  function ignis_thread_trampoline_address(): u64;
+
+  /// The address of a thread function. It has to be called with the function
+  /// named at the call site, because an extern function takes only a
+  /// capture-free function written there, not a function value passed on.
+  function ignis_function_address(entry: (u64) -> void): u64;
+}
+
+export namespace Context {
+  /// Registers the first switch pops, plus the return address it jumps to.
+  const INITIAL_SLOTS: u64 = 7;
+
+  const ARGUMENT_SLOT: u64 = 2;
+  const FUNCTION_SLOT: u64 = 3;
+  const RETURN_SLOT: u64 = 6;
+
+  /// Stores the running context in `*saveRsp` and continues the one saved as
+  /// `nextRsp`. Returns when some other context switches back to the stored
+  /// value. Interrupts must be disabled.
+  function switchTo(saveRsp: *mut u64, nextRsp: u64): void {
+    if (Cpu::interruptsEnabled()) {
+      @panic("context: switch with interrupts enabled");
+    }
+
+    ContextAsm::ignis_switch_context(saveRsp, nextRsp);
+  }
+
+  /// Lays out the stack of a thread that has never run and returns the stack
+  /// pointer to hand to `switchTo`. `stackEnd` is the address just above the
+  /// last byte of the stack and must be 16-byte aligned: the trampoline
+  /// starts with RSP equal to it, and its call pushes the return address, so
+  /// `entry` starts with RSP + 8 aligned to 16. The thread function receives
+  /// `argument` in RDI.
+  function prepareStack(stackEnd: u64, entry: u64, argument: u64): u64 {
+    if (stackEnd % 16 != 0) {
+      @panic("context: the end of a stack must be 16-byte aligned");
+    }
+
+    let base: u64 = stackEnd - INITIAL_SLOTS * 8;
+    let slots: *mut u64 = base as *mut u64;
+
+    let mut index: u64 = 0;
+
+    while (index < INITIAL_SLOTS) {
+      @write<u64>(slots + index, 0);
+      index += 1;
+    }
+
+    @write<u64>(slots + ARGUMENT_SLOT, argument);
+    @write<u64>(slots + FUNCTION_SLOT, entry);
+    @write<u64>(slots + RETURN_SLOT, ContextAsm::ignis_thread_trampoline_address());
+
+    return base;
+  }
+
+  /// Switches into a test thread and back a few times, checking what only a
+  /// correct switch gives: the thread function runs on its own stack with
+  /// the argument, a stack aligned as the ABI requires, interrupts enabled
+  /// by the trampoline, local variables that survive every switch in both
+  /// directions, and a clean return to the caller. Interrupts must be
+  /// disabled, and are disabled again on return. Panics on the first
+  /// violation.
+  function selfTest(): void {
+    const ROUNDS: u64 = 3;
+    const ARGUMENT: u64 = 0xC0FFEE;
+
+    let stackEnd: u64 = @integerFromPointer(&mut ContextTestState::STACK as *mut u8) + 8192;
+    let entry: u64 = ContextAsm::ignis_function_address(selfTestThread);
+
+    ContextTestState::rounds = 0;
+    ContextTestState::threadRsp = prepareStack(stackEnd, entry, ARGUMENT);
+
+    let first: u64 = 0x1111111111111111;
+    let second: u64 = 0x2222222222222222;
+    let third: u64 = 0x3333333333333333;
+    let mut round: u64 = 0;
+
+    while (round < ROUNDS) {
+      switchTo(&mut ContextTestState::mainRsp as *mut u64, ContextTestState::threadRsp);
+      round += 1;
+
+      if (ContextTestState::rounds != round) {
+        @panic("context self-test: the thread did not run once per switch");
+      }
+
+      if (first != 0x1111111111111111 || second != 0x2222222222222222 || third != 0x3333333333333333) {
+        @panic("context self-test: a register was lost across a switch");
+      }
+    }
+
+    if (ContextTestState::argument != ARGUMENT) {
+      @panic("context self-test: the thread function got the wrong argument");
+    }
+
+    if (!ContextTestState::interruptsOnEntry) {
+      @panic("context self-test: the trampoline left interrupts disabled");
+    }
+
+    if (ContextTestState::framePointer != stackEnd - 16) {
+      @panic("context self-test: the thread function started on a misaligned stack");
+    }
+
+    if (Cpu::interruptsEnabled()) {
+      @panic("context self-test: interrupts came back on");
+    }
+  }
+
+  /// Runs on the test stack. It records what it sees, then hands the CPU back
+  /// forever. With a frame pointer the function pushes RBP at once, so RBP
+  /// is the entry RSP minus 8.
+  function selfTestThread(argument: u64): void {
+    let first: u64 = 0xAAAAAAAAAAAAAAAA;
+    let second: u64 = 0xBBBBBBBBBBBBBBBB;
+
+    ContextTestState::argument = argument;
+    ContextTestState::interruptsOnEntry = Cpu::interruptsEnabled();
+    ContextTestState::framePointer = asm () -> (value: u64 in rax) { mov {value}, rbp };
+
+    while (true) {
+      Cpu::disableInterrupts();
+      ContextTestState::rounds += 1;
+      switchTo(&mut ContextTestState::threadRsp as *mut u64, ContextTestState::mainRsp);
+
+      if (first != 0xAAAAAAAAAAAAAAAA || second != 0xBBBBBBBBBBBBBBBB) {
+        @panic("context self-test: the thread lost a register across a switch");
+      }
+    }
+  }
+}
+
+/// Called by the trampoline before it enables interrupts and runs the thread
+/// function. Nothing to do until threads exist.
+@externName("ignis_thread_begin")
+function threadBegin(): void {
+}
+
+/// Called by the trampoline when a thread function returns.
+@externName("ignis_thread_exit")
+function threadExit(): never {
+  @panic("context: a thread function returned and nothing reaps it");
+}

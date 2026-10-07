@@ -1,6 +1,7 @@
 //! IgniOS kernel entry point.
 
 import Acpi from "./acpi";
+import Context from "./arch/x86_64/context";
 import Cpu from "./arch/x86_64/cpu";
 import Gdt from "./arch/x86_64/gdt";
 import Idt from "./arch/x86_64/idt";
@@ -389,6 +390,9 @@ function kmain(): void {
   reportIoapic(keyboardGsi);
 
   initializeTimer();
+
+  Context::selfTest();
+  Console::writeLine("context: self-test ok, stack switch, argument, alignment and registers checked");
 
   if (!initializeKeyboard()) {
     Cpu::haltForever();

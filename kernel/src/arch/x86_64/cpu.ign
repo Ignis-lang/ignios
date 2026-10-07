@@ -1,6 +1,9 @@
 //! x86_64 processor control.
 
 export namespace Cpu {
+  /// RFLAGS bit 9, the interrupt-enable flag.
+  const FLAGS_INTERRUPT_ENABLE: u64 = 0x200;
+
   /// Disables interrupts and parks the processor for good.
   function haltForever(): never {
     while (true) {
@@ -19,6 +22,37 @@ export namespace Cpu {
   /// Masks maskable interrupts.
   function disableInterrupts(): void {
     asm () clobber(memory) { cli }
+  }
+
+  /// Reads RFLAGS.IF, the interrupt-enable flag.
+  function interruptsEnabled(): boolean {
+    return (readFlags() & FLAGS_INTERRUPT_ENABLE) != 0;
+  }
+
+  /// Disables interrupts and returns the previous RFLAGS, for
+  /// `restoreInterrupts`. This opens an interrupt-disabled critical section
+  /// that can nest: each section gives back only what it found.
+  function saveAndDisableInterrupts(): u64 {
+    return asm () -> (flags: u64 in rax) clobber(memory) {
+      pushfq
+      pop {flags}
+      cli
+    };
+  }
+
+  /// Ends a critical section: interrupts come back on only if they were on
+  /// when `saveAndDisableInterrupts` returned `saved`.
+  function restoreInterrupts(saved: u64): void {
+    if ((saved & FLAGS_INTERRUPT_ENABLE) != 0) {
+      enableInterrupts();
+    }
+  }
+
+  function readFlags(): u64 {
+    return asm () -> (flags: u64 in rax) {
+      pushfq
+      pop {flags}
+    };
   }
 
   /// Enables interrupts and halts until one arrives. `sti` takes effect
