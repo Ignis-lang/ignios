@@ -1,0 +1,66 @@
+//! Boot-time checks of user mode. Each test runs a throwaway ring 3 program
+//! from `user_test_asm.S` as a real process and compares what the kernel
+//! sees with what the program is supposed to do. A mismatch panics.
+
+import Console from "./console";
+import Process from "./process";
+import Timer from "./timer";
+
+extern UserTestAsm {
+  function ignis_user_test_start(index: u64): u64;
+  function ignis_user_test_size(index: u64): u64;
+}
+
+export namespace UserTest {
+  const EXIT: u64 = 0;
+  const REGISTERS: u64 = 1;
+  const SPIN: u64 = 2;
+
+  /// Runs the programs one after the other and reports on the console.
+  function run(): void {
+    let exitStatus: u64 = runProgram(EXIT);
+
+    if (exitStatus != 42) {
+      @panic("user test: exit(42) came back with another status");
+    }
+
+    Console::writeLine("user: ring 3 entered by iretq, exit(42) through SYSCALL gave status 42");
+
+    if (runProgram(REGISTERS) != 0) {
+      @panic("user test: SYSCALL changed a register or returned the wrong value");
+    }
+
+    Console::writeLine("user: SYSCALL returned -ENOSYS by SYSRET with every other register intact");
+
+    let ticksBefore: u64 = Timer::ticks();
+
+    if (runProgram(SPIN) != 7) {
+      @panic("user test: the spinning program did not finish");
+    }
+
+    let ticks: u64 = Timer::ticks() - ticksBefore;
+
+    if (ticks == 0) {
+      @panic("user test: no timer tick arrived while a program ran in ring 3");
+    }
+
+    Console::write("user: ");
+    Console::writeDecimal(ticks);
+    Console::writeLine(" timer ticks passed while it ran in ring 3 and every one returned by iretq");
+  }
+
+  /// Starts program `index` as a process, waits for it and returns its exit
+  /// status.
+  function runProgram(index: u64): u64 {
+    let start: u64 = UserTestAsm::ignis_user_test_start(index);
+    let size: u64 = UserTestAsm::ignis_user_test_size(index);
+
+    let id: u64 = Process::startCode(@pointerFromInteger<*u8>(start), size);
+
+    if (id == Process::NO_PROCESS) {
+      @panic("user test: cannot start a process");
+    }
+
+    return Process::wait(id);
+  }
+}

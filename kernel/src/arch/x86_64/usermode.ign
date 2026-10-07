@@ -1,0 +1,95 @@
+//! Entering and leaving ring 3.
+//!
+//! A process enters user mode once, through an `iretq` frame built by
+//! `ignis_enter_user`: user data and code selectors with RPL 3, the user
+//! stack pointer, RFLAGS with IF set, the entry point. From then on the
+//! processor comes back to ring 0 in two ways. An interrupt or exception
+//! switches to the stack named by TSS.RSP0 on its own, so RSP0 must always
+//! hold the kernel stack of the thread that is running. `SYSCALL` does not
+//! switch stacks: the entry stub in `usermode_asm.S` loads the kernel stack
+//! from a global slot that `setKernelStack` keeps in step with RSP0.
+//!
+//! `SYSCALL` and `SYSRET` need four model specific registers set up once:
+//!
+//! - IA32_EFER.SCE turns the instructions on;
+//! - IA32_STAR holds the kernel code selector for `SYSCALL` in bits 47:32
+//!   (SS is that plus 8) and, for `SYSRET`, the selector base in bits 63:48
+//!   (SS is the base plus 8 and CS the base plus 16, both with RPL 3);
+//! - IA32_LSTAR holds the address of the entry stub;
+//! - IA32_FMASK lists the RFLAGS bits `SYSCALL` clears: IF, so the stub runs
+//!   with interrupts off until it has a stack, DF so string instructions
+//!   run forward, TF, NT and AC.
+
+import Cpu from "./cpu";
+import Gdt from "./gdt";
+
+extern UserModeAsm {
+  function ignis_enter_user(rip: u64, rsp: u64): void;
+  function ignis_set_syscall_kernel_stack(top: u64): void;
+  function ignis_syscall_entry_address(): u64;
+}
+
+export namespace UserMode {
+  const EFER_MSR: u32 = 0xC0000080;
+  const STAR_MSR: u32 = 0xC0000081;
+  const LSTAR_MSR: u32 = 0xC0000082;
+  const FMASK_MSR: u32 = 0xC0000084;
+
+  const EFER_SYSTEM_CALL_ENABLE: u64 = 1;
+
+  const FLAG_TRAP: u64 = 0x100;
+  const FLAG_INTERRUPT_ENABLE: u64 = 0x200;
+  const FLAG_DIRECTION: u64 = 0x400;
+  const FLAG_NESTED_TASK: u64 = 0x4000;
+  const FLAG_ALIGNMENT_CHECK: u64 = 0x40000;
+
+  const SYSCALL_FLAG_MASK: u64 = FLAG_TRAP | FLAG_INTERRUPT_ENABLE | FLAG_DIRECTION | FLAG_NESTED_TASK | FLAG_ALIGNMENT_CHECK;
+
+  /// Enables `SYSCALL` and points it at the entry stub. The GDT must be
+  /// loaded.
+  function initialize(): void {
+    let sysretBase: u64 = (Gdt::USER_DATA - 8) as u64;
+
+    if (Gdt::USER_CODE as u64 != sysretBase + 16) {
+      @panic("usermode: the GDT order does not fit SYSRET");
+    }
+
+    Cpu::writeMsr(STAR_MSR, (sysretBase << 48) | ((Gdt::KERNEL_CODE as u64) << 32));
+    Cpu::writeMsr(LSTAR_MSR, UserModeAsm::ignis_syscall_entry_address());
+    Cpu::writeMsr(FMASK_MSR, SYSCALL_FLAG_MASK);
+    Cpu::writeMsr(EFER_MSR, Cpu::readMsr(EFER_MSR) | EFER_SYSTEM_CALL_ENABLE);
+  }
+
+  /// IA32_STAR as written by `initialize`.
+  function starValue(): u64 {
+    return Cpu::readMsr(STAR_MSR);
+  }
+
+  /// IA32_LSTAR as written by `initialize`.
+  function entryAddress(): u64 {
+    return Cpu::readMsr(LSTAR_MSR);
+  }
+
+  /// IA32_FMASK as written by `initialize`.
+  function flagMask(): u64 {
+    return Cpu::readMsr(FMASK_MSR);
+  }
+
+  /// Makes `top`, one past the end of a kernel stack, the stack the next
+  /// ring 3 to ring 0 transition of any kind lands on.
+  function setKernelStack(top: u64): void {
+    Gdt::setKernelStack(top);
+    UserModeAsm::ignis_set_syscall_kernel_stack(top);
+  }
+
+  /// Drops to ring 3 at `rip` with the stack pointer `rsp`, interrupts on and
+  /// every general register zero. Never returns: the kernel is entered again
+  /// only through an interrupt, an exception or `SYSCALL`, on the stack
+  /// `setKernelStack` set. Call it in the address space that maps `rip` and
+  /// `rsp`. The stub turns interrupts off until the `iretq` loads RFLAGS.
+  function enter(rip: u64, rsp: u64): never {
+    UserModeAsm::ignis_enter_user(rip, rsp);
+
+    @panic("usermode: ignis_enter_user returned");
+  }
+}

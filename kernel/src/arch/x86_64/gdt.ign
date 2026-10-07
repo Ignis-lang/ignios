@@ -1,9 +1,11 @@
 //! The kernel's global descriptor table and task state segment.
 //!
-//! The selector order is the one SYSCALL and SYSRET need later: kernel code,
-//! kernel data, then user data and user code. The user entries are
-//! placeholders until there is a user mode. The TSS only carries IST1, the
-//! stack the double fault handler runs on.
+//! The selector order is the one SYSCALL and SYSRET need: kernel code, kernel
+//! data, then user data and user code, all flat 64-bit segments. The TSS
+//! carries IST1, the stack the double fault handler runs on, and RSP0, the
+//! kernel stack the processor switches to when an interrupt or exception
+//! arrives in ring 3. The scheduler updates RSP0 on every switch to a thread
+//! that has a user half (`setKernelStack`).
 
 /// The task state segment of the 64-bit mode.
 @cLayout
@@ -119,6 +121,13 @@ export namespace Gdt {
     let selector: u16 = TASK_STATE;
 
     asm (selector in ax) clobber(memory) { ltr {selector} }
+  }
+
+  /// Sets the stack the processor loads on a ring 3 to ring 0 transition
+  /// through an interrupt gate. `top` is one past the last byte of the
+  /// stack.
+  function setKernelStack(top: u64): void {
+    GdtState::tss.rsp0 = top;
   }
 
   /// The code segment selector of the kernel.

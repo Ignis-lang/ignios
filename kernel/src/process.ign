@@ -1,0 +1,320 @@
+//! User processes: an address space, a thread that runs in it, and the
+//! bookkeeping that outlives the thread.
+//!
+//! A process is a slot in a fixed table next to a kernel thread that owns the
+//! address space (`Scheduler::spawnIn`). The thread starts in `userMain`,
+//! which drops to ring 3 and never comes back: from then on the thread is
+//! only the kernel stack that interrupts and system calls of the process run
+//! on. When the process ends, through `exit` or because it was killed, the
+//! slot records the status, the thread ends, and the next thread to run frees
+//! the thread's stack and the address space. `wait` collects the status and
+//! frees the slot.
+//!
+//! The process id is not the thread id. Syscalls find the calling process
+//! by looking for the slot whose thread is the running one.
+
+import AddressSpace from "./address_space";
+import ContextAsm from "./arch/x86_64/context";
+import Cpu from "./arch/x86_64/cpu";
+import UserMode from "./arch/x86_64/usermode";
+import Console from "./console";
+import Hhdm from "./hhdm";
+import Mem from "./lib/mem";
+import Pmm from "./pmm";
+import Scheduler from "./scheduler";
+import Vmm from "./vmm";
+
+/// One entry of the process table.
+@cLayout
+record ProcessEntry {
+  public id: u64;
+  public state: u64;
+  public thread: u64;
+  public entry: u64;
+  public stackPointer: u64;
+  public status: u64;
+  public abi: u64;
+}
+
+record ProcessState {
+  static mut table: ProcessEntry[8];
+  static mut nextId: u64;
+}
+
+export namespace Process {
+  const MAX_PROCESSES: u64 = 8;
+
+  /// Returned instead of a process id or a slot when there is none.
+  const NO_PROCESS: u64 = 0xFFFFFFFFFFFFFFFF;
+
+  const FREE: u64 = 0;
+  const RUNNING: u64 = 1;
+  const EXITED: u64 = 2;
+
+  /// The system call convention the process speaks: Linux x86_64 numbers and
+  /// errno values.
+  const ABI_LINUX: u64 = 0;
+
+  const PAGE_SIZE: u64 = 4096;
+
+  /// Where raw test programs are loaded.
+  const CODE_BASE: u64 = 0x400000;
+
+  /// The user stack is `STACK_PAGES` pages that end at the user limit minus
+  /// the unmapped last page, so running off its bottom faults.
+  const STACK_PAGES: u64 = 8;
+  const STACK_TOP: u64 = AddressSpace::USER_LIMIT;
+
+  /// Process ids start at 1.
+  function initialize(): void {
+    ProcessState::nextId = 1;
+  }
+
+  /// Starts a process whose whole image is `length` bytes of machine code
+  /// copied to `CODE_BASE`, read and execute, with a fresh stack. The code
+  /// must fit one page. Returns the process id, or `NO_PROCESS`.
+  function startCode(code: *u8, length: u64): u64 {
+    if (length == 0 || length > PAGE_SIZE) {
+      return NO_PROCESS;
+    }
+
+    let root: u64 = AddressSpace::create();
+
+    if (root == Pmm::NO_FRAME) {
+      return NO_PROCESS;
+    }
+
+    let frame: u64 = AddressSpace::allocatePage(root, CODE_BASE, 0);
+
+    if (frame == Pmm::NO_FRAME || !mapStack(root)) {
+      AddressSpace::destroy(root);
+      return NO_PROCESS;
+    }
+
+    Mem::copy(Hhdm::toVirtual(frame), code, length);
+
+    return launch(root, CODE_BASE);
+  }
+
+  /// Maps the user stack, zeroed and no-execute. Returns false when memory
+  /// runs out; the caller destroys the space.
+  function mapStack(root: u64): boolean {
+    let mut page: u64 = 1;
+
+    while (page <= STACK_PAGES) {
+      let address: u64 = STACK_TOP - page * PAGE_SIZE;
+
+      if (AddressSpace::allocatePage(root, address, Vmm::WRITABLE | Vmm::NO_EXECUTE) == Pmm::NO_FRAME) {
+        return false;
+      }
+
+      page += 1;
+    }
+
+    return true;
+  }
+
+  /// Makes a process of the address space `root`, which the process now owns
+  /// and which must already hold the program and its stack, and queues its
+  /// thread. The program starts at `entry`. The stack pointer starts 8 below
+  /// the top, as if a `call` had just pushed a return address, so a function
+  /// compiled for the System V ABI sees the alignment it expects at its
+  /// first instruction. Returns the process id, or `NO_PROCESS`; the space is
+  /// destroyed on failure.
+  function launch(root: u64, entry: u64): u64 {
+    let saved: u64 = Cpu::saveAndDisableInterrupts();
+    let slot: u64 = findFreeSlot();
+
+    if (slot == NO_PROCESS) {
+      AddressSpace::destroy(root);
+      Cpu::restoreInterrupts(saved);
+      return NO_PROCESS;
+    }
+
+    let process: *mut ProcessEntry = slotPointer(slot);
+
+    (*process).id = ProcessState::nextId;
+    (*process).state = RUNNING;
+    (*process).entry = entry;
+    (*process).stackPointer = STACK_TOP - 8;
+    (*process).status = 0;
+    (*process).abi = ABI_LINUX;
+
+    let thread: u64 = Scheduler::spawnIn(ContextAsm::ignis_function_address(userMain), slot, root);
+
+    if (thread == Scheduler::NO_THREAD) {
+      (*process).state = FREE;
+      Cpu::restoreInterrupts(saved);
+      return NO_PROCESS;
+    }
+
+    (*process).thread = thread;
+    ProcessState::nextId += 1;
+
+    let id: u64 = (*process).id;
+
+    Cpu::restoreInterrupts(saved);
+
+    return id;
+  }
+
+  /// Waits until the process `id` has ended and its address space is freed,
+  /// then returns its exit status and frees its slot. Returns
+  /// `0xFFFFFFFFFFFFFFFF` for an id that is not in the table.
+  function wait(id: u64): u64 {
+    let slot: u64 = findSlot(id);
+
+    if (slot == NO_PROCESS) {
+      return NO_PROCESS;
+    }
+
+    let process: *mut ProcessEntry = slotPointer(slot);
+
+    while ((*process).state != EXITED || Scheduler::isAlive((*process).thread)) {
+      Scheduler::sleep(1);
+    }
+
+    let status: u64 = (*process).status;
+
+    (*process).state = FREE;
+
+    return status;
+  }
+
+  /// The id of the process the running thread belongs to, or `NO_PROCESS`
+  /// when it is a kernel thread.
+  function currentId(): u64 {
+    let slot: u64 = currentSlot();
+
+    if (slot == NO_PROCESS) {
+      return NO_PROCESS;
+    }
+
+    return (*slotPointer(slot)).id;
+  }
+
+  /// The system call convention of the running process.
+  function currentAbi(): u64 {
+    let slot: u64 = currentSlot();
+
+    if (slot == NO_PROCESS) {
+      return ABI_LINUX;
+    }
+
+    return (*slotPointer(slot)).abi;
+  }
+
+  /// The address space of the running process. Zero for a kernel thread.
+  function currentRoot(): u64 {
+    if (currentSlot() == NO_PROCESS) {
+      return 0;
+    }
+
+    return Cpu::readCr3();
+  }
+
+  /// Ends the running process with `status` and never returns.
+  function exitCurrent(status: u64): never {
+    finishCurrent(status, false);
+  }
+
+  /// Ends the running process because it did something the kernel does not
+  /// allow. `status` follows the shell convention, 128 plus the number of
+  /// the signal Linux would have sent. Never returns.
+  function killCurrent(status: u64): never {
+    finishCurrent(status, true);
+  }
+
+  /// Records the status, reports the end on the console and ends the
+  /// thread. The address space is freed by the next thread that runs.
+  function finishCurrent(status: u64, killed: boolean): never {
+    let slot: u64 = currentSlot();
+
+    if (slot == NO_PROCESS) {
+      @panic("process: a kernel thread tried to end a process");
+    }
+
+    let process: *mut ProcessEntry = slotPointer(slot);
+
+    (*process).status = status;
+    (*process).state = EXITED;
+
+    Console::write("process ");
+    Console::writeDecimal((*process).id);
+
+    if (killed) {
+      Console::write(" killed, status ");
+    } else {
+      Console::write(" exited with status ");
+    }
+
+    Console::writeDecimal(status);
+    Console::writeLine("");
+
+    Scheduler::exitCurrent();
+  }
+
+  /// Runs in the thread of a new process: drops to ring 3. The argument is
+  /// the process slot.
+  function userMain(slot: u64): void {
+    let process: *mut ProcessEntry = slotPointer(slot);
+
+    UserMode::enter((*process).entry, (*process).stackPointer);
+  }
+
+  /// The slot of the process whose thread is running, or `NO_PROCESS`.
+  function currentSlot(): u64 {
+    let thread: u64 = Scheduler::currentId();
+    let mut slot: u64 = 0;
+
+    while (slot < MAX_PROCESSES) {
+      let process: *mut ProcessEntry = slotPointer(slot);
+
+      if ((*process).state == RUNNING && (*process).thread == thread) {
+        return slot;
+      }
+
+      slot += 1;
+    }
+
+    return NO_PROCESS;
+  }
+
+  function findSlot(id: u64): u64 {
+    let mut slot: u64 = 0;
+
+    while (slot < MAX_PROCESSES) {
+      let process: *mut ProcessEntry = slotPointer(slot);
+
+      if ((*process).state != FREE && (*process).id == id) {
+        return slot;
+      }
+
+      slot += 1;
+    }
+
+    return NO_PROCESS;
+  }
+
+  function findFreeSlot(): u64 {
+    let mut slot: u64 = 0;
+
+    while (slot < MAX_PROCESSES) {
+      if ((*slotPointer(slot)).state == FREE) {
+        return slot;
+      }
+
+      slot += 1;
+    }
+
+    return NO_PROCESS;
+  }
+
+  function slotPointer(slot: u64): *mut ProcessEntry {
+    return tableBase() + slot;
+  }
+
+  function tableBase(): *mut ProcessEntry {
+    return &mut ProcessState::table as *mut ProcessEntry;
+  }
+}

@@ -24,7 +24,7 @@ import Timer from "./timer";
 /// `errorCode` by the thunk when the processor did not push one. The last
 /// five fields are the processor's own frame.
 @cLayout
-record InterruptFrame {
+export record InterruptFrame {
   public rax: u64;
   public rbx: u64;
   public rcx: u64;

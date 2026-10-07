@@ -25,8 +25,10 @@
 //!
 //! A thread may own an address space, the physical address of a PML4 made by
 //! `AddressSpace::create`. Every switch loads the incoming thread's PML4, or
-//! the kernel's when it owns none, and the thread's end destroys the space it
-//! owns, right after the switch away from it.
+//! the kernel's when it owns none, and points TSS.RSP0 and the `SYSCALL`
+//! stack slot at the incoming thread's kernel stack, so an interrupt or a
+//! system call from ring 3 lands on it. The thread's end destroys the space
+//! it owns, right after the switch away from it.
 //!
 //! Stacks are `STACK_PAGES` pages of PMM frames mapped in a region of their
 //! own, below an unmapped guard page: a thread that overflows its stack
@@ -35,6 +37,7 @@
 import AddressSpace from "./address_space";
 import Context, ContextAsm from "./arch/x86_64/context";
 import Cpu from "./arch/x86_64/cpu";
+import UserMode from "./arch/x86_64/usermode";
 import Pmm from "./pmm";
 import Timer from "./timer";
 import Vmm from "./vmm";
@@ -468,12 +471,16 @@ export namespace Scheduler {
     (*thread).state = UNUSED;
   }
 
-  /// Loads the page tables the thread in `slot` runs in.
+  /// Loads what the thread in `slot` runs on: its page tables, and, when it
+  /// owns an address space, its kernel stack as the one ring 3 enters on.
   function activateSpaceOf(slot: u64): void {
-    let mut root: u64 = (*slotPointer(slot)).root;
+    let thread: *mut Thread = slotPointer(slot);
+    let mut root: u64 = (*thread).root;
 
     if (root == 0) {
       root = Vmm::rootTable();
+    } else {
+      UserMode::setKernelStack((*thread).stackBase + STACK_SPAN);
     }
 
     if (Cpu::readCr3() != root) {

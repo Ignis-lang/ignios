@@ -1,0 +1,86 @@
+//! System calls from ring 3.
+//!
+//! `usermode_asm.S` builds an `InterruptFrame` for a `SYSCALL` and calls
+//! `dispatch` with it. The result goes back in RAX, where a value from -4095
+//! to -1 is a negated errno.
+//!
+//! Dispatch has two steps so the kernel can speak more than one convention
+//! later. Each process has an ABI, its personality. The ABI owns a table that
+//! turns a system call number into an operation of the kernel, a small
+//! number that does not depend on any convention, and the kernel runs that
+//! operation. The only ABI so far is Linux x86_64: the call number in RAX,
+//! the arguments in RDI, RSI, RDX, R10, R8 and R9, Linux's numbers and
+//! Linux's errno values. A number the table does not know turns into
+//! `OP_NONE` and fails with `-ENOSYS`.
+
+import InterruptFrame from "./interrupts";
+import Console from "./console";
+import Process from "./process";
+
+record SyscallState {
+  static mut linux: u8[512];
+}
+
+export namespace Syscall {
+  const TABLE_SIZE: u64 = 512;
+
+  /// Kernel operations. 0 is what a number the ABI does not know maps to.
+  const OP_NONE: u8 = 0;
+  const OP_EXIT: u8 = 1;
+
+  /// Linux numbers, from arch/x86/entry/syscalls/syscall_64.tbl.
+  const LINUX_EXIT: u64 = 60;
+  const LINUX_EXIT_GROUP: u64 = 231;
+
+  const ENOSYS: i64 = 38;
+
+  /// Fills the table of the Linux ABI.
+  function initialize(): void {
+    let table: *mut u8 = &mut SyscallState::linux as *mut u8;
+
+    *(table + LINUX_EXIT) = OP_EXIT;
+    *(table + LINUX_EXIT_GROUP) = OP_EXIT;
+  }
+
+  /// Called by the entry stub with interrupts off, on the kernel stack of
+  /// the calling thread.
+  @externName("ignis_syscall_dispatch")
+  function dispatch(frame: *mut InterruptFrame): void {
+    let operation: u8 = lookup(Process::currentAbi(), (*frame).rax);
+
+    if (operation == OP_EXIT) {
+      Process::exitCurrent((*frame).rdi & 0xFF);
+    }
+
+    (*frame).rax = failure(ENOSYS);
+  }
+
+  /// The operation the ABI `abi` maps `number` to.
+  function lookup(abi: u64, number: u64): u8 {
+    if (number >= TABLE_SIZE) {
+      return OP_NONE;
+    }
+
+    return *(&mut SyscallState::linux as *mut u8 + number);
+  }
+
+  /// Called by the entry stub when the return address of a system call is
+  /// not canonical and `SYSRET` would fault in ring 0.
+  @externName("ignis_syscall_bad_return")
+  function badReturn(rip: u64): never {
+    Console::write("process ");
+    Console::writeDecimal(Process::currentId());
+    Console::write(": non-canonical return address ");
+    Console::writeHex(rip);
+    Console::writeLine("");
+
+    Process::killCurrent(139);
+  }
+
+  /// The value a failing call returns in RAX: the errno, negated.
+  function failure(errno: i64): u64 {
+    let value: i64 = 0 - errno;
+
+    return value as u64;
+  }
+}

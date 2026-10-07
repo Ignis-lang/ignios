@@ -11,16 +11,20 @@ import Lapic from "./arch/x86_64/lapic";
 import Pic from "./arch/x86_64/pic";
 import Color, Console from "./console";
 import Heap from "./heap";
+import UserMode from "./arch/x86_64/usermode";
 import Interrupts from "./interrupts";
 import Keyboard from "./keyboard";
 import Limine from "./limine";
 import Pmm from "./pmm";
+import Process from "./process";
 import Ps2 from "./ps2";
 import ScancodeQueue from "./scancode_queue";
 import Scheduler from "./scheduler";
 import SchedulerTest from "./scheduler_test";
 import Serial from "./serial";
+import Syscall from "./syscall";
 import ThreadCommands from "./thread_commands";
+import UserTest from "./user_test";
 import Timer from "./timer";
 import Vmm from "./vmm";
 import _ from "./lib/mem";
@@ -397,6 +401,17 @@ function kmain(): void {
   initializeMemory(framebuffer);
 
   Scheduler::initialize();
+  Process::initialize();
+  Syscall::initialize();
+
+  UserMode::initialize();
+  Serial::write("usermode: syscall enabled, star ");
+  Serial::writeHex(UserMode::starValue());
+  Serial::write(", lstar ");
+  Serial::writeHex(UserMode::entryAddress());
+  Serial::write(", fmask ");
+  Serial::writeHex(UserMode::flagMask());
+  Serial::write("\n");
 
   Acpi::initialize();
   Acpi::report();
@@ -436,6 +451,8 @@ function kmain(): void {
   Console::write("scheduler: preemption self-test ok, two threads that never yield shared the processor, ");
   Console::writeDecimal(preemptions);
   Console::writeLine(" preemptions");
+
+  UserTest::run();
 
   if (!initializeKeyboard()) {
     Cpu::haltForever();
