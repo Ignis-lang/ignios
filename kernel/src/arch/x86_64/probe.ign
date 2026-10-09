@@ -1,0 +1,125 @@
+//!
+//! # Memory Probes
+//!
+//! A ring 0 load or call that may fault without bringing the kernel down.
+//!
+//! ## Overview
+//!
+//! A fault in ring 0 is fatal (`Trap::Exception`), except at two sites in
+//! `probe_asm.S`. While a probe is armed, `Trap::dispatch` asks `recover`
+//! first, and `recover` resumes the probe instead of halting:
+//!
+//! ```text
+//!   Arch::Probe::read(address, &value)
+//!     armed := true
+//!     ignis_probe_read:  mov rdx, [rdi]  ── fault ──► Trap::dispatch
+//!                                                       └─ Arch::Probe::recover(frame)
+//!                                                            rip == the load?
+//!                                                            record vector, error code
+//!                                                            rip := ignis_probe_read_fault
+//!                        ignis_probe_read_fault: rax = 0, ret
+//!     armed := false, return false
+//! ```
+//!
+//! An execute probe faults on the fetch at the target, so the saved RIP is
+//! the target itself. The call has pushed `ignis_probe_execute_return`, and
+//! that value on top of the saved stack is what identifies the probe: the
+//! recovery pops it, sets RAX to 0 and resumes there.
+//!
+//! The probes exist to check page protection from ring 0: SMAP (a kernel
+//! load from a user page faults) and SMEP (a kernel fetch from a user page
+//! faults). They run with interrupts disabled, so no other code can fault
+//! while a probe is armed.
+//!
+//! See concept doc 18.
+
+import _ from "./interrupt_frame";
+
+/// The routines of `probe_asm.S`.
+extern ProbeAsm {
+  function ignis_probe_read(address: u64, value: *mut u64): u64;
+
+  function ignis_probe_execute(address: u64): u64;
+
+  function ignis_probe_read_load_address(): u64;
+
+  function ignis_probe_read_fault_address(): u64;
+
+  function ignis_probe_execute_return_address(): u64;
+}
+
+/// The probe state, written with interrupts disabled.
+record ProbeState {
+  /// True between the start and the end of a probe.
+  static mut armed: boolean = false;
+
+  /// The vector of the fault the last probe recovered from.
+  static mut lastVector: u64 = 0;
+
+  /// The error code of that fault.
+  static mut lastErrorCode: u64 = 0;
+}
+
+/// The memory probe API.
+namespace Arch::Probe {
+  /// Reads 8 bytes at `address` into `*value`. Returns false, leaving
+  /// `*value` alone, when the load faulted; `lastVector` and
+  /// `lastErrorCode` then describe the fault. Interrupts must be disabled.
+  function read(address: u64, value: *mut u64): boolean {
+    ProbeState::armed = true;
+
+    let result: u64 = ProbeAsm::ignis_probe_read(address, value);
+
+    ProbeState::armed = false;
+
+    return result == 1;
+  }
+
+  /// Calls the code at `address`, which must be a lone `ret` if it runs at
+  /// all. Returns false when the instruction fetch faulted. Interrupts must
+  /// be disabled.
+  function execute(address: u64): boolean {
+    ProbeState::armed = true;
+
+    let result: u64 = ProbeAsm::ignis_probe_execute(address);
+
+    ProbeState::armed = false;
+
+    return result == 1;
+  }
+
+  /// Called by the exception dispatcher for a fault in ring 0. When the
+  /// fault belongs to the armed probe, records it, changes `frame` so the
+  /// probe returns 0, and returns true. Returns false, changing nothing,
+  /// for every other fault.
+  function recover(frame: *mut Arch::InterruptFrame, vector: u64): boolean {
+    if (!ProbeState::armed || ((*frame).cs & 3) != 0) {
+      return false;
+    }
+
+    if ((*frame).rip == ProbeAsm::ignis_probe_read_load_address()) {
+      (*frame).rip = ProbeAsm::ignis_probe_read_fault_address();
+    } else if (*((*frame).rsp as *u64) == ProbeAsm::ignis_probe_execute_return_address()) {
+      (*frame).rip = ProbeAsm::ignis_probe_execute_return_address();
+      (*frame).rsp += 8;
+      (*frame).rax = 0;
+    } else {
+      return false;
+    }
+
+    ProbeState::lastVector = vector;
+    ProbeState::lastErrorCode = (*frame).errorCode;
+
+    return true;
+  }
+
+  /// The vector of the fault the last probe recovered from.
+  function lastVector(): u64 {
+    return ProbeState::lastVector;
+  }
+
+  /// The error code of the fault the last probe recovered from.
+  function lastErrorCode(): u64 {
+    return ProbeState::lastErrorCode;
+  }
+}

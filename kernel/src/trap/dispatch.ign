@@ -62,6 +62,10 @@ namespace Trap {
   /// modified. See the module header for the routing.
   @externName("ignis_interrupt_dispatch")
   function dispatch(frame: *mut Arch::InterruptFrame): void {
+    // An interrupt from ring 3 keeps the user's RFLAGS, and with them a
+    // user-set AC flag that would turn SMAP off for this handler.
+    Arch::Protection::forbidUserAccess();
+
     let vector: u64 = (*frame).vector;
 
     if (vector == Apic::Lapic::spuriousVector()) {
@@ -83,6 +87,10 @@ namespace Trap {
 
     if (vector >= FIRST_IRQ_VECTOR && vector < FIRST_IRQ_VECTOR + IRQ_VECTOR_COUNT) {
       handleLegacyInterrupt((vector - FIRST_IRQ_VECTOR) as u8);
+      return;
+    }
+
+    if (Arch::Probe::recover(frame, vector)) {
       return;
     }
 

@@ -302,7 +302,15 @@ namespace Tests::Scheduler {
     let mut round: u64 = 0;
 
     while (round < SPACE_ROUNDS) {
-      if (*page == SPACE_MARKER + index) {
+      // A direct ring 0 read of a user page needs the SMAP window, and the
+      // window stays closed across the yield so no other thread inherits it.
+      Arch::Protection::allowUserAccess();
+
+      let value: u64 = *page;
+
+      Arch::Protection::forbidUserAccess();
+
+      if (value == SPACE_MARKER + index) {
         SchedulerTestState::spaceReads[index] += 1;
       }
 

@@ -16,6 +16,7 @@
 //! | `initializeIdt`      | `Arch::Idt::initialize`      | `idt: 50 gates loaded`           |
 //! | `initializeFpu`      | `Arch::Fpu::initialize`      | `fpu: x87 and SSE enabled, ...`  |
 //! | `initializeUserMode` | `Arch::UserMode::initialize` | `usermode: syscall enabled, ...` |
+//! | `initializeProtection` | `Arch::Protection::initialize` | `protection: smep on, smap on` |
 //!
 //! The order is fixed. The IDT gates name the kernel's code selector, and the
 //! double fault gate names IST1 of the kernel's TSS, so the GDT comes first.
@@ -61,6 +62,18 @@ namespace Trap::Setup {
     Drivers::Serial::write("fpu: x87 and SSE enabled, control bits ");
     Drivers::Serial::writeHex(Arch::Fpu::controlBits());
     Drivers::Serial::write(", 512-byte FXSAVE area per thread, saved on every switch\n");
+  }
+
+  /// Enables SMEP and SMAP where the processor has them and logs the result
+  /// for each: `on`, or `not supported`. Runs after the kernel page tables
+  /// are loaded.
+  function initializeProtection(): void {
+    Arch::Protection::initialize();
+
+    Drivers::Console::write("protection: smep ");
+    Drivers::Console::write(Arch::Protection::smepEnabled() ? "on" : "not supported");
+    Drivers::Console::write(", smap ");
+    Drivers::Console::writeLine(Arch::Protection::smapEnabled() ? "on" : "not supported");
   }
 
   /// Sets `IA32_EFER.SCE` and programs `IA32_STAR`, `IA32_LSTAR` and

@@ -1,0 +1,143 @@
+//!
+//! # Supervisor Protection Self-Test
+//!
+//! Checks that SMAP and SMEP stop ring 0 at user pages.
+//!
+//! ## Overview
+//!
+//! The test maps one user page in a new address space: a `ret` at its first
+//! byte and a marker word 8 bytes in, user accessible and executable. With
+//! that space loaded and interrupts off it checks, through `Arch::Probe`:
+//!
+//! | Probe                                   | With the feature           | Without it              |
+//! |-----------------------------------------|----------------------------|-------------------------|
+//! | ring 0 load of the marker               | `#PF`, error 0x1 (SMAP)    | the marker              |
+//! | the same load inside `allowUserAccess`  | the marker                 | the marker              |
+//! | ring 0 call to the `ret`                | `#PF`, error 0x11 (SMEP)   | the `ret` runs          |
+//!
+//! A feature the processor reports must be on, and must fault. A feature it
+//! does not report is skipped, and the line says so. The space is destroyed
+//! and the PMM free count must come back. Panics on the first violation.
+
+import Arch from "@arch";
+import Boot from "@boot";
+import Drivers from "@drivers";
+import Mm from "@mm";
+
+namespace Tests::Protection {
+  /// Where the test page is mapped in its space.
+  const PROBE_PAGE: u64 = 0x400000;
+
+  /// Offset of the marker word in the test page.
+  const MARKER_OFFSET: u64 = 8;
+
+  /// The marker word.
+  const MARKER: u64 = 0x5AFE0000C0DE0007;
+
+  /// The opcode of `ret`.
+  const RET_OPCODE: u8 = 0xC3;
+
+  /// Vector 14.
+  const PAGE_FAULT: u64 = 14;
+
+  /// Page fault error code of a supervisor read of a present page: P.
+  const SUPERVISOR_READ_FAULT: u64 = 0x1;
+
+  /// Page fault error code of a supervisor fetch from a present page: P
+  /// and I/D.
+  const SUPERVISOR_FETCH_FAULT: u64 = 0x11;
+
+  /// Runs the probes and prints one line naming what was checked.
+  function run(): void {
+    let saved: u64 = Arch::Cpu::saveAndDisableInterrupts();
+    let freeBefore: u64 = Mm::Pmm::freeFrameCount();
+    let space: u64 = Mm::AddressSpace::create();
+
+    if (space == Mm::Pmm::NO_FRAME) {
+      @panic("protection self-test: no address space");
+    }
+
+    let frame: u64 = Mm::AddressSpace::allocatePage(space, PROBE_PAGE, 0);
+
+    if (frame == Mm::Pmm::NO_FRAME) {
+      @panic("protection self-test: cannot map the user page");
+    }
+
+    *(Boot::Hhdm::toVirtual(frame) as *mut u8) = RET_OPCODE;
+    *(Boot::Hhdm::toVirtual(frame + MARKER_OFFSET) as *mut u64) = MARKER;
+
+    Mm::AddressSpace::activate(space);
+
+    let smapChecked: boolean = checkSmap();
+    let smepChecked: boolean = checkSmep();
+
+    Mm::AddressSpace::activate(Mm::Vmm::rootTable());
+    Mm::AddressSpace::destroy(space);
+
+    if (Mm::Pmm::freeFrameCount() != freeBefore) {
+      @panic("protection self-test: frames leaked");
+    }
+
+    Arch::Cpu::restoreInterrupts(saved);
+
+    Drivers::Console::write("protection: self-test ok, ");
+    Drivers::Console::write(smapChecked ? "a ring 0 read of a user page faulted and worked inside stac/clac" : "smap skipped");
+    Drivers::Console::write(", ");
+    Drivers::Console::writeLine(smepChecked ? "a ring 0 call into a user page faulted" : "smep skipped");
+  }
+
+  /// The SMAP probes. Returns false when the processor has no SMAP.
+  function checkSmap(): boolean {
+    let mut value: u64 = 0;
+    let address: u64 = PROBE_PAGE + MARKER_OFFSET;
+
+    if (!Arch::Protection::smapSupported()) {
+      return false;
+    }
+
+    if (!Arch::Protection::smapEnabled()) {
+      @panic("protection self-test: SMAP is supported but off");
+    }
+
+    if (Arch::Probe::read(address, &mut value as *mut u64)) {
+      @panic("protection self-test: ring 0 read a user page with SMAP on");
+    }
+
+    if (Arch::Probe::lastVector() != PAGE_FAULT || Arch::Probe::lastErrorCode() != SUPERVISOR_READ_FAULT) {
+      @panic("protection self-test: the SMAP fault is not a supervisor read page fault");
+    }
+
+    Arch::Protection::allowUserAccess();
+
+    let allowed: boolean = Arch::Probe::read(address, &mut value as *mut u64);
+
+    Arch::Protection::forbidUserAccess();
+
+    if (!allowed || value != MARKER) {
+      @panic("protection self-test: stac did not open user access");
+    }
+
+    return true;
+  }
+
+  /// The SMEP probe. Returns false when the processor has no SMEP.
+  function checkSmep(): boolean {
+    if (!Arch::Protection::smepSupported()) {
+      return false;
+    }
+
+    if (!Arch::Protection::smepEnabled()) {
+      @panic("protection self-test: SMEP is supported but off");
+    }
+
+    if (Arch::Probe::execute(PROBE_PAGE)) {
+      @panic("protection self-test: ring 0 ran code from a user page with SMEP on");
+    }
+
+    if (Arch::Probe::lastVector() != PAGE_FAULT || Arch::Probe::lastErrorCode() != SUPERVISOR_FETCH_FAULT) {
+      @panic("protection self-test: the SMEP fault is not a supervisor fetch page fault");
+    }
+
+    return true;
+  }
+}

@@ -167,6 +167,26 @@ namespace Arch::Cpu {
     asm (value in rax) clobber(memory) { mov cr4, {value} }
   }
 
+  /// EAX of CPUID leaf 0: the highest basic leaf the processor answers.
+  function cpuidMaxLeaf(): u32 {
+    let mut leaf: u32 = 0;
+    let mut subleaf: u32 = 0;
+
+    asm (leaf inout eax, subleaf inout ecx) clobber(rbx, rdx) { cpuid }
+
+    return leaf;
+  }
+
+  /// EBX of CPUID leaf `leaf`, subleaf `subleaf`. The caller checks
+  /// `cpuidMaxLeaf` first: a leaf above it returns the data of the highest
+  /// leaf on Intel processors, not zeros.
+  function cpuidEbx(leaf: u32, subleaf: u32): u32 {
+    let mut a: u32 = leaf;
+    let mut c: u32 = subleaf;
+
+    return asm (a inout eax, c inout ecx) -> (b: u32 in ebx) clobber(rdx) { cpuid };
+  }
+
   /// Drops the TLB entry of the page containing `address`.
   function invalidatePage(address: u64): void {
     asm (address in rax) clobber(memory) { invlpg [{address}] }

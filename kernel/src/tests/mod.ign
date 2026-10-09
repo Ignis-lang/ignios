@@ -13,6 +13,7 @@
 //! | `Tests::Vmm`          | `vmm.ign`           | `map`, `unmap` and `translate` against the direct map      |
 //! | `Tests::Heap`         | `heap.ign`          | alignment, reuse, merging, growth, the compiler handlers   |
 //! | `Tests::AddressSpace` | `address_space.ign` | private user half, shared kernel half, no leaked frames    |
+//! | `Tests::Protection`   | `protection.ign`    | SMAP and SMEP stop ring 0 at user pages                    |
 //! | `Tests::Timer`        | `timer.ign`         | ticks arrive                                               |
 //! | `Tests::Context`      | `context.ign`       | the stack switch, the argument, alignment, registers       |
 //! | `Tests::Scheduler`    | `scheduler.ign`     | round-robin, sleep, slot reuse, CR3 per thread, preemption |
@@ -31,6 +32,7 @@ import _ from "./address_space";
 import _ from "./context";
 import _ from "./heap";
 import _ from "./pmm";
+import _ from "./protection";
 import _ from "./scheduler";
 import _ from "./timer";
 import _ from "./user";

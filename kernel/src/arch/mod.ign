@@ -20,6 +20,8 @@
 //! | `Arch::ContextAsm`     | `context.ign`         | the routines of `context_asm.S`                 |
 //! | `Arch::UserMode`       | `usermode.ign`        | `SYSCALL` setup and the jump to ring 3          |
 //! | `Arch::Fpu`            | `fpu.ign`             | x87 and SSE on, per-thread `FXSAVE` areas       |
+//! | `Arch::Protection`     | `protection.ign`      | SMEP and SMAP, `stac` and `clac`                |
+//! | `Arch::Probe`          | `probe.ign`           | ring 0 loads and calls that may fault           |
 //! | `Arch::InterruptFrame` | `interrupt_frame.ign` | the registers the entry stubs save              |
 //!
 //! ## Dependencies
@@ -44,6 +46,8 @@ import _ from "./x86_64/interrupt_frame";
 import _ from "./x86_64/io";
 import _ from "./x86_64/pic";
 import _ from "./x86_64/pit";
+import _ from "./x86_64/probe";
+import _ from "./x86_64/protection";
 import _ from "./x86_64/usermode";
 
 /// Aggregate namespace of the architecture code. The files above contribute

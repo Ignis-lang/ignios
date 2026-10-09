@@ -51,12 +51,14 @@ ASFLAGS := --target=x86_64-unknown-none -mcmodel=kernel -fno-pic -fno-pie -c
 LDFLAGS := -m elf_x86_64 -nostdlib -static --no-dynamic-linker \
 	-z max-page-size=0x1000 -z noexecstack --build-id=none -T kernel/linker.ld
 
-# q35 machine, KVM when available and software emulation otherwise, 256 MiB of
-# RAM, and QEMU exits instead of resetting the machine (a triple fault ends the
-# run instead of rebooting in a loop).
+# q35 machine, KVM when available and software emulation otherwise, the `max`
+# CPU model (every feature the host or the emulator has, SMEP and SMAP among
+# them; the default qemu64 model has neither), 256 MiB of RAM, and QEMU exits
+# instead of resetting the machine (a triple fault ends the run instead of
+# rebooting in a loop).
 # OVMF is attached as two pflash drives (firmware code read-only, variables
 # writable) and the boot image as a raw disk.
-QEMU_FLAGS := -machine q35,accel=kvm:tcg -m 256M -no-reboot \
+QEMU_FLAGS := -machine q35,accel=kvm:tcg -cpu max -m 256M -no-reboot \
 	-drive if=pflash,unit=0,format=raw,readonly=on,file=$(OVMF_CODE) \
 	-drive if=pflash,unit=1,format=raw,file=$(OVMF_VARS_COPY) \
 	-drive format=raw,file=$(IMAGE)

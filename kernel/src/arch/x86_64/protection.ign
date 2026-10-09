@@ -1,0 +1,127 @@
+//!
+//! # Supervisor Mode Protections
+//!
+//! SMEP and SMAP: the processor refuses to let ring 0 execute or touch
+//! user pages.
+//!
+//! ## Overview
+//!
+//! A page with the U/S bit set belongs to ring 3. Without these features
+//! ring 0 may still read, write and execute it, which turns two kinds of
+//! kernel bug into exploits: a kernel jump through a corrupted pointer can
+//! land in code the user wrote (SMEP stops it), and a kernel dereference of
+//! a pointer the user passed can read or write user-controlled memory by
+//! accident (SMAP stops it).
+//!
+//! | Feature | CPUID leaf 7, EBX bit | CR4 bit | Ring 0 access to a U/S page     | Fault           |
+//! |---------|-----------------------|---------|---------------------------------|-----------------|
+//! | SMEP    | 7                     | 20      | instruction fetch               | `#PF`, error 0x11 |
+//! | SMAP    | 20                    | 21      | data load or store, unless AC=1 | `#PF`, error 0x1 or 0x3 |
+//!
+//! The kernel never dereferences a user pointer: it walks the page tables
+//! of the process and copies through the direct map (`Mm::AddressSpace`),
+//! so SMAP costs it nothing. Code that has to read a user address directly,
+//! such as a self-test, opens a window with `allowUserAccess` (`stac`,
+//! RFLAGS.AC = 1) and closes it with `forbidUserAccess` (`clac`).
+//!
+//! RFLAGS.AC is also a user-controlled bit. `SYSCALL` clears it through
+//! `IA32_FMASK`, but an interrupt or exception from ring 3 keeps the user's
+//! RFLAGS, so `Trap::dispatch` starts with `forbidUserAccess`: otherwise a
+//! user program could set AC and run every interrupt handler with SMAP off.
+//!
+//! Each feature is enabled only when CPUID reports it: setting a CR4 bit the
+//! processor does not have raises `#GP`, and so do `stac` and `clac`
+//! (`#UD`) without SMAP.
+//!
+//! See concept doc 18 and Intel SDM Vol. 3A, "Access Rights".
+
+import _ from "./cpu";
+
+/// What `initialize` enabled.
+record ProtectionState {
+  /// True once CR4.SMEP is set.
+  static mut smep: boolean = false;
+
+  /// True once CR4.SMAP is set.
+  static mut smap: boolean = false;
+}
+
+/// The SMEP and SMAP API.
+namespace Arch::Protection {
+  /// CPUID leaf 7, subleaf 0: structured extended feature flags.
+  const FEATURES_LEAF: u32 = 7;
+
+  /// CPUID.(EAX=7, ECX=0):EBX bit 7.
+  const CPUID_SMEP: u32 = 0x80;
+
+  /// CPUID.(EAX=7, ECX=0):EBX bit 20.
+  const CPUID_SMAP: u32 = 0x100000;
+
+  /// CR4 bit 20.
+  const CR4_SMEP: u64 = 0x100000;
+
+  /// CR4 bit 21.
+  const CR4_SMAP: u64 = 0x200000;
+
+  /// Enables SMEP and SMAP where the processor has them. Runs once, after
+  /// the kernel page tables are loaded: the kernel then has no page with the
+  /// U/S bit, so nothing it does can fault.
+  function initialize(): void {
+    if (Arch::Cpu::cpuidMaxLeaf() < FEATURES_LEAF) {
+      return;
+    }
+
+    let features: u32 = Arch::Cpu::cpuidEbx(FEATURES_LEAF, 0);
+    let mut cr4: u64 = Arch::Cpu::readCr4();
+
+    // Written as `cr4 = cr4 | ...`: the current Ignis compiler emits `|=` as a
+    // logical or, which would load CR4 with 1.
+    if ((features & CPUID_SMEP) != 0) {
+      cr4 = cr4 | CR4_SMEP;
+      ProtectionState::smep = true;
+    }
+
+    if ((features & CPUID_SMAP) != 0) {
+      cr4 = cr4 | CR4_SMAP;
+      ProtectionState::smap = true;
+    }
+
+    Arch::Cpu::writeCr4(cr4);
+  }
+
+  /// True when the processor reports SMEP.
+  function smepSupported(): boolean {
+    return Arch::Cpu::cpuidMaxLeaf() >= FEATURES_LEAF && (Arch::Cpu::cpuidEbx(FEATURES_LEAF, 0) & CPUID_SMEP) != 0;
+  }
+
+  /// True when the processor reports SMAP.
+  function smapSupported(): boolean {
+    return Arch::Cpu::cpuidMaxLeaf() >= FEATURES_LEAF && (Arch::Cpu::cpuidEbx(FEATURES_LEAF, 0) & CPUID_SMAP) != 0;
+  }
+
+  /// True when CR4.SMEP is set.
+  function smepEnabled(): boolean {
+    return (Arch::Cpu::readCr4() & CR4_SMEP) != 0;
+  }
+
+  /// True when CR4.SMAP is set.
+  function smapEnabled(): boolean {
+    return (Arch::Cpu::readCr4() & CR4_SMAP) != 0;
+  }
+
+  /// Lets ring 0 load and store to user pages until `forbidUserAccess`
+  /// (`stac` sets RFLAGS.AC). Does nothing without SMAP.
+  function allowUserAccess(): void {
+    if (ProtectionState::smap) {
+      asm () clobber(memory, flags) { stac }
+    }
+  }
+
+  /// Ends a window opened by `allowUserAccess` (`clac` clears RFLAGS.AC).
+  /// Does nothing without SMAP.
+  function forbidUserAccess(): void {
+    if (ProtectionState::smap) {
+      asm () clobber(memory, flags) { clac }
+    }
+  }
+}

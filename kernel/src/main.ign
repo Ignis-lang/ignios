@@ -130,6 +130,11 @@ function kmain(): void {
 
   Tests::AddressSpace::run();
 
+  // The kernel page tables have no user page, so ring 0 cannot trip over
+  // SMEP or SMAP from here on except by a bug, which then faults.
+  Trap::Setup::initializeProtection();
+  Tests::Protection::run();
+
   Sched::Scheduler::initialize();
   Proc::Process::initialize();
   Syscall::initialize();
