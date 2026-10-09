@@ -2,7 +2,8 @@
 //! # Physical Memory Manager
 //!
 //! The frame allocator: one bit per 4 KiB frame, set when the frame is in use
-//! or not managed.
+//! or not managed, and a second bitmap that remembers which frames are
+//! managed at all.
 //!
 //! ## Overview
 //!
@@ -37,6 +38,26 @@
 //! The bitmap needs `ceil(highest usable end / 4096 / 64)` words. For the
 //! 256 MiB guest used in development that is 1024 words, 8 KiB, 2 frames.
 //!
+//! ## Managed Frames
+//!
+//! A set bit in the used bitmap means "allocated" or "never usable", and the
+//! two cannot be told apart from that bit alone. A second bitmap of the same
+//! size, right after the first, has a bit set for every frame the allocator
+//! may hand out: the usable frames at boot minus frame 0 and the frames of
+//! the two bitmaps. `freeFrame` and `isAllocated` look at both:
+//!
+//! ```text
+//!   managed  used   meaning
+//!   0        1      never usable (firmware, kernel image, MMIO, the bitmaps)
+//!   1        1      allocated
+//!   1        0      free
+//!   0        0      never happens
+//! ```
+//!
+//! Freeing a frame that is not "managed and used" is a kernel bug and
+//! panics, so a wrong address can never put firmware or kernel memory on the
+//! free list.
+//!
 //! ## Allocation
 //!
 //! `takeFrame` scans word by word, starting at `searchWord`, for a word that
@@ -55,6 +76,10 @@ import Lib from "@lib";
 record PmmState {
   /// The bitmap, reached through the direct map. Null before `initialize`.
   static mut bitmap: *mut u64 = null;
+
+  /// The managed bitmap, `wordCount` words right after `bitmap`. A set bit
+  /// marks a frame the allocator may hand out.
+  static mut managed: *mut u64 = null;
 
   /// Number of 64-bit words in the bitmap.
   static mut wordCount: u64 = 0;
@@ -88,8 +113,9 @@ namespace Mm::Pmm {
   /// Returned by `allocateFrame` when no frame is free.
   const NO_FRAME: u64 = 0;
 
-  /// Builds the bitmap from the Limine memory map. Everything starts as
-  /// used; only usable frames are cleared.
+  /// Builds both bitmaps from the Limine memory map. Everything starts as
+  /// used and unmanaged; only usable frames are cleared and marked managed,
+  /// and the bitmaps' own frames are then taken back out.
   function initialize(): void {
     let memmap: *mut Boot::Limine::MemmapResponse = Boot::Limine::memmap();
 
@@ -105,15 +131,17 @@ namespace Mm::Pmm {
 
     let words: u64 = (highest / FRAME_SIZE + BITS_PER_WORD - 1) / BITS_PER_WORD;
     let bytes: u64 = words * 8;
-    let bitmapBase: u64 = findBitmapRegion(memmap, bytes);
+    let bitmapBase: u64 = findBitmapRegion(memmap, bytes * 2);
 
     PmmState::bitmap = Boot::Hhdm::toVirtual(bitmapBase) as *mut u64;
+    PmmState::managed = PmmState::bitmap + words;
     PmmState::wordCount = words;
     PmmState::usableFrames = 0;
     PmmState::freeFrames = 0;
     PmmState::searchWord = 0;
 
     Lib::Mem::fill(PmmState::bitmap as *mut u8, 0xFF, bytes);
+    Lib::Mem::fill(PmmState::managed as *mut u8, 0, bytes);
 
     let mut index: u64 = 0;
 
@@ -127,7 +155,7 @@ namespace Mm::Pmm {
       index += 1;
     }
 
-    reserveRange(bitmapBase, bytes);
+    reserveRange(bitmapBase, bytes * 2);
   }
 
   /// The physical address of a free frame, or `NO_FRAME`. The frame is not
@@ -171,17 +199,18 @@ namespace Mm::Pmm {
     return NO_FRAME;
   }
 
-  /// Returns a frame to the allocator. A misaligned address, one beyond the
-  /// bitmap, or a frame that is already free is a kernel bug and panics. The
-  /// check cannot tell an allocated frame from one that was never usable: both
-  /// are "used" in the bitmap.
+  /// Returns a frame to the allocator. Panics unless `address` is an
+  /// allocated frame: a misaligned address, one beyond the bitmap, a frame
+  /// that is already free, and a frame that was never usable are all kernel
+  /// bugs.
   function freeFrame(address: u64): void {
     let saved: u64 = Arch::Cpu::saveAndDisableInterrupts();
-    let frame: u64 = address / FRAME_SIZE;
 
-    if (address % FRAME_SIZE != 0 || frame >= PmmState::wordCount * BITS_PER_WORD || !isUsed(frame)) {
+    if (!isAllocated(address)) {
       @panic("pmm: free of a frame that is not allocated");
     }
+
+    let frame: u64 = address / FRAME_SIZE;
 
     setFree(frame);
     PmmState::freeFrames += 1;
@@ -193,8 +222,21 @@ namespace Mm::Pmm {
     Arch::Cpu::restoreInterrupts(saved);
   }
 
-  /// Frames the allocator manages: every usable frame at boot, including the
-  /// ones the bitmap itself occupies.
+  /// True when `address` is the start of a frame the allocator handed out
+  /// and nobody freed yet. False for a free frame, a frame that was never
+  /// usable, a misaligned address and an address beyond the bitmap.
+  function isAllocated(address: u64): boolean {
+    let frame: u64 = address / FRAME_SIZE;
+
+    if (address % FRAME_SIZE != 0 || frame >= PmmState::wordCount * BITS_PER_WORD) {
+      return false;
+    }
+
+    return isManaged(frame) && isUsed(frame);
+  }
+
+  /// Frames that were usable at boot, including the ones the bitmaps
+  /// occupy. The bitmaps' frames are counted but never free.
   function totalFrames(): u64 {
     return PmmState::usableFrames;
   }
@@ -286,7 +328,7 @@ namespace Mm::Pmm {
     return lowFallback;
   }
 
-  /// Marks every frame of a usable range free, except frame 0.
+  /// Marks every frame of a usable range free and managed, except frame 0.
   function releaseRange(base: u64, length: u64): void {
     let mut frame: u64 = base / FRAME_SIZE;
     let end: u64 = (base + length) / FRAME_SIZE;
@@ -294,6 +336,7 @@ namespace Mm::Pmm {
     while (frame < end) {
       if (frame != 0) {
         setFree(frame);
+        setManaged(frame, true);
         PmmState::usableFrames += 1;
         PmmState::freeFrames += 1;
       }
@@ -302,8 +345,8 @@ namespace Mm::Pmm {
     }
   }
 
-  /// Marks every frame touched by `[base, base + length)` used and takes it
-  /// out of the free count.
+  /// Marks every frame touched by `[base, base + length)` used and not
+  /// managed, for good, and takes it out of the free count.
   function reserveRange(base: u64, length: u64): void {
     let mut frame: u64 = base / FRAME_SIZE;
     let end: u64 = (base + length + FRAME_SIZE - 1) / FRAME_SIZE;
@@ -314,6 +357,8 @@ namespace Mm::Pmm {
         PmmState::freeFrames -= 1;
       }
 
+      setManaged(frame, false);
+
       frame += 1;
     }
   }
@@ -323,6 +368,25 @@ namespace Mm::Pmm {
     let word: u64 = *(PmmState::bitmap + frame / BITS_PER_WORD);
 
     return ((word >> (frame % BITS_PER_WORD)) & 1) != 0;
+  }
+
+  /// True when the managed bit of `frame` is set.
+  function isManaged(frame: u64): boolean {
+    let word: u64 = *(PmmState::managed + frame / BITS_PER_WORD);
+
+    return ((word >> (frame % BITS_PER_WORD)) & 1) != 0;
+  }
+
+  /// Sets or clears the managed bit of `frame`.
+  function setManaged(frame: u64, value: boolean): void {
+    let word: *mut u64 = PmmState::managed + frame / BITS_PER_WORD;
+    let bit: u64 = (1 as u64) << (frame % BITS_PER_WORD);
+
+    if (value) {
+      *word = *word | bit;
+    } else {
+      *word = *word & ~bit;
+    }
   }
 
   /// Sets the bit of `frame`.

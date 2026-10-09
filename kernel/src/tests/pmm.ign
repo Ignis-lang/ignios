@@ -7,8 +7,10 @@
 //!
 //! The test takes `SELF_TEST_FRAMES` frames and checks that each is aligned
 //! and non-zero, that no frame is handed out twice, that the free count
-//! follows every step, and that a freed frame comes back first. It panics on
-//! the first violation, so a boot that continues has passed it.
+//! follows every step, and that a freed frame comes back first. It also
+//! checks that `isAllocated` tells an allocated frame from a free one and
+//! from a frame that was never usable, the kernel image's first frame. It
+//! panics on the first violation, so a boot that continues has passed it.
 
 import Drivers from "@drivers";
 import Mm from "@mm";
@@ -20,9 +22,15 @@ namespace Tests::Pmm {
 
   /// Allocates and frees a few frames and checks the allocator's promises:
   /// aligned non-zero frames, no frame handed out twice, the free count
-  /// following every step, and a freed frame coming back first. Panics on
-  /// the first violation.
+  /// following every step, a freed frame coming back first, and
+  /// `isAllocated` agreeing with all of it. Panics on the first violation.
   function run(): void {
+    let kernelFrame: u64 = Mm::Vmm::translate(Mm::Vmm::textStartAddress());
+
+    if (Mm::Pmm::isAllocated(kernelFrame) || Mm::Pmm::isAllocated(0)) {
+      @panic("pmm self-test: a frame that was never usable counts as allocated");
+    }
+
     let mut frames: u64[8];
     let before: u64 = Mm::Pmm::freeFrameCount();
 
@@ -45,6 +53,10 @@ namespace Tests::Pmm {
         earlier += 1;
       }
 
+      if (!Mm::Pmm::isAllocated(frame)) {
+        @panic("pmm self-test: an allocated frame does not count as allocated");
+      }
+
       frames[index] = frame;
       index += 1;
     }
@@ -56,6 +68,10 @@ namespace Tests::Pmm {
     let reused: u64 = frames[3];
 
     Mm::Pmm::freeFrame(reused);
+
+    if (Mm::Pmm::isAllocated(reused)) {
+      @panic("pmm self-test: a freed frame still counts as allocated");
+    }
 
     if (Mm::Pmm::allocateFrame() != reused) {
       @panic("pmm self-test: freed frame was not reused");

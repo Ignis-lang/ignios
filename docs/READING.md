@@ -133,7 +133,7 @@ Read in this order: `hhdm`, `pmm`, `vmm`, `heap`, `address_space`. Each uses the
 
 **`boot/hhdm.ign`.** Physical address `p` is at `offset + p` in the higher half direct map. Two functions. Doc 09.
 
-**`mm/pmm.ign`.** The frame allocator, a bitmap with one bit per 4 KiB frame. The header shows how a bit maps to a frame number and an address, and where the bitmap itself is placed. Frame 0 is never handed out so address 0 can mean "no frame". Doc 08.
+**`mm/pmm.ign`.** The frame allocator, a bitmap with one bit per 4 KiB frame. The header shows how a bit maps to a frame number and an address, and where the bitmap itself is placed. A second bitmap marks the frames the allocator manages, so freeing a frame that was never usable panics instead of adding firmware or kernel memory to the free list. Frame 0 is never handed out so address 0 can mean "no frame". Doc 08.
 
 **`mm/vmm.ign`.** The page tables. This is the longest explanation in the tree. The header shows the address split (9+9+9+9+12 bits), the page table entry bits, the PAT memory types and the virtual address space map. `initialize` has the numbered order of operations. The `*In` functions work on any PML4, which is what lets the same code build a process address space. Doc 09.
 
@@ -304,9 +304,9 @@ memory map: 36 entries, hhdm offset 0xffff800000000000
 ### Memory
 
 ```text
-pmm: 54015 usable frames, 54013 free (210 MiB)
+pmm: 54015 usable frames, 54011 free (210 MiB)
 ```
-`Mm::Pmm::initialize` counted 54015 usable 4 KiB frames, and `Mm::Pmm::report` printed the line. Two are already taken: they hold the bitmap (1024 words of 8 bytes = 8 KiB = 2 frames). The size in MiB is `free * 4 / 1024` with integer division. Doc 08.
+`Mm::Pmm::initialize` counted 54015 usable 4 KiB frames, and `Mm::Pmm::report` printed the line. Four are already taken: they hold the two bitmaps, used and managed (2 x 1024 words of 8 bytes = 16 KiB = 4 frames). The size in MiB is `free * 4 / 1024` with integer division. Doc 08.
 
 ```text
 pmm: self-test ok
