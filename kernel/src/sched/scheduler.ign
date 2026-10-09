@@ -242,6 +242,34 @@ namespace Sched::Scheduler {
     Arch::Cpu::restoreInterrupts(saved);
   }
 
+  /// Blocks the calling thread until the thread `id` has ended and its
+  /// stack and address space are freed. Returns at once when no thread with
+  /// that id is in the table. The caller is not switched in again before
+  /// then: the thread that frees the dead one (`reapZombie`) makes the
+  /// waiters ready. A thread cannot wait for itself, and the idle thread
+  /// must not wait.
+  function join(id: u64): void {
+    let saved: u64 = Arch::Cpu::saveAndDisableInterrupts();
+
+    if (id == currentId()) {
+      @panic("scheduler: a thread cannot wait for itself");
+    }
+
+    if (SchedulerState::current == Sched::Thread::IDLE_SLOT) {
+      @panic("scheduler: the idle thread cannot wait");
+    }
+
+    if (Sched::Thread::isAlive(id)) {
+      let current: *mut Sched::Thread::Control = Sched::Thread::slotPointer(SchedulerState::current);
+
+      (*current).joinTarget = id;
+      (*current).state = Sched::Thread::WAITING;
+      switchToNext();
+    }
+
+    Arch::Cpu::restoreInterrupts(saved);
+  }
+
   /// Ends the calling thread. The trampoline calls it when a thread function
   /// returns. It never returns: the stack is freed by the next thread that
   /// runs.
@@ -313,6 +341,24 @@ namespace Sched::Scheduler {
     }
 
     (*thread).state = Sched::Thread::UNUSED;
+
+    wakeJoiners((*thread).id);
+  }
+
+  /// Makes every thread that waits for the thread `id` ready. Interrupts
+  /// must be disabled.
+  function wakeJoiners(id: u64): void {
+    let mut slot: u64 = 0;
+
+    while (slot < Sched::Thread::MAX_THREADS) {
+      let thread: *mut Sched::Thread::Control = Sched::Thread::slotPointer(slot);
+
+      if ((*thread).state == Sched::Thread::WAITING && (*thread).joinTarget == id) {
+        makeReady(slot);
+      }
+
+      slot += 1;
+    }
   }
 
   /// Loads what the thread in `slot` runs on: its page tables, and, when it

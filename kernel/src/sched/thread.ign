@@ -22,8 +22,10 @@
 //!              │ (next thread)    │  │ slice ran out         │
 //!            DEAD                 ▼  │                       │
 //!              ▲              RUNNING ──── sleep(ticks) ──► BLOCKED
-//!              │                  │
-//!              └──── exitCurrent ─┘
+//!              │                  │  │
+//!              └──── exitCurrent ─┘  └─── join(id) ──► WAITING
+//!                                                        │
+//!                    reapZombie of thread `id` makes it READY
 //! ```
 //!
 //! Exactly one thread is RUNNING. The idle thread is never in the run queue:
@@ -107,6 +109,9 @@ namespace Sched::Thread {
 
     /// Physical address of the PML4 the thread owns, or 0 for the kernel's.
     public root: u64;
+
+    /// Id of the thread a `WAITING` thread waits for.
+    public joinTarget: u64;
   }
 
   /// Size of the thread table, the boot and idle threads included.
@@ -136,6 +141,9 @@ namespace Sched::Thread {
 
   /// Finished, waiting for the next thread to free its stack.
   const DEAD: u64 = 4;
+
+  /// Waiting until the thread `joinTarget` is gone from the table.
+  const WAITING: u64 = 5;
 
   /// 4 KiB.
   const PAGE_SIZE: u64 = 4096;
@@ -187,6 +195,10 @@ namespace Sched::Thread {
 
     if (state == BLOCKED) {
       return "sleeping";
+    }
+
+    if (state == WAITING) {
+      return "waiting";
     }
 
     if (state == DEAD) {

@@ -12,7 +12,7 @@
 //!   Proc::Programs::run(name, length)
 //!     ├─ Mm::Modules::find            match the module string
 //!     ├─ Proc::Process::startElf        build the address space, load, launch
-//!     └─ Proc::Process::wait            sleep until the process ended, return its status
+//!     └─ Proc::Process::wait            block until the process is gone, return its status
 //! ```
 
 import Drivers from "@drivers";

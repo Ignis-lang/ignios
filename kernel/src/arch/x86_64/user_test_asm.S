@@ -28,7 +28,8 @@
  *   10   code write            killed, SIGSEGV (139)
  *   11   jump to the stack     killed, SIGSEGV (139)
  *   12   divide by zero        killed, SIGFPE (136)
- *   13   fpu                   exit status 0, run as two processes at once */
+ *   13   fpu                   exit status 0, run as two processes at once
+ *   14   nap                   exit status 5 after sleeping 200 ms */
 
 .intel_syntax noprefix
 
@@ -438,6 +439,23 @@ user_test_fpu_fail:
     ud2
 user_test_fpu_end:
 
+/* Index 14: sleeps 200 ms (20 timer ticks) with nanosleep, then exit(5). The
+ * timespec { 0 s, 200000000 ns } is built on the stack; the second argument,
+ * where Linux would store the time left, is null. */
+user_test_nap_start:
+    sub rsp, 16
+    mov qword ptr [rsp], 0
+    mov qword ptr [rsp + 8], 200000000
+    mov rdi, rsp
+    xor esi, esi
+    mov eax, 35
+    syscall
+    mov edi, 5
+    mov eax, 60
+    syscall
+    ud2
+user_test_nap_end:
+
 ignis_user_test_table:
     .quad user_test_exit_start, user_test_exit_end
     .quad user_test_registers_start, user_test_registers_end
@@ -453,5 +471,6 @@ ignis_user_test_table:
     .quad user_test_stack_jump_start, user_test_stack_jump_end
     .quad user_test_divide_start, user_test_divide_end
     .quad user_test_fpu_start, user_test_fpu_end
+    .quad user_test_nap_start, user_test_nap_end
 
 .section .note.GNU-stack,"",@progbits

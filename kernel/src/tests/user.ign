@@ -24,6 +24,7 @@
 import Drivers from "@drivers";
 import Mm from "@mm";
 import Proc from "@proc";
+import Sched from "@sched";
 import Time from "@time";
 
 /// Functions implemented in `user_test_asm.S`.
@@ -81,6 +82,14 @@ namespace Tests::User {
   /// yields 50 times and checks the state after each yield.
   const FPU: u64 = 13;
 
+  /// Index 14: sleeps 200 ms, then exits with status 5.
+  const NAP: u64 = 14;
+
+  /// The most thread switches a wait for `NAP` may cost: the waiter blocks
+  /// once and is woken once, plus the switches of the program itself and of
+  /// the idle thread. Polling once per tick would cost about 40.
+  const WAIT_SWITCH_LIMIT: u64 = 10;
+
   /// What the shell shows for a process that died of SIGSEGV, SIGILL and
   /// SIGFPE: 128 plus 11, 4 and 8.
   const KILLED_BY_SEGV: u64 = 139;
@@ -128,6 +137,7 @@ namespace Tests::User {
 
     runSyscalls();
     runFpu();
+    runWait();
     runIsolation();
     runHello();
   }
@@ -212,6 +222,43 @@ namespace Tests::User {
     }
 
     Drivers::Console::writeLine("user: two processes kept their own xmm0-xmm15, MXCSR and x87 control word across 50 yields each");
+  }
+
+  /// Checks that `Proc::Process::wait` blocks instead of polling. A wait for
+  /// a process that sleeps 200 ms must return its status after only a few
+  /// thread switches, and a wait for a process that has already ended and
+  /// been cleaned up must return at once, without any switch.
+  function runWait(): void {
+    let napper: u64 = startProgram(NAP);
+    let before: u64 = Sched::Scheduler::switchCount();
+    let status: u64 = Proc::Process::wait(napper);
+    let switches: u64 = Sched::Scheduler::switchCount() - before;
+
+    if (status != 5) {
+      @panic("user test: wait returned the wrong status");
+    }
+
+    if (switches > WAIT_SWITCH_LIMIT) {
+      Drivers::Console::write("user test: waiting for a sleeping process took ");
+      Drivers::Console::writeDecimal(switches);
+      Drivers::Console::writeLine(" switches");
+      @panic("user test: wait polls instead of blocking");
+    }
+
+    let quick: u64 = startProgram(EXIT);
+
+    Sched::Scheduler::sleep(5);
+
+    let lateBefore: u64 = Sched::Scheduler::switchCount();
+    let lateStatus: u64 = Proc::Process::wait(quick);
+
+    if (lateStatus != 42 || Sched::Scheduler::switchCount() != lateBefore) {
+      @panic("user test: waiting for a finished process did not return at once");
+    }
+
+    Drivers::Console::write("user: wait blocked until the process was gone, ");
+    Drivers::Console::writeDecimal(switches);
+    Drivers::Console::writeLine(" switches for a 200 ms process, none for one that had already ended");
   }
 
   /// Starts program `index` as a process and returns its id.

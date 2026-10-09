@@ -36,8 +36,8 @@
 //!                      └─ Sched::Scheduler::exitCurrent   thread DEAD
 //!   next thread:     reapZombie frees the kernel stack and destroys the
 //!                    address space (every frame goes back to the PMM)
-//!   Proc::Process::wait:   sleeps until EXITED and the thread is gone,
-//!                    returns the status, slot := FREE
+//!   Proc::Process::wait:   blocks in Sched::Scheduler::join until the
+//!                    thread is gone, returns the status, slot := FREE
 //! ```
 //!
 //! ## User Address Space of a Process
@@ -265,23 +265,35 @@ namespace Proc::Process {
 
   /// Waits until the process `id` has ended and its address space is freed,
   /// then returns its exit status and frees its slot. Returns
-  /// `0xFFFFFFFFFFFFFFFF` for an id that is not in the table.
+  /// `0xFFFFFFFFFFFFFFFF` for an id that is not in the table, and for one
+  /// whose status another waiter collected first.
+  ///
+  /// The caller blocks in `Sched::Scheduler::join` on the process thread and
+  /// runs again only once that thread is gone, which happens after
+  /// `finishCurrent` recorded the status. Interrupts stay off from the lookup
+  /// to the block, so the thread cannot end in between unnoticed.
   function wait(id: u64): u64 {
+    let saved: u64 = Arch::Cpu::saveAndDisableInterrupts();
     let slot: u64 = findSlot(id);
 
     if (slot == NO_PROCESS) {
+      Arch::Cpu::restoreInterrupts(saved);
       return NO_PROCESS;
     }
 
     let process: *mut ProcessEntry = slotPointer(slot);
 
-    while ((*process).state != EXITED || Sched::Thread::isAlive((*process).thread)) {
-      Sched::Scheduler::sleep(1);
+    Sched::Scheduler::join((*process).thread);
+
+    if ((*process).state != EXITED || (*process).id != id) {
+      Arch::Cpu::restoreInterrupts(saved);
+      return NO_PROCESS;
     }
 
     let status: u64 = (*process).status;
 
     (*process).state = FREE;
+    Arch::Cpu::restoreInterrupts(saved);
 
     return status;
   }
