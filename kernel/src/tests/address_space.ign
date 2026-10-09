@@ -7,8 +7,9 @@
 //!
 //! The lower half is private, the upper half is shared, including mappings
 //! made after the space was created, pages carry the U/S bit, loading CR3
-//! switches the user half, and `destroy` gives back every frame. It panics on
-//! the first violation. Interrupts are left as they were found.
+//! switches the user half, and `destroy` gives back every frame. A 2 MiB
+//! page in the user half is also mapped, reached and freed. It panics on the
+//! first violation. Interrupts are left as they were found.
 
 import Arch from "@arch";
 import Boot from "@boot";
@@ -32,6 +33,19 @@ namespace Tests::AddressSpace {
   /// The value written to a kernel page mapped after both spaces exist.
   const SELF_TEST_KERNEL_MARKER: u64 = 0xCCCC0000CCCC0003;
 
+  /// Where the 2 MiB page test maps its page: 1 GiB, 2 MiB aligned and in
+  /// a PDPT entry no other test uses.
+  const SELF_TEST_LARGE_ADDRESS: u64 = 0x40000000;
+
+  /// Offset inside the 2 MiB page where the marker goes, past the first
+  /// 4 KiB so a wrong offset mask shows up.
+  const SELF_TEST_LARGE_OFFSET: u64 = 0x123458;
+
+  /// The value written into the 2 MiB page. Bit 0 is set on purpose: if
+  /// `destroy` walked the page as a page table, this word would look like a
+  /// present entry.
+  const SELF_TEST_LARGE_MARKER: u64 = 0xDDDD0000DDDD0005;
+
   /// Checks the guarantees of an address space: the lower half is private,
   /// the upper half is shared, including mappings made after the space was
   /// created, pages carry the U/S bit, and `destroy` gives back every frame.
@@ -51,6 +65,7 @@ namespace Tests::AddressSpace {
     testSharedHalf(first, second, kernelRoot);
     testPrivateHalf(first, second, kernelRoot);
     testSwitching(first, second, kernelRoot);
+    testLargePage(kernelRoot);
 
     Mm::AddressSpace::destroy(first);
     Mm::AddressSpace::destroy(second);
@@ -136,6 +151,58 @@ namespace Tests::AddressSpace {
     if (Mm::AddressSpace::mapPage(first, Mm::AddressSpace::USER_LIMIT, frameA, flags) || Mm::AddressSpace::mapPage(first, SELF_TEST_ADDRESS, frameA, flags)) {
       @panic("address space self-test: an invalid mapping was accepted");
     }
+  }
+
+  /// Maps a 2 MiB page from `Mm::Pmm::allocateLargeFrame` into a new space
+  /// and checks that ring 3 could reach it (U/S at every level), that the
+  /// copy functions find the right byte in it, that nothing else can be
+  /// mapped over it, and that `destroy` gives back its 512 frames; `run`
+  /// checks the free count afterwards.
+  function testLargePage(kernelRoot: u64): void {
+    let space: u64 = Mm::AddressSpace::create();
+    let freeBefore: u64 = Mm::Pmm::freeFrameCount();
+    let frame: u64 = Mm::Pmm::allocateLargeFrame();
+
+    if (space == Mm::Pmm::NO_FRAME || frame == Mm::Pmm::NO_FRAME || frame % Mm::Pmm::LARGE_FRAME_SIZE != 0) {
+      @panic("address space self-test: no 2 MiB frame");
+    }
+
+    if (Mm::Pmm::freeFrameCount() != freeBefore - 512 || !Mm::Pmm::isAllocated(frame) || !Mm::Pmm::isAllocated(frame + Mm::Pmm::LARGE_FRAME_SIZE - Mm::Pmm::FRAME_SIZE)) {
+      @panic("address space self-test: a 2 MiB frame is not 512 allocated frames");
+    }
+
+    *(Boot::Hhdm::toVirtual(frame + SELF_TEST_LARGE_OFFSET) as *mut u64) = SELF_TEST_LARGE_MARKER;
+
+    let flags: u64 = Mm::Vmm::WRITABLE | Mm::Vmm::NO_EXECUTE;
+
+    if (!Mm::AddressSpace::mapLargePage(space, SELF_TEST_LARGE_ADDRESS, frame, flags)) {
+      @panic("address space self-test: cannot map a 2 MiB user page");
+    }
+
+    let pml4Entry: u64 = *(Mm::Vmm::tableAt(space) + Mm::Vmm::level4Index(SELF_TEST_LARGE_ADDRESS));
+    let pdptEntry: u64 = *(Mm::Vmm::tableAt(pml4Entry & Mm::Vmm::ADDRESS_MASK) + Mm::Vmm::level3Index(SELF_TEST_LARGE_ADDRESS));
+    let largeEntry: u64 = Mm::Vmm::largeEntryIn(space, SELF_TEST_LARGE_ADDRESS);
+
+    if ((pml4Entry & Mm::Vmm::USER) == 0 || (pdptEntry & Mm::Vmm::USER) == 0 || (largeEntry & Mm::Vmm::USER) == 0) {
+      @panic("address space self-test: a 2 MiB user page lacks U/S at some level");
+    }
+
+    let address: u64 = SELF_TEST_LARGE_ADDRESS + SELF_TEST_LARGE_OFFSET;
+    let mut copied: u64 = 0;
+
+    if (Mm::AddressSpace::translateUser(space, address, true) != frame + SELF_TEST_LARGE_OFFSET || !Mm::AddressSpace::copyFromUser(space, &mut copied as *mut u8, address, 8) || copied != SELF_TEST_LARGE_MARKER) {
+      @panic("address space self-test: the copy functions miss the 2 MiB page");
+    }
+
+    if (Mm::Vmm::translateIn(kernelRoot, SELF_TEST_LARGE_ADDRESS) != Mm::Vmm::NOT_MAPPED) {
+      @panic("address space self-test: a 2 MiB user page leaked into the kernel space");
+    }
+
+    if (Mm::AddressSpace::mapLargePage(space, SELF_TEST_LARGE_ADDRESS, frame, flags) || Mm::AddressSpace::mapPage(space, address & ~(Mm::Vmm::PAGE_SIZE - 1), frame, flags) || Mm::AddressSpace::mapLargePage(space, SELF_TEST_LARGE_ADDRESS + Mm::Vmm::PAGE_SIZE, frame, flags)) {
+      @panic("address space self-test: a mapping over a 2 MiB page was accepted");
+    }
+
+    Mm::AddressSpace::destroy(space);
   }
 
   /// Loads each space in turn and reads the same user address, and a kernel

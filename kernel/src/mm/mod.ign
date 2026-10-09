@@ -8,7 +8,7 @@
 //!
 //! | Name               | File                | Purpose                                                        |
 //! |--------------------|---------------------|----------------------------------------------------------------|
-//! | `Mm::Pmm`          | `pmm.ign`           | bitmap allocator of 4 KiB physical frames                      |
+//! | `Mm::Pmm`          | `pmm.ign`           | bitmap allocator of 4 KiB frames and 2 MiB runs of them        |
 //! | `Mm::Vmm`          | `vmm.ign`           | the kernel page tables, `map`, `unmap`, `translate`            |
 //! | `Mm::AddressSpace` | `address_space.ign` | private user halves and checked copies to and from user memory |
 //! | `Mm::Heap`         | `heap.ign`          | kernel heap behind `@allocHandler` and `@freeHandler`          |

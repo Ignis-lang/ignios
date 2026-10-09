@@ -365,15 +365,22 @@ namespace Mm::Vmm {
     return true;
   }
 
-  /// Maps the 2 MiB page at `virtualAddress` to `physical`. Returns false
-  /// and changes nothing when an address is not 2 MiB aligned or anything is
-  /// already mapped in that range.
+  /// Maps the 2 MiB page at `virtualAddress` to `physical` in the kernel
+  /// page tables. Returns false and changes nothing when an address is not
+  /// 2 MiB aligned or anything is already mapped in that range.
   function mapLarge(virtualAddress: u64, physical: u64, flags: u64): boolean {
+    return mapLargeIn(VmmState::root, virtualAddress, physical, flags);
+  }
+
+  /// `mapLarge` in the address space whose PML4 is the frame `root`. With
+  /// `USER` in `flags` the PML4 and PDPT entries above the page allow user
+  /// access too, as in `mapIn`.
+  function mapLargeIn(root: u64, virtualAddress: u64, physical: u64, flags: u64): boolean {
     if (virtualAddress % LARGE_PAGE_SIZE != 0 || physical % LARGE_PAGE_SIZE != 0) {
       return false;
     }
 
-    let directory: *mut u64 = directoryFor(VmmState::root, virtualAddress, 0);
+    let directory: *mut u64 = directoryFor(root, virtualAddress, flags & USER);
     let entry: *mut u64 = directory + level2Index(virtualAddress);
 
     if ((*entry & PRESENT) != 0) {
@@ -460,6 +467,33 @@ namespace Mm::Vmm {
     }
 
     return *entry;
+  }
+
+  /// The page directory entry that maps `virtualAddress` as part of a 2 MiB
+  /// page in the address space whose PML4 is the frame `root`, or 0 when
+  /// the address is not in a 2 MiB page.
+  function largeEntryIn(root: u64, virtualAddress: u64): u64 {
+    let pml4: *mut u64 = tableAt(root);
+    let pdptEntry: u64 = *(pml4 + level4Index(virtualAddress));
+
+    if ((pdptEntry & PRESENT) == 0) {
+      return 0;
+    }
+
+    let pdpt: *mut u64 = tableAt(pdptEntry & ADDRESS_MASK);
+    let directoryEntry: u64 = *(pdpt + level3Index(virtualAddress));
+
+    if ((directoryEntry & PRESENT) == 0 || (directoryEntry & HUGE) != 0) {
+      return 0;
+    }
+
+    let entry: u64 = *(tableAt(directoryEntry & ADDRESS_MASK) + level2Index(virtualAddress));
+
+    if ((entry & PRESENT) == 0 || (entry & HUGE) == 0) {
+      return 0;
+    }
+
+    return entry;
   }
 
   /// Drops the TLB entry of the page containing `virtualAddress`. A mapping

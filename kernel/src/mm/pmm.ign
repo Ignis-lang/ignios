@@ -110,8 +110,15 @@ namespace Mm::Pmm {
   /// the bitmap is placed above it when possible.
   const LOW_MEMORY_LIMIT: u64 = 0x100000;
 
-  /// Returned by `allocateFrame` when no frame is free.
+  /// Returned by `allocateFrame` and `allocateLargeFrame` when no frame is
+  /// free.
   const NO_FRAME: u64 = 0;
+
+  /// Size of a large frame: 2 MiB, what one page directory entry maps.
+  const LARGE_FRAME_SIZE: u64 = 2097152;
+
+  /// Bitmap words that cover one large frame: 512 frames / 64 bits per word.
+  const WORDS_PER_LARGE_FRAME: u64 = 8;
 
   /// Builds both bitmaps from the Limine memory map. Everything starts as
   /// used and unmanaged; only usable frames are cleared and marked managed,
@@ -167,6 +174,56 @@ namespace Mm::Pmm {
     Arch::Cpu::restoreInterrupts(saved);
 
     return frame;
+  }
+
+  /// The physical address of 2 MiB of free, contiguous, 2 MiB aligned
+  /// memory, or `NO_FRAME`. The memory is not zeroed. It is 512 ordinary
+  /// frames, and each of them is given back with `freeFrame`.
+  ///
+  /// A 2 MiB aligned run starts at a frame number that is a multiple of 512,
+  /// so it is exactly the 8 bitmap words from a word index that is a
+  /// multiple of 8. The scan looks for 8 such words that are all zero.
+  function allocateLargeFrame(): u64 {
+    let saved: u64 = Arch::Cpu::saveAndDisableInterrupts();
+    let mut word: u64 = 0;
+
+    while (word + WORDS_PER_LARGE_FRAME <= PmmState::wordCount) {
+      if (isRunFree(word)) {
+        let mut index: u64 = 0;
+
+        while (index < WORDS_PER_LARGE_FRAME) {
+          *(PmmState::bitmap + word + index) = ALL_USED;
+          index += 1;
+        }
+
+        PmmState::freeFrames -= WORDS_PER_LARGE_FRAME * BITS_PER_WORD;
+        Arch::Cpu::restoreInterrupts(saved);
+
+        return word * BITS_PER_WORD * FRAME_SIZE;
+      }
+
+      word += WORDS_PER_LARGE_FRAME;
+    }
+
+    Arch::Cpu::restoreInterrupts(saved);
+
+    return NO_FRAME;
+  }
+
+  /// True when the `WORDS_PER_LARGE_FRAME` words from `word` have every
+  /// frame free.
+  function isRunFree(word: u64): boolean {
+    let mut index: u64 = 0;
+
+    while (index < WORDS_PER_LARGE_FRAME) {
+      if (*(PmmState::bitmap + word + index) != 0) {
+        return false;
+      }
+
+      index += 1;
+    }
+
+    return true;
   }
 
   /// Finds and marks a free frame. Interrupts must be disabled.
