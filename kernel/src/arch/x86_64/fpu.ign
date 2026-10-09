@@ -1,0 +1,136 @@
+//!
+//! # x87 and SSE State
+//!
+//! Turns on the x87 and SSE units and saves and restores their registers,
+//! one 512-byte area per thread.
+//!
+//! ## Overview
+//!
+//! The kernel itself is compiled without x87, MMX and SSE (`ignis.toml`), so
+//! it never touches those registers. User programs may use them, so every
+//! thread has its own copy of them, and the scheduler swaps the copies on
+//! every switch:
+//!
+//! ```text
+//!   Sched::Scheduler::switchToNext
+//!     Arch::Fpu::save(area of the outgoing thread)      fxsave64
+//!     Arch::Fpu::restore(area of the incoming thread)   fxrstor64
+//!     Arch::Context::switchTo(...)                      general registers
+//! ```
+//!
+//! This is the eager strategy. The lazy one sets CR0.TS and waits for the
+//! `#NM` fault a thread takes on its first FPU instruction after a switch;
+//! it saves work when few threads use the FPU, but adds a fault path and
+//! state that belongs to a thread other than the running one. With 512
+//! bytes per switch the eager strategy costs little, and it is what Linux
+//! does on current processors.
+//!
+//! The area is the `FXSAVE` format (Intel SDM Vol. 1, "FXSAVE"): the x87
+//! control, status and tag words, the last instruction and operand
+//! pointers, `MXCSR`, the eight x87/MMX registers and the sixteen XMM
+//! registers. `fxsave64` stores the 64-bit form of the pointers. The area
+//! must be 16-byte aligned or the instruction faults. AVX registers (YMM)
+//! are not saved: that needs `XSAVE`, and user programs are not built for
+//! AVX.
+//!
+//! ## Control Register Bits
+//!
+//! | Register | Bit | Name       | Set to | Meaning                                              |
+//! |----------|-----|------------|--------|------------------------------------------------------|
+//! | CR0      | 1   | MP         | 1      | `wait`/`fwait` honour TS                             |
+//! | CR0      | 2   | EM         | 0      | x87 instructions run instead of raising `#NM`        |
+//! | CR0      | 3   | TS         | 0      | no lazy switching: FPU instructions never fault `#NM`|
+//! | CR4      | 9   | OSFXSR     | 1      | the OS saves state with FXSAVE; SSE instructions run |
+//! | CR4      | 10  | OSXMMEXCPT | 1      | unmasked SIMD exceptions raise `#XM`, not `#UD`      |
+//!
+//! Without OSFXSR every SSE instruction raises `#UD`, which is what the
+//! kernel did before this file existed.
+//!
+//! ## The Initial State
+//!
+//! A new thread starts with the state `fninit` leaves plus the default
+//! `MXCSR`: every exception masked, round to nearest, x87 precision 64 bits.
+//! `initialize` builds that state once and saves it as a template that
+//! `initialState` returns and the thread table copies into each new slot.
+//!
+//! See concept doc 17.
+
+import _ from "./cpu";
+
+/// The template area: the initial state of every thread, in `FXSAVE`
+/// format, written once by `initialize`. The field has no comment of its own
+/// because `ignis fmt` rejects a comment before an attributed field.
+record FpuState {
+  @aligned(16)
+  static mut template: u8[512];
+}
+
+/// The x87 and SSE state API.
+namespace Arch::Fpu {
+  /// Bytes of one `FXSAVE` area.
+  const STATE_SIZE: u64 = 512;
+
+  /// The alignment `fxsave64` and `fxrstor64` require.
+  const STATE_ALIGNMENT: u64 = 16;
+
+  /// CR0 bit 1 (MP, monitor coprocessor).
+  const CR0_MONITOR_COPROCESSOR: u64 = 0x2;
+
+  /// CR0 bit 2 (EM, emulation).
+  const CR0_EMULATION: u64 = 0x4;
+
+  /// CR0 bit 3 (TS, task switched).
+  const CR0_TASK_SWITCHED: u64 = 0x8;
+
+  /// CR4 bit 9 (OSFXSR).
+  const CR4_FXSAVE_SUPPORT: u64 = 0x200;
+
+  /// CR4 bit 10 (OSXMMEXCPT).
+  const CR4_SIMD_EXCEPTIONS: u64 = 0x400;
+
+  /// The power-on `MXCSR`: the six exception mask bits (12:7) set, round to
+  /// nearest, no flags.
+  const DEFAULT_MXCSR: u32 = 0x1F80;
+
+  /// Turns on the x87 and SSE units and builds the initial state. Runs once,
+  /// before the first thread is created.
+  function initialize(): void {
+    let cr0: u64 = Arch::Cpu::readCr0();
+
+    Arch::Cpu::writeCr0((cr0 & ~(CR0_EMULATION | CR0_TASK_SWITCHED)) | CR0_MONITOR_COPROCESSOR);
+    Arch::Cpu::writeCr4(Arch::Cpu::readCr4() | CR4_FXSAVE_SUPPORT | CR4_SIMD_EXCEPTIONS);
+
+    let mxcsr: u32 = DEFAULT_MXCSR;
+    let mxcsrAddress: *u32 = &mxcsr as *u32;
+
+    asm (mxcsrAddress in rax) clobber(memory) {
+      fninit
+      ldmxcsr [{mxcsrAddress}]
+    }
+
+    save(initialState());
+  }
+
+  /// The template a new thread's area is copied from.
+  function initialState(): *mut u8 {
+    return &mut FpuState::template as *mut u8;
+  }
+
+  /// Saves the x87 and SSE registers into the `STATE_SIZE` bytes at `area`,
+  /// which must be 16-byte aligned.
+  function save(area: *mut u8): void {
+    asm (area in rax) clobber(memory) { fxsave64 [{area}] }
+  }
+
+  /// Loads the x87 and SSE registers from the area at `area`, which must be
+  /// 16-byte aligned and hold a state `save` wrote: reserved `MXCSR` bits set
+  /// make `fxrstor64` fault.
+  function restore(area: *u8): void {
+    asm (area in rax) clobber(memory) { fxrstor64 [{area}] }
+  }
+
+  /// CR0 and CR4 together, for the boot log.
+  function controlBits(): u64 {
+    return (Arch::Cpu::readCr0() & (CR0_MONITOR_COPROCESSOR | CR0_EMULATION | CR0_TASK_SWITCHED)) | (Arch::Cpu::readCr4() & (CR4_FXSAVE_SUPPORT | CR4_SIMD_EXCEPTIONS));
+  }
+}

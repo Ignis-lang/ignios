@@ -28,6 +28,7 @@
 //! | CR0                | -            | protection and paging control (WP is bit 16)   |
 //! | CR2                | -            | faulting address of a page fault (read in `trap/exception.ign`) |
 //! | CR3                | -            | physical address of the PML4 in bits 12-51     |
+//! | CR4                | -            | architecture extensions (OSFXSR, SMEP, SMAP, ...) |
 //!
 //! The MSRs used elsewhere: `IA32_APIC_BASE` (`0x1B`), `IA32_PAT` (`0x277`),
 //! `IA32_EFER` (`0xC0000080`), `IA32_STAR` (`0xC0000081`), `IA32_LSTAR`
@@ -153,6 +154,17 @@ namespace Arch::Cpu {
   /// is dropped from the TLB.
   function writeCr3(value: u64): void {
     asm (value in rax) clobber(memory) { mov cr3, {value} }
+  }
+
+  /// Reads control register 4.
+  function readCr4(): u64 {
+    return asm () -> (value: u64 in rax) { mov {value}, cr4 };
+  }
+
+  /// Writes control register 4. Setting a bit for a feature the processor
+  /// does not have raises `#GP`, so callers check CPUID first.
+  function writeCr4(value: u64): void {
+    asm (value in rax) clobber(memory) { mov cr4, {value} }
   }
 
   /// Drops the TLB entry of the page containing `address`.

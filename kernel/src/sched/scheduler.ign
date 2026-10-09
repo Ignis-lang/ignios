@@ -36,6 +36,10 @@
 //! system call from ring 3 lands on it. The thread's end destroys the space
 //! it owns, right after the switch away from it.
 //!
+//! Every switch also saves the outgoing thread's x87 and SSE registers and
+//! loads the incoming one's (`Arch::Fpu`), so a user program's vector and
+//! floating point registers are its own.
+//!
 //! ## Preemption
 //!
 //! ```text
@@ -353,6 +357,11 @@ namespace Sched::Scheduler {
     SchedulerState::switches += 1;
 
     activateSpaceOf(next);
+
+    // The kernel never uses the x87 and SSE registers, so the incoming
+    // thread's state can be loaded before the stack switch.
+    Arch::Fpu::save(Sched::Thread::fpuArea(outgoing));
+    Arch::Fpu::restore(Sched::Thread::fpuArea(next) as *u8);
 
     Arch::Context::switchTo(&mut (*Sched::Thread::slotPointer(outgoing)).savedRsp as *mut u64, (*Sched::Thread::slotPointer(next)).savedRsp);
 

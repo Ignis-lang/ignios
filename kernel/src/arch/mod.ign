@@ -19,6 +19,7 @@
 //! | `Arch::Context`        | `context.ign`         | thread stack preparation and the context switch |
 //! | `Arch::ContextAsm`     | `context.ign`         | the routines of `context_asm.S`                 |
 //! | `Arch::UserMode`       | `usermode.ign`        | `SYSCALL` setup and the jump to ring 3          |
+//! | `Arch::Fpu`            | `fpu.ign`             | x87 and SSE on, per-thread `FXSAVE` areas       |
 //! | `Arch::InterruptFrame` | `interrupt_frame.ign` | the registers the entry stubs save              |
 //!
 //! ## Dependencies
@@ -36,6 +37,7 @@
 
 import _ from "./x86_64/context";
 import _ from "./x86_64/cpu";
+import _ from "./x86_64/fpu";
 import _ from "./x86_64/gdt";
 import _ from "./x86_64/idt";
 import _ from "./x86_64/interrupt_frame";

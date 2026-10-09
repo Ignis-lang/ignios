@@ -27,7 +27,8 @@
  *   9    port output           killed, SIGSEGV (139)
  *   10   code write            killed, SIGSEGV (139)
  *   11   jump to the stack     killed, SIGSEGV (139)
- *   12   divide by zero        killed, SIGFPE (136) */
+ *   12   divide by zero        killed, SIGFPE (136)
+ *   13   fpu                   exit status 0, run as two processes at once */
 
 .intel_syntax noprefix
 
@@ -344,6 +345,99 @@ user_test_divide_end:
 
 /* Start and end address of each program, indexed as above. */
 .balign 8
+/* Index 13: the x87 and SSE state of a process survives switches to other
+ * processes. Two copies run at the same time. Each one derives a pattern
+ * from its pid, loads it into xmm0-xmm15, the MXCSR rounding control and
+ * the x87 control word, then yields 50 times and checks all of it after
+ * every yield. The other copy holds different values, so a missing save or
+ * restore shows up as a mismatch. Exit status 0, or 1 when a value changed.
+ *
+ * Registers:
+ *   rbx   pattern seed, pid * 0x0101010101010101; xmm i holds rbx + i in
+ *         both quadwords
+ *   r12   the MXCSR value: all exceptions masked (0x1F80), rounding control
+ *         (bits 14:13) = pid & 3
+ *   r13   the x87 control word: 0x037F, rounding control (bits 11:10) =
+ *         pid & 3
+ *   r14   rounds left
+ * The kernel preserves all four across SYSCALL. */
+user_test_fpu_start:
+    /* getpid */
+    mov eax, 39
+    syscall
+
+    mov rbx, 0x0101010101010101
+    imul rbx, rax
+
+    mov r12, rax
+    and r12, 3
+    mov r13, r12
+    shl r12, 13
+    or r12, 0x1F80
+    shl r13, 10
+    or r13, 0x037F
+
+    sub rsp, 256
+    mov [rsp], r12d
+    ldmxcsr [rsp]
+    mov [rsp], r13w
+    fldcw [rsp]
+
+.irp i, 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
+    lea rcx, [rbx + \i]
+    movq xmm\i, rcx
+    punpcklqdq xmm\i, xmm\i
+.endr
+
+    mov r14d, 50
+
+user_test_fpu_round:
+    /* sched_yield */
+    mov eax, 24
+    syscall
+
+    /* Store every xmm register and compare both quadwords of each. */
+.irp i, 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
+    movdqu [rsp + 16 * \i], xmm\i
+.endr
+
+    xor ecx, ecx
+
+user_test_fpu_compare:
+    lea rdx, [rbx + rcx]
+    mov rax, rcx
+    shl rax, 4
+    cmp [rsp + rax], rdx
+    jne user_test_fpu_fail
+    cmp [rsp + rax + 8], rdx
+    jne user_test_fpu_fail
+    inc ecx
+    cmp ecx, 16
+    jne user_test_fpu_compare
+
+    stmxcsr [rsp]
+    cmp [rsp], r12d
+    jne user_test_fpu_fail
+    fnstcw [rsp]
+    cmp [rsp], r13w
+    jne user_test_fpu_fail
+
+    dec r14d
+    jnz user_test_fpu_round
+
+    /* exit(0) */
+    xor edi, edi
+    mov eax, 60
+    syscall
+    ud2
+
+user_test_fpu_fail:
+    mov edi, 1
+    mov eax, 60
+    syscall
+    ud2
+user_test_fpu_end:
+
 ignis_user_test_table:
     .quad user_test_exit_start, user_test_exit_end
     .quad user_test_registers_start, user_test_registers_end
@@ -358,5 +452,6 @@ ignis_user_test_table:
     .quad user_test_code_write_start, user_test_code_write_end
     .quad user_test_stack_jump_start, user_test_stack_jump_end
     .quad user_test_divide_start, user_test_divide_end
+    .quad user_test_fpu_start, user_test_fpu_end
 
 .section .note.GNU-stack,"",@progbits

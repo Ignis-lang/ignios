@@ -14,6 +14,7 @@
 //! |----------------------|------------------------------|----------------------------------|
 //! | `initializeGdt`      | `Arch::Gdt::initialize`      | `gdt: cs=... tr=...`             |
 //! | `initializeIdt`      | `Arch::Idt::initialize`      | `idt: 50 gates loaded`           |
+//! | `initializeFpu`      | `Arch::Fpu::initialize`      | `fpu: x87 and SSE enabled, ...`  |
 //! | `initializeUserMode` | `Arch::UserMode::initialize` | `usermode: syscall enabled, ...` |
 //!
 //! The order is fixed. The IDT gates name the kernel's code selector, and the
@@ -48,6 +49,18 @@ namespace Trap::Setup {
     Arch::Idt::initialize(Apic::Lapic::spuriousVector());
 
     Drivers::Serial::writeLine("idt: 50 gates loaded");
+  }
+
+  /// Turns on the x87 and SSE units and builds the initial state every
+  /// thread starts with, then logs the control register bits that did it:
+  /// `0x602` is CR0.MP plus CR4.OSFXSR and CR4.OSXMMEXCPT. Must run before
+  /// the first thread is created.
+  function initializeFpu(): void {
+    Arch::Fpu::initialize();
+
+    Drivers::Serial::write("fpu: x87 and SSE enabled, control bits ");
+    Drivers::Serial::writeHex(Arch::Fpu::controlBits());
+    Drivers::Serial::write(", 512-byte FXSAVE area per thread, saved on every switch\n");
   }
 
   /// Sets `IA32_EFER.SCE` and programs `IA32_STAR`, `IA32_LSTAR` and

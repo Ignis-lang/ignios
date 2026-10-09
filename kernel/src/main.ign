@@ -99,6 +99,7 @@ function kmain(): void {
   // IDT on, every CPU exception reaches `Trap::dispatch`.
   Trap::Setup::initializeGdt();
   Trap::Setup::initializeIdt();
+  Trap::Setup::initializeFpu();
 
   // Anything but the revision requested means the responses below cannot be
   // trusted.

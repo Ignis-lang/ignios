@@ -55,6 +55,7 @@
 //! See concept doc 13.
 
 import Arch from "@arch";
+import Lib from "@lib";
 import Mm from "@mm";
 
 /// The thread table. The array size must equal `Sched::Thread::MAX_THREADS`,
@@ -65,6 +66,17 @@ record ThreadState {
 
   /// The id the next created thread gets.
   static mut nextId: u64;
+}
+
+/// The x87 and SSE save areas, one `Arch::Fpu::STATE_SIZE` (512) bytes per
+/// slot, kept apart from the thread table so each one is 16-byte aligned.
+/// Slot `n` owns bytes `n * 512` to `n * 512 + 511`. The size must equal
+/// `MAX_THREADS * 512` and has to be an integer literal. The field has no
+/// comment of its own because `ignis fmt` rejects a comment before an
+/// attributed field.
+record FpuAreaState {
+  @aligned(16)
+  static mut areas: u8[8192];
 }
 
 /// The thread table and the thread stacks.
@@ -184,6 +196,19 @@ namespace Sched::Thread {
     return "free";
   }
 
+  /// The x87 and SSE save area of `slot`, 16-byte aligned. The scheduler
+  /// saves the registers here when the thread is switched out and loads
+  /// them from here when it is switched in.
+  function fpuArea(slot: u64): *mut u8 {
+    return (&mut FpuAreaState::areas as *mut u8) + slot * Arch::Fpu::STATE_SIZE;
+  }
+
+  /// Gives `slot` the initial x87 and SSE state: everything masked, round to
+  /// nearest, empty registers.
+  function resetFpuArea(slot: u64): void {
+    Lib::Mem::copy(fpuArea(slot), Arch::Fpu::initialState() as *u8, Arch::Fpu::STATE_SIZE);
+  }
+
   /// The id of the thread in `slot`. Meaningful when the slot is in use.
   function slotId(slot: u64): u64 {
     return (*slotPointer(slot)).id;
@@ -243,6 +268,7 @@ namespace Sched::Thread {
     (*thread).runTicks = 0;
     (*thread).root = root;
     (*thread).savedRsp = Arch::Context::prepareStack(base + STACK_SPAN, entry, argument);
+    resetFpuArea(slot);
 
     ThreadState::nextId += 1;
 
@@ -319,6 +345,7 @@ namespace Sched::Thread {
 
     (*boot).id = 0;
     (*boot).state = RUNNING;
+    resetFpuArea(BOOT_SLOT);
 
     ThreadState::nextId = 1;
   }

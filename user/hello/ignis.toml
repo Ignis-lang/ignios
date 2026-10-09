@@ -22,16 +22,14 @@ target = "c"
 cc = "clang"
 
 # Like the kernel's flags without the kernel code model (the program is linked
-# at 0x400000) and without -mno-red-zone (interrupts from ring 3 switch to the
-# kernel stack, so the red zone below rsp is safe). SSE, MMX and x87 stay off
-# because the kernel does not save or restore their state when it switches
-# between processes.
+# at 0x400000), without -mno-red-zone (interrupts from ring 3 switch to the
+# kernel stack, so the red zone below rsp is safe) and without -mno-sse and
+# friends: the kernel saves and restores the x87 and SSE registers of every
+# thread on each switch (kernel/src/arch/x86_64/fpu.ign). AVX stays off, the
+# x86-64 baseline target does not enable it, because the kernel saves only the
+# FXSAVE state.
 cflags = [
   "--target=x86_64-unknown-none",
-  "-mno-sse",
-  "-mno-sse2",
-  "-mno-mmx",
-  "-mno-80387",
   "-fno-pic",
   "-fno-pie",
   "-fno-stack-protector",

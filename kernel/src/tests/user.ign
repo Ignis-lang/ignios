@@ -77,6 +77,10 @@ namespace Tests::User {
   /// Index 12: divides by zero.
   const DIVIDE: u64 = 12;
 
+  /// Index 13: fills the x87 and SSE state with a pattern from its pid,
+  /// yields 50 times and checks the state after each yield.
+  const FPU: u64 = 13;
+
   /// What the shell shows for a process that died of SIGSEGV, SIGILL and
   /// SIGFPE: 128 plus 11, 4 and 8.
   const KILLED_BY_SEGV: u64 = 139;
@@ -123,6 +127,7 @@ namespace Tests::User {
     Drivers::Console::writeLine(" timer ticks passed while it ran in ring 3 and every one returned by iretq");
 
     runSyscalls();
+    runFpu();
     runIsolation();
     runHello();
   }
@@ -193,9 +198,24 @@ namespace Tests::User {
     Drivers::Console::writeLine("user: write, getpid, sched_yield, nanosleep, -ENOSYS, -EFAULT, -EBADF and -EINVAL behave as on Linux");
   }
 
-  /// Starts program `index` as a process, waits for it and returns its exit
-  /// status.
-  function runProgram(index: u64): u64 {
+  /// Runs two copies of the FPU program at the same time. They yield to
+  /// each other, so each switch between them has to save one x87 and SSE
+  /// state and restore the other.
+  function runFpu(): void {
+    let first: u64 = startProgram(FPU);
+    let second: u64 = startProgram(FPU);
+    let firstStatus: u64 = Proc::Process::wait(first);
+    let secondStatus: u64 = Proc::Process::wait(second);
+
+    if (firstStatus != 0 || secondStatus != 0) {
+      @panic("user test: the x87 or SSE state of a process changed across a switch");
+    }
+
+    Drivers::Console::writeLine("user: two processes kept their own xmm0-xmm15, MXCSR and x87 control word across 50 yields each");
+  }
+
+  /// Starts program `index` as a process and returns its id.
+  function startProgram(index: u64): u64 {
     let start: u64 = UserTestAsm::ignis_user_test_start(index);
     let size: u64 = UserTestAsm::ignis_user_test_size(index);
 
@@ -205,6 +225,12 @@ namespace Tests::User {
       @panic("user test: cannot start a process");
     }
 
-    return Proc::Process::wait(id);
+    return id;
+  }
+
+  /// Starts program `index` as a process, waits for it and returns its exit
+  /// status.
+  function runProgram(index: u64): u64 {
+    return Proc::Process::wait(startProgram(index));
   }
 }
