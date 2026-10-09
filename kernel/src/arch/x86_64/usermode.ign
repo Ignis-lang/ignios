@@ -60,6 +60,7 @@
 //! See concept doc 14.
 
 import _ from "./cpu";
+import _ from "./cpu_local";
 import _ from "./gdt";
 
 /// Functions implemented in `usermode_asm.S`.
@@ -112,9 +113,12 @@ namespace Arch::UserMode {
   /// user-chosen trap flag, string direction or alignment mode.
   const SYSCALL_FLAG_MASK: u64 = FLAG_TRAP | FLAG_INTERRUPT_ENABLE | FLAG_DIRECTION | FLAG_NESTED_TASK | FLAG_ALIGNMENT_CHECK;
 
-  /// Enables `SYSCALL` and points it at the entry stub. The GDT must be
-  /// loaded.
+  /// Sets up the per-CPU block behind GS, enables `SYSCALL` and points it
+  /// at the entry stub. The GDT must be loaded, and no thread may run in
+  /// ring 3 yet: `setKernelStack` writes through GS.
   function initialize(): void {
+    Arch::CpuLocal::initialize();
+
     let sysretBase: u64 = (Arch::Gdt::USER_DATA - 8) as u64;
 
     if (Arch::Gdt::USER_CODE as u64 != sysretBase + 16) {

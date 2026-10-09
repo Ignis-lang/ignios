@@ -75,8 +75,17 @@ ignis_interrupt_thunk_\vector:
 
 /* The common stub: saves the registers, calls the dispatcher, restores them.
  * Entered by "jmp" from a thunk with [vector, errorCode, rip, cs, rflags, rsp,
- * ss] on the stack. */
+ * ss] on the stack.
+ *
+ * When the saved CS has RPL 3 the interrupt came from ring 3, and GS still
+ * holds the user's base: "swapgs" makes it name the per-CPU block. The way
+ * out looks at the saved CS again, so the swaps stay paired even when the
+ * dispatcher switched threads in between (see cpu_local.ign). */
 ignis_interrupt_common:
+    test qword ptr [rsp + 24], 3
+    jz 1f
+    swapgs
+1:
     push r15
     push r14
     push r13
@@ -120,9 +129,13 @@ ignis_interrupt_common:
     pop r14
     pop r15
 
-    /* Drop the vector and the error code so rsp points at rip, then return
-     * to the interrupted code. */
+    /* Drop the vector and the error code so rsp points at rip, swap GS back
+     * when returning to ring 3, then return to the interrupted code. */
     add rsp, 16
+    test qword ptr [rsp + 8], 3
+    jz 2f
+    swapgs
+2:
     iretq
 
 /* u64 ignis_interrupt_thunk(u64 vector): the entry address of a vector 0-48

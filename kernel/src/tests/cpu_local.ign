@@ -1,0 +1,35 @@
+//!
+//! # Per-CPU Data Self-Test
+//!
+//! Checks that the GS base still names the per-CPU block after ring 3 has
+//! been entered and left many times.
+//!
+//! ## Overview
+//!
+//! In ring 0, `IA32_GS_BASE` must hold the address of the per-CPU block and
+//! `IA32_KERNEL_GS_BASE` the user's GS base, which is 0 for every IgniOS
+//! program. Each way in from ring 3 (`SYSCALL`, an interrupt or exception)
+//! swaps the two with `swapgs`, and each way out swaps them back. A path
+//! that forgets one, or swaps twice, leaves the kernel running on the
+//! user's GS base. The test runs after `Tests::User`, which crossed every
+//! path, and checks the two MSRs and a `gs:` load. Panics on a violation.
+
+import Arch from "@arch";
+import Drivers from "@drivers";
+
+namespace Tests::CpuLocal {
+  /// Checks the GS bases and the self pointer of the per-CPU block.
+  function run(): void {
+    let block: u64 = Arch::CpuLocal::blockAddress();
+
+    if (Arch::CpuLocal::gsBase() != block || Arch::CpuLocal::selfThroughGs() != block) {
+      @panic("cpu local self-test: GS does not name the per-CPU block in ring 0");
+    }
+
+    if (Arch::CpuLocal::userGsBase() != 0) {
+      @panic("cpu local self-test: the saved user GS base is not 0");
+    }
+
+    Drivers::Console::writeLine("cpu local: self-test ok, after ring 3 the kernel GS base is the per-CPU block and the user one is 0");
+  }
+}

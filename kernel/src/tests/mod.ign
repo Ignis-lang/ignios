@@ -18,6 +18,7 @@
 //! | `Tests::Context`      | `context.ign`       | the stack switch, the argument, alignment, registers       |
 //! | `Tests::Scheduler`    | `scheduler.ign`     | round-robin, sleep, slot reuse, CR3 per thread, preemption |
 //! | `Tests::User`         | `user.ign`          | ring 3, `SYSCALL`, process isolation, an ELF module        |
+//! | `Tests::CpuLocal`     | `cpu_local.ign`     | the GS bases are balanced after every way in and out of ring 3 |
 //!
 //! ## Dependencies
 //!
@@ -30,6 +31,7 @@
 
 import _ from "./address_space";
 import _ from "./context";
+import _ from "./cpu_local";
 import _ from "./heap";
 import _ from "./pmm";
 import _ from "./protection";

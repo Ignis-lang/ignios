@@ -20,6 +20,7 @@
 //! | `Arch::ContextAsm`     | `context.ign`         | the routines of `context_asm.S`                 |
 //! | `Arch::UserMode`       | `usermode.ign`        | `SYSCALL` setup and the jump to ring 3          |
 //! | `Arch::Fpu`            | `fpu.ign`             | x87 and SSE on, per-thread `FXSAVE` areas       |
+//! | `Arch::CpuLocal`       | `cpu_local.ign`       | the per-CPU block behind GS and `swapgs`        |
 //! | `Arch::Protection`     | `protection.ign`      | SMEP and SMAP, `stac` and `clac`                |
 //! | `Arch::Probe`          | `probe.ign`           | ring 0 loads and calls that may fault           |
 //! | `Arch::InterruptFrame` | `interrupt_frame.ign` | the registers the entry stubs save              |
@@ -39,6 +40,7 @@
 
 import _ from "./x86_64/context";
 import _ from "./x86_64/cpu";
+import _ from "./x86_64/cpu_local";
 import _ from "./x86_64/fpu";
 import _ from "./x86_64/gdt";
 import _ from "./x86_64/idt";

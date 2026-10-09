@@ -7,11 +7,11 @@
  *
  * Interrupts and exceptions taken in ring 3 are saved by the common stub in
  * interrupt_asm.S on the stack TSS.RSP0 names. SYSCALL does not switch
- * stacks, so the entry stub below does it by hand, with two slots that
- * ignis_set_syscall_kernel_stack and the stub use. The kernel has one CPU, so
- * a plain global is enough. With several CPUs this becomes per-CPU data
- * reached through the GS base: the stub starts with "swapgs", loads the
- * kernel stack from "gs:" and saves the user GS base on the way out.
+ * stacks, so the entry stub below does it by hand through the per-CPU block
+ * (cpu_local_asm.S): "swapgs" makes GS name the block, gs:[16] parks the user
+ * stack pointer and gs:[8] holds the kernel stack to switch to. The way out
+ * swaps GS back right before SYSRETQ, and the first entry to ring 3 swaps it
+ * right before its IRETQ, so ring 3 always runs with its own GS base.
  *
  * The SYSCALL and SYSRET instructions (Intel SDM Vol. 2B, "SYSCALL" and
  * "SYSRET"):
@@ -62,6 +62,11 @@ ignis_enter_user:
     push 0x202
     push 0x23
     push rdi
+
+    /* GS names the per-CPU block in ring 0. Ring 3 gets its own base (0)
+     * and the block goes to IA32_KERNEL_GS_BASE, where the next way back in
+     * swaps it from. */
+    swapgs
 
     /* Zero every general purpose register. Writing a 32-bit register clears
      * the upper half, so "xor r32, r32" is enough and shorter. */
@@ -119,15 +124,17 @@ ignis_enter_user:
  * from a "syscall" instruction in the first place. */
 .global ignis_syscall_entry
 ignis_syscall_entry:
-    /* Interrupts are off (FMASK cleared IF). Park the user rsp in a global
-     * and switch to the kernel stack of the running thread. The global is
-     * read again within a few instructions, before anything could run. */
-    mov [rip + ignis_syscall_user_rsp], rsp
-    mov rsp, [rip + ignis_syscall_kernel_rsp]
+    /* Interrupts are off (FMASK cleared IF). Make GS name the per-CPU block,
+     * park the user rsp in it and switch to the kernel stack of the running
+     * thread. The parked value is read again within a few instructions,
+     * before anything could run. */
+    swapgs
+    mov gs:[16], rsp
+    mov rsp, gs:[8]
 
     /* The processor part of the frame, by hand. */
     push 0x1B
-    push qword ptr [rip + ignis_syscall_user_rsp]
+    push qword ptr gs:[16]
     push r11
     push 0x23
     push rcx
@@ -191,41 +198,26 @@ ignis_syscall_entry:
     /* Canonical: set up what SYSRETQ consumes. RCX already holds the return
      * RIP. R11 gets the saved RFLAGS, and RSP becomes the user stack pointer
      * as the very last step before the return, since the kernel stack is not
-     * needed any more. */
+     * needed any more. GS goes back to the user's base right before the
+     * return, after the last gs: access. */
     mov r11, [rsp + 16]
     mov rsp, [rsp + 24]
+    swapgs
     sysretq
 
 1:
     /* Non-canonical return address: report it and end the process, never
-     * return. The call needs a 16-byte aligned rsp. */
+     * return. GS still names the per-CPU block, as the kernel expects. The
+     * call needs a 16-byte aligned rsp. */
     mov rdi, rcx
     and rsp, -16
     call ignis_syscall_bad_return
     ud2
-
-/* void ignis_set_syscall_kernel_stack(u64 top): the stack the next SYSCALL
- * runs on, the kernel stack of the thread that is about to run. */
-.global ignis_set_syscall_kernel_stack
-ignis_set_syscall_kernel_stack:
-    mov [rip + ignis_syscall_kernel_rsp], rdi
-    ret
 
 /* u64 ignis_syscall_entry_address(void): the value for IA32_LSTAR. */
 .global ignis_syscall_entry_address
 ignis_syscall_entry_address:
     lea rax, [rip + ignis_syscall_entry]
     ret
-
-.section .bss
-
-/* Scratch for the user stack pointer between "syscall" and the pushes. */
-.balign 8
-ignis_syscall_user_rsp:
-    .skip 8
-
-/* Top of the kernel stack the next "syscall" runs on. */
-ignis_syscall_kernel_rsp:
-    .skip 8
 
 .section .note.GNU-stack,"",@progbits

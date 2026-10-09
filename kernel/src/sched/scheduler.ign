@@ -32,8 +32,9 @@
 //! A thread may own an address space, the physical address of a PML4 made by
 //! `Mm::AddressSpace::create`. Every switch loads the incoming thread's PML4, or
 //! the kernel's when it owns none, and points TSS.RSP0 and the `SYSCALL`
-//! stack slot at the incoming thread's kernel stack, so an interrupt or a
-//! system call from ring 3 lands on it. The thread's end destroys the space
+//! stack (`gs:[8]` of the per-CPU block) at the incoming thread's kernel
+//! stack, so an interrupt or a system call from ring 3 lands on it. The
+//! thread's end destroys the space
 //! it owns, right after the switch away from it.
 //!
 //! Every switch also saves the outgoing thread's x87 and SSE registers and

@@ -1,0 +1,100 @@
+//!
+//! # Per-CPU Data
+//!
+//! A small block of data that belongs to the processor rather than to a
+//! thread, reached through the GS segment base.
+//!
+//! ## Overview
+//!
+//! The `SYSCALL` entry starts with nothing it can trust: RSP is still the
+//! user's stack pointer and every general register holds a user value. It
+//! needs one place to park RSP and one place to load the kernel stack from,
+//! and both have to be per processor, because two processors can enter the
+//! kernel at the same time. x86_64 offers the GS base for that: an address
+//! the processor adds to every `gs:` memory operand, set by an MSR.
+//!
+//! Ring 3 may have its own GS base, so there are two MSRs and an instruction
+//! that exchanges them:
+//!
+//! ```text
+//!                       in ring 0              in ring 3
+//!   IA32_GS_BASE        per-CPU block          user GS base (0 here)
+//!   IA32_KERNEL_GS_BASE user GS base (0)       per-CPU block
+//!
+//!   swapgs: exchange the two. Executed once on every way into the kernel
+//!   from ring 3 and once on every way out to ring 3:
+//!
+//!     into ring 0    SYSCALL entry               first instruction
+//!                    interrupt or exception      when the saved CS has RPL 3
+//!     out to ring 3  SYSRET                      right before it
+//!                    IRETQ from the common stub  when the saved CS has RPL 3
+//!                    first entry (ignis_enter_user) right before its IRETQ
+//! ```
+//!
+//! An interrupt from ring 0 does not swap: GS already names the block. The
+//! saved CS decides on the way out too, so a thread switch inside the
+//! handler cannot unbalance it.
+//!
+//! The block layout is defined in `cpu_local_asm.S`. With one processor
+//! there is one block. A second processor would get its own block and its
+//! own `initialize` call.
+//!
+//! An NMI or machine check taken between a `swapgs` and the instruction
+//! that changes privilege would run with the wrong GS base. Both are fatal
+//! in IgniOS (`Trap::Exception`), so the window costs nothing yet. A kernel
+//! that handles them has to find the right base another way, as Linux's
+//! "paranoid entry" does.
+//!
+//! See concept doc 19 and Intel SDM Vol. 2B, "SWAPGS".
+
+import _ from "./cpu";
+
+/// The routines of `cpu_local_asm.S`.
+extern CpuLocalAsm {
+  function ignis_cpu_local_address(): u64;
+
+  function ignis_cpu_local_self(): u64;
+}
+
+/// The per-CPU data API.
+namespace Arch::CpuLocal {
+  /// MSR number of IA32_GS_BASE, the GS base in effect.
+  const GS_BASE_MSR: u32 = 0xC0000101;
+
+  /// MSR number of IA32_KERNEL_GS_BASE, the value `swapgs` exchanges with
+  /// IA32_GS_BASE.
+  const KERNEL_GS_BASE_MSR: u32 = 0xC0000102;
+
+  /// Fills in the self pointer and makes GS name the block: IA32_GS_BASE
+  /// is the block and IA32_KERNEL_GS_BASE, the user's GS base while the
+  /// kernel runs, is 0. Runs once in ring 0, before the first entry to
+  /// ring 3 and after the GDT load, which resets the GS base.
+  function initialize(): void {
+    let block: u64 = blockAddress();
+
+    *(block as *mut u64) = block;
+
+    Arch::Cpu::writeMsr(GS_BASE_MSR, block);
+    Arch::Cpu::writeMsr(KERNEL_GS_BASE_MSR, 0);
+  }
+
+  /// The address of this processor's block.
+  function blockAddress(): u64 {
+    return CpuLocalAsm::ignis_cpu_local_address();
+  }
+
+  /// IA32_GS_BASE. In ring 0 it must be `blockAddress()`.
+  function gsBase(): u64 {
+    return Arch::Cpu::readMsr(GS_BASE_MSR);
+  }
+
+  /// IA32_KERNEL_GS_BASE. In ring 0 it holds the user's GS base.
+  function userGsBase(): u64 {
+    return Arch::Cpu::readMsr(KERNEL_GS_BASE_MSR);
+  }
+
+  /// The self pointer read through `gs:[0]`.
+  function selfThroughGs(): u64 {
+    return CpuLocalAsm::ignis_cpu_local_self();
+  }
+}

@@ -175,6 +175,7 @@ function kmain(): void {
 
   Tests::Scheduler::runPreemptive();
   Tests::User::run();
+  Tests::CpuLocal::run();
 
   // The keyboard is initialized last: its interrupt is live from here on, and
   // the terminal is the first code that consumes it.
