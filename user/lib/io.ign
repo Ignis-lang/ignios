@@ -34,12 +34,20 @@ export namespace Io {
   /// Writes a signed number in decimal. Digits are produced least significant
   /// first into a local buffer of 24 bytes (an `i64` has at most 20 characters)
   /// and written most significant first.
+  ///
+  /// The magnitude of a negative value is computed in `u64` as `0 - value`,
+  /// where the subtraction wraps modulo 2^64. Negating in `i64` instead would
+  /// overflow for the minimum, -2^63, whose magnitude 2^63 has no `i64`.
   function printNumber(value: i64): void {
     let mut digits: u8[24];
     let mut length: u64 = 0;
     let negative: boolean = value < 0;
 
-    let mut magnitude: u64 = negative ? (0 - value) as u64 : value as u64;
+    let mut magnitude: u64 = value as u64;
+
+    if (negative) {
+      magnitude = 0 - magnitude;
+    }
 
     if (magnitude == 0) {
       digits[0] = 0x30;

@@ -12,6 +12,7 @@
 //! | prints its pid           | `getpid` and `write` work                        |
 //! | `seed` is 41, then 42    | `.data` was copied from the ELF file             |
 //! | `counter` is 0, then 1   | `.bss` was zeroed (file size 8, memory size 16)  |
+//! | the i64 minimum          | `Io::printNumber` prints `-9223372036854775808`  |
 //! | `write(1, 0x1, 5)`       | a bad pointer returns `-EFAULT` (-14)            |
 //! | `write(7, ...)`          | a closed descriptor returns `-EBADF` (-9)        |
 //! | syscall 9999             | an unknown call returns `-ENOSYS` (-38)          |
@@ -31,6 +32,10 @@
 
 import Io from "std::io";
 import Sys from "std::sys";
+
+/// The smallest `i64`, -2^63. Its magnitude does not fit an `i64`, which is
+/// the case `Io::printNumber` has to handle without negating the value.
+const I64_MINIMUM: i64 = -9223372036854775807 - 1;
 
 /// The program's global data.
 record Hello {
@@ -81,6 +86,7 @@ function run(): u64 {
     return 2;
   }
 
+  expect("i64 minimum", I64_MINIMUM, I64_MINIMUM, 8);
   expect("write(1, 0x1, 5)", Sys::write(Sys::STDOUT, @pointerFromInteger<*u8>(1), 5), 0 - Sys::EFAULT, 3);
   expect("write(7, ...)", Sys::write(7, "x" as *u8, 1), 0 - Sys::EBADF, 4);
   expect("syscall 9999", Sys::unknown(9999), 0 - Sys::ENOSYS, 5);
