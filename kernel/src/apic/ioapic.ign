@@ -184,12 +184,14 @@ namespace Apic::Ioapic {
 
     let mut low: u32 = vector as u32;
 
+    // Written as `low = low | ...`: the current Ignis compiler emits `|=` as a
+    // logical or, which would turn the entry into vector 1.
     if (activeLow) {
-      low |= ACTIVE_LOW;
+      low = low | ACTIVE_LOW;
     }
 
     if (levelTriggered) {
-      low |= LEVEL_TRIGGERED;
+      low = low | LEVEL_TRIGGERED;
     }
 
     writeRegister(index, FIRST_REDIRECTION_REGISTER + pin * 2 + 1, Apic::Lapic::id() << DESTINATION_SHIFT);
