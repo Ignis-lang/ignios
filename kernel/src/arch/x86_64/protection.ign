@@ -33,7 +33,7 @@
 //! processor does not have raises `#GP`, and so do `stac` and `clac`
 //! (`#UD`) without SMAP.
 //!
-//! See concept doc 18 and Intel SDM Vol. 3A, "Access Rights".
+//! See concept doc 17 and Intel SDM Vol. 3A, "Access Rights".
 
 import _ from "./cpu";
 

@@ -26,6 +26,8 @@ The concept documents explain the x86_64 and kernel background, and this guide r
 | 05 | Interrupt controllers | 13 | Kernel threads and scheduling |
 | 06 | Devices and I/O | 14 | Address spaces and user mode |
 | 07 | Framebuffer console | 15 | System calls and ELF programs |
+| 16 | x87 and SSE state | 17 | SMEP, SMAP and fault probes |
+| 18 | Per-CPU data and `swapgs` | | |
 
 ## The subsystems
 
@@ -79,9 +81,9 @@ All paths are under `kernel/src/` unless they say otherwise. The assembly files 
 
 Read these first. They define what the kernel is made of and how it gets the machine. Concept docs 01 and 02.
 
-**`Makefile`.** The header comment draws the build pipeline. Ignis compiles all of `kernel/src/**/*.ign` to one C file, clang compiles it, clang assembles the `.S` files, `ld.lld` links them with `kernel/linker.ld`, and `mtools` puts the result in a FAT32 disk image. Look at `QEMU_FLAGS` (q35 machine, OVMF firmware as two flash drives, `-no-reboot`) and at the `run-headless` target, which is the quickest way to see a boot. One thing to know: the link order of the `.S` objects follows the order of `find`, so the layout of `build/kernel.elf` can differ between checkouts.
+**`Makefile`.** The header comment draws the build pipeline. Ignis compiles all of `kernel/src/**/*.ign` to one C file, clang compiles it, clang assembles the `.S` files, `ld.lld` links them with `kernel/linker.ld`, and `mtools` puts the result in a FAT32 disk image. Look at `QEMU_FLAGS` (q35 machine, the `max` CPU model so SMEP and SMAP exist, OVMF firmware as two flash drives, `-no-reboot`) and at the `run-headless` target, which is the quickest way to see a boot. One thing to know: the link order of the `.S` objects follows the order of `find`, so the layout of `build/kernel.elf` can differ between checkouts.
 
-**`ignis.toml`.** The Ignis project file. `std = false` means no standard library. The `cflags` comment explains each clang flag (no red zone, no SSE, kernel code model, no stack protector). Doc 02.
+**`ignis.toml`.** The Ignis project file. `std = false` means no standard library. The `cflags` comment explains each clang flag (no red zone, no SSE, kernel code model, no stack protector). The kernel never uses SSE, user programs may: `user/hello/ignis.toml` leaves it on. Doc 02.
 
 **`kernel/linker.ld`.** Puts the kernel at `0xffffffff80000000` in three segments (text, rodata, data) with the page-aligned boundary symbols `__text_start` and so on. The table in the header shows the layout. `Mm::Vmm::mapKernelImage` uses these symbols to map each segment with its own permissions. Doc 01.
 
@@ -117,7 +119,7 @@ Read these first. They define what the kernel is made of and how it gets the mac
 
 Read `gdt.ign` before `idt.ign`, because the IDT gates name a GDT selector and the double fault gate names a TSS stack. Docs 03 and 04.
 
-**`arch/x86_64/cpu.ign`.** Short wrappers for `cli`, `sti`, `hlt`, `rdmsr`, `wrmsr` and control registers. `saveAndDisableInterrupts` and `restoreInterrupts` are the kernel's only mutual exclusion: with one processor, interrupts off means nothing else runs. Doc 02.
+**`arch/x86_64/cpu.ign`.** Short wrappers for `cli`, `sti`, `hlt`, `rdmsr`, `wrmsr`, `cpuid` and control registers. `saveAndDisableInterrupts` and `restoreInterrupts` are the kernel's only mutual exclusion: with one processor, interrupts off means nothing else runs. Doc 02.
 
 **`arch/x86_64/gdt.ign` and `gdt_asm.S`.** The GDT has five entries and the TSS descriptor. The header decodes every descriptor value bit by bit and draws the TSS. The selector order (kernel code, kernel data, user data, user code) is the order `SYSCALL` and `SYSRET` need. `gdt_asm.S` reloads `CS` with a far return, because `CS` cannot be loaded with `mov`. Doc 03.
 
@@ -125,7 +127,11 @@ Read `gdt.ign` before `idt.ign`, because the IDT gates name a GDT selector and t
 
 **`arch/x86_64/interrupt_asm.S`.** One thunk per vector, then one common stub. The header draws what the stack looks like when the dispatcher runs, which is the `Arch::InterruptFrame` record of `interrupt_frame.ign`. Notice that the thunk pushes a dummy error code for the vectors where the CPU pushes none, so the frame has one shape. Doc 04.
 
-**`trap/dispatch.ign`, `trap/exception.ign` and `trap/setup.ign`.** `Trap::dispatch` is the one place every vector arrives. The header diagram shows the routing. `exception.ign` has the table of exceptions: read `killUserProcess` and `isUserFault` for the rule that a fault in ring 3 kills the process and a fault in ring 0 halts the machine. `setup.ign` has the three boot steps that install the GDT, the IDT and the `SYSCALL` registers and log what they did. Doc 04.
+**`trap/dispatch.ign`, `trap/exception.ign` and `trap/setup.ign`.** `Trap::dispatch` is the one place every vector arrives. The header diagram shows the routing. `exception.ign` has the table of exceptions: read `killUserProcess` and `isUserFault` for the rule that a fault in ring 3 kills the process and a fault in ring 0 halts the machine. `setup.ign` has the boot steps that install the GDT, the IDT, the x87 and SSE units, SMEP and SMAP and the `SYSCALL` registers and log what they did. `dispatch` starts with `clac`, because an interrupt from ring 3 keeps the user's AC flag, and asks `Arch::Probe::recover` before it treats a ring 0 fault as fatal. Doc 04.
+
+**`arch/x86_64/fpu.ign`.** Turns on the x87 and SSE units (CR0 and CR4 bits in the header table) and saves and restores them with `fxsave64` and `fxrstor64`. The scheduler calls `save` and `restore` on every switch, so each thread has its own vector and floating point registers. The header explains why the switch is eager and not lazy. Doc 16.
+
+**`arch/x86_64/protection.ign`, `probe.ign` and `probe_asm.S`.** SMEP and SMAP: ring 0 may not run or touch user pages. `allowUserAccess` and `forbidUserAccess` (`stac` and `clac`) open and close the window for code that has to read a user address directly. The probes are the two places where a ring 0 fault is not fatal: `Arch::Probe::recover` moves the saved RIP past the fault, which is how the self-test checks that SMEP and SMAP fault. Doc 17.
 
 ## Part 5. Memory
 
@@ -133,13 +139,13 @@ Read in this order: `hhdm`, `pmm`, `vmm`, `heap`, `address_space`. Each uses the
 
 **`boot/hhdm.ign`.** Physical address `p` is at `offset + p` in the higher half direct map. Two functions. Doc 09.
 
-**`mm/pmm.ign`.** The frame allocator, a bitmap with one bit per 4 KiB frame. The header shows how a bit maps to a frame number and an address, and where the bitmap itself is placed. A second bitmap marks the frames the allocator manages, so freeing a frame that was never usable panics instead of adding firmware or kernel memory to the free list. Frame 0 is never handed out so address 0 can mean "no frame". Doc 08.
+**`mm/pmm.ign`.** The frame allocator, a bitmap with one bit per 4 KiB frame. The header shows how a bit maps to a frame number and an address, and where the bitmap itself is placed. A second bitmap marks the frames the allocator manages, so freeing a frame that was never usable panics instead of adding firmware or kernel memory to the free list. `allocateLargeFrame` hands out 2 MiB aligned runs of 512 frames. Frame 0 is never handed out so address 0 can mean "no frame". Doc 08.
 
 **`mm/vmm.ign`.** The page tables. This is the longest explanation in the tree. The header shows the address split (9+9+9+9+12 bits), the page table entry bits, the PAT memory types and the virtual address space map. `initialize` has the numbered order of operations. The `*In` functions work on any PML4, which is what lets the same code build a process address space. Doc 09.
 
 **`mm/heap.ign`.** A first-fit allocator over a region that grows on demand. The header draws the 16-byte block header, the address-ordered free list, how an aligned request splits a block and how a free merges neighbours. The compiler's allocation handlers (`onAllocate` and `onFree`) at the end of the namespace are what escaping closures use. Doc 10.
 
-**`mm/address_space.ign`.** One PML4 per process. The lower half is private and the upper half is a copy of the kernel's 256 entries, so kernel mappings made later still show up in every process. The user-pointer functions (`copyFromUser` and the others) translate through the process page tables instead of dereferencing a user address. Doc 14.
+**`mm/address_space.ign`.** One PML4 per process. The lower half is private and the upper half is a copy of the kernel's 256 entries, so kernel mappings made later still show up in every process. The user-pointer functions (`copyFromUser` and the others) translate through the process page tables instead of dereferencing a user address, which is why SMAP costs the kernel nothing. A process may also hold 2 MiB pages (`mapLargePage`), and `destroy` frees them as their 512 frames. Doc 14.
 
 ## Part 6. ACPI, APIC and the timer
 
@@ -173,9 +179,9 @@ Doc 13.
 
 **`arch/x86_64/context.ign` and `context_asm.S`.** The context switch. A thread that is not running is a saved stack pointer. The header of `context_asm.S` draws the stack of a thread that has never run, and the trampoline that starts it. A switch is an ordinary function call that pushes six registers, swaps `rsp` and pops six registers. It must run with interrupts off.
 
-**`sched/thread.ign`.** The thread table: one slot per thread, its state and its stack. The header has the state diagram and the layout of a thread stack with its guard page.
+**`sched/thread.ign`.** The thread table: one slot per thread, its state and its stack, and the 512-byte x87 and SSE area of each slot. The header has the state diagram and the layout of a thread stack with its guard page.
 
-**`sched/scheduler.ign`.** The run queue, sleeping and the timer-driven preemption. The header has the call chain from the timer interrupt to a switch. Look at how a dead thread's stack is freed by the next thread (`reapZombie`), because a thread cannot free the stack it is running on. Sleeping and waking are here and not in a file of their own, because `sleep` calls `switchToNext` and `switchToNext` calls the wake-up scan.
+**`sched/scheduler.ign`.** The run queue, sleeping and the timer-driven preemption. The header has the call chain from the timer interrupt to a switch. Look at how a dead thread's stack is freed by the next thread (`reapZombie`), because a thread cannot free the stack it is running on. Sleeping and waking are here and not in a file of their own, because `sleep` calls `switchToNext` and `switchToNext` calls the wake-up scan. `join` blocks a thread until another one is gone: the thread that frees the dead one (`reapZombie`) makes its waiters ready, so a waiter runs once, not once per tick. `switchToNext` also swaps the x87 and SSE state.
 
 **`shell/terminal.ign`.** The terminal loop the boot thread becomes. It is the clearest example of the `cli`, check, `sti; hlt` pattern that avoids a lost wakeup: the queue is tested with interrupts off so a key cannot arrive between the test and the sleep.
 
@@ -185,9 +191,11 @@ Doc 13.
 
 Docs 14 and 15.
 
-**`arch/x86_64/usermode.ign` and `usermode_asm.S`.** How the CPU enters and leaves ring 3. `ignis_enter_user` builds an `iretq` frame. `initialize` programs `IA32_STAR`, `IA32_LSTAR` and `IA32_FMASK`, and the header shows the bit fields. The `SYSCALL` entry stub in `usermode_asm.S` is the most delicate code in the tree: it switches stacks by hand, builds the same frame the interrupt stub builds, and refuses to execute `SYSRET` with a non-canonical return address.
+**`arch/x86_64/usermode.ign` and `usermode_asm.S`.** How the CPU enters and leaves ring 3. `ignis_enter_user` builds an `iretq` frame. `initialize` programs `IA32_STAR`, `IA32_LSTAR` and `IA32_FMASK`, and the header shows the bit fields. The `SYSCALL` entry stub in `usermode_asm.S` is the most delicate code in the tree: it switches stacks by hand through the per-CPU block, builds the same frame the interrupt stub builds, and refuses to execute `SYSRET` with a non-canonical return address.
 
-**`proc/process.ign`.** The process table. A process is a slot plus a kernel thread that owns the address space. The header draws the lifetime from `startElf` to `wait`.
+**`arch/x86_64/cpu_local.ign` and `cpu_local_asm.S`.** The per-CPU block behind the GS base. The header has the table of the two GS MSRs in ring 0 and ring 3, and the list of every place that runs `swapgs`: the `SYSCALL` entry and exit, the interrupt stub when the saved CS is ring 3, and the first entry to ring 3. Doc 18.
+
+**`proc/process.ign`.** The process table. A process is a slot plus a kernel thread that owns the address space. The header draws the lifetime from `startElf` to `wait`, which blocks in `Sched::Scheduler::join` until the process thread is gone.
 
 **`syscall/dispatch.ign`, `operation.ign` and `linux/`.** Two-step dispatch: the call number maps to an operation through a per-process table, then the operation runs. `dispatch.ign` draws the flow, `operation.ign` has the ABI independent operations, `linux/table.ign` lists the calls and `linux/write.ign` and `linux/nanosleep.ign` are the handlers. Every user pointer goes through `Mm::AddressSpace::copyFromUser` or `copyToUser`, and a bad one is `-EFAULT`.
 
@@ -199,7 +207,7 @@ Docs 14 and 15.
 
 ## Part 10. Boot self-tests
 
-**`tests/`.** One file per check, run by `kmain` where the subsystem is ready. Each prints one line and panics on the first violation, so a boot that continues has passed it. The tests use only the public functions of the subsystems. `pmm.ign`, `vmm.ign`, `heap.ign`, `address_space.ign`, `timer.ign` and `context.ign` check the primitives. `scheduler.ign` runs round-robin order, sleeping, a full table, one address space per thread and preemption of threads that never yield. `user.ign` and `arch/x86_64/user_test_asm.S` hold thirteen throwaway ring 3 programs. Four behave (exit, registers, spin, system calls) and nine do something forbidden. The kernel must kill each of the nine with the right status.
+**`tests/`.** One file per check, run by `kmain` where the subsystem is ready. Each prints one line and panics on the first violation, so a boot that continues has passed it. The tests use only the public functions of the subsystems. `pmm.ign`, `vmm.ign`, `heap.ign`, `address_space.ign`, `timer.ign` and `context.ign` check the primitives, `address_space.ign` including a 2 MiB user page. `protection.ign` checks that SMAP and SMEP fault. `scheduler.ign` runs round-robin order, sleeping, a full table, one address space per thread and preemption of threads that never yield. `user.ign` and `arch/x86_64/user_test_asm.S` hold fifteen throwaway ring 3 programs. Six behave (exit, registers, spin, system calls, the x87 and SSE check that runs as two processes, and a 200 ms nap that `wait` must block on) and nine do something forbidden. The kernel must kill each of the nine with the right status. `cpu_local.ign` runs last and checks that every way in and out of ring 3 left the GS bases balanced.
 
 ## Part 11. Scripts
 
@@ -249,7 +257,7 @@ Paging is set up in `mm/vmm.ign`. The kernel uses one PML4 entry per region so t
 | Test page | `0xFFFFE00000000000` | `Tests::Vmm::run` | Mapped and unmapped by the tests. |
 | Kernel image | `0xFFFFFFFF80000000` | `Mm::Vmm::mapKernelImage` | Text is read and execute, rodata is read, data and bss are read and write. |
 
-Physical memory is not drawn because it depends on the machine. `Mm::Pmm` takes it from the Limine memory map: only `usable` regions are handed out, frame 0 is never handed out, and the bitmap sits in the first usable region at or above 1 MiB that is large enough.
+Physical memory is not drawn because it depends on the machine. `Mm::Pmm` takes it from the Limine memory map: only `usable` regions are handed out, frame 0 is never handed out, and the two bitmaps sit in the first usable region at or above 1 MiB that is large enough.
 
 ## Three paths worth tracing
 
@@ -259,11 +267,11 @@ Follow each one with the code open. They connect the parts above.
 |---|---|
 | A key press | keyboard, 8042, IRQ1, IOAPIC pin 1, vector `0x21`, `interrupt_asm.S` thunk 33, `Trap::dispatch`, `Drivers::Ps2::handleInterrupt`, `Lib::ScancodeQueue::push`, `Apic::Lapic::endOfInterrupt`. Later `Shell::Terminal::run` pops the byte and `Drivers::Keyboard::decode` turns it into a character. |
 | A preemption | LAPIC timer, vector `0x30`, `Trap::dispatch`, `Time::Timer::handleTick`, `Apic::Lapic::endOfInterrupt`, `Sched::Scheduler::onTick`, `switchToNext`, `Arch::Context::switchTo`, `ignis_switch_context`. The other thread returns from its own `switchTo` and finishes its own interrupt. |
-| A system call | `syscall` in ring 3, `ignis_syscall_entry`, `Syscall::dispatch`, `Syscall::Linux::write`, `Mm::AddressSpace::copyFromUser`, `Drivers::Console::writeChar`, `sysretq`. |
+| A system call | `syscall` in ring 3, `ignis_syscall_entry` (`swapgs`, the kernel stack from `gs:[8]`), `Syscall::dispatch`, `Syscall::Linux::write`, `Mm::AddressSpace::copyFromUser`, `Drivers::Console::writeChar`, `swapgs`, `sysretq`. |
 
 ## The boot log, line by line
 
-This is the serial log of `make run-headless` (`build/serial.log`) on the QEMU q35 machine with OVMF and 256 MiB of RAM. Values such as addresses, tick counts and the number of switches vary between runs and machines, and the explanation says when a value is fixed by the code. "Serial only" marks lines that `kmain` writes to COM1 before the console exists or deliberately not to the screen. Every other line is on the screen too.
+This is the serial log of `make run-headless` (`build/serial.log`) on the QEMU q35 machine with the `max` CPU model, OVMF and 256 MiB of RAM. Values such as addresses, tick counts and the number of switches vary between runs and machines, and the explanation says when a value is fixed by the code. "Serial only" marks lines that `kmain` writes to COM1 before the console exists or deliberately not to the screen. Every other line is on the screen too.
 
 The log starts with firmware output (terminal escape sequences and `BdsDxe: loading Boot0002 ...`). It comes from OVMF before Limine runs and is not the kernel.
 
@@ -284,6 +292,11 @@ idt: 50 gates loaded
 ```
 `Arch::Idt::initialize` filled 49 gates (vectors 0 to 48) and the spurious vector 255. The text is a constant in `Trap::Setup::initializeIdt`, not a count. Doc 04.
 
+```text
+fpu: x87 and SSE enabled, control bits 0x0000000000000602, 512-byte FXSAVE area per thread, saved on every switch
+```
+`Trap::Setup::initializeFpu`. `0x602` combines CR0.MP (`0x2`) with CR4.OSFXSR (`0x200`) and CR4.OSXMMEXCPT (`0x400`); CR0.EM and CR0.TS are clear. The initial x87 and SSE state every thread starts from was saved right after. Doc 16.
+
 ### The screen comes up
 
 ```text
@@ -297,21 +310,21 @@ framebuffer: 1280x800, pitch 5120, bpp 32, 160x50 cells
 `Drivers::Console::reportFramebuffer`. From the Limine framebuffer: 1280 by 800 pixels, 5120 bytes per row (1280 x 4, no padding here), 32 bits per pixel. The console grid is 1280 / 8 = 160 columns by 800 / 16 = 50 rows. Doc 07.
 
 ```text
-memory map: 36 entries, hhdm offset 0xffff800000000000
+memory map: 35 entries, hhdm offset 0xffff800000000000
 ```
-`Mm::Pmm::reportMemoryMap`. The Limine memory map has 36 entries. `0xffff800000000000` is where physical address 0 appears in virtual memory (the direct map). Doc 08.
+`Mm::Pmm::reportMemoryMap`. The Limine memory map has 35 entries (the firmware's layout, which depends on the CPU model). `0xffff800000000000` is where physical address 0 appears in virtual memory (the direct map). Doc 08.
 
 ### Memory
 
 ```text
-pmm: 54015 usable frames, 54011 free (210 MiB)
+pmm: 53469 usable frames, 53465 free (208 MiB)
 ```
-`Mm::Pmm::initialize` counted 54015 usable 4 KiB frames, and `Mm::Pmm::report` printed the line. Four are already taken: they hold the two bitmaps, used and managed (2 x 1024 words of 8 bytes = 16 KiB = 4 frames). The size in MiB is `free * 4 / 1024` with integer division. Doc 08.
+`Mm::Pmm::initialize` counted 53469 usable 4 KiB frames, and `Mm::Pmm::report` printed the line. Four are already taken: they hold the two bitmaps, used and managed (2 x 1024 words of 8 bytes = 16 KiB = 4 frames). The size in MiB is `free * 4 / 1024` with integer division. Doc 08.
 
 ```text
 pmm: self-test ok
 ```
-`Tests::Pmm::run` allocated and freed 8 frames and checked alignment, uniqueness, the free count and reuse.
+`Tests::Pmm::run` allocated and freed 8 frames and checked alignment, uniqueness, the free count and reuse, and that `isAllocated` is false for the kernel image's first frame, which was never usable.
 
 ```text
 vmm: cr3 switched, cr3 0x0000000000001000, pml4 0x0000000000001000
@@ -324,9 +337,9 @@ vmm: self-test ok
 `Tests::Vmm::run` mapped a frame at a test address, wrote through it, read it through the direct map, and unmapped it.
 
 ```text
-modules: hello is /hello.elf, 13152 bytes at 0xffff80000bf68000
+modules: hello is /hello.elf, 13152 bytes at 0xffff80000a0e8000
 ```
-The Limine module from `boot/limine.conf`. `hello` is the `module_string`, `/hello.elf` the path. `Mm::Modules::initialize` mapped its pages read only. The address is in the direct map, so the file sits at physical `0x0bf68000`. Doc 15.
+The Limine module from `boot/limine.conf`. `hello` is the `module_string`, `/hello.elf` the path. `Mm::Modules::initialize` mapped its pages read only. The address is in the direct map, so the file sits at physical `0x0a0e8000`. Doc 15.
 
 ```text
 heap: self-test ok, 1092 KiB mapped, 0 bytes in use
@@ -336,12 +349,18 @@ heap: self-test ok, 1092 KiB mapped, 0 bytes in use
 ```text
 address space: self-test ok, private user half, shared kernel half, frames returned
 ```
-`Tests::AddressSpace::run` created two spaces, checked that the lower half is private and the upper half shared (including a mapping made after the spaces existed), switched CR3 between them, and destroyed them without leaking frames. Doc 14.
+`Tests::AddressSpace::run` created two spaces, checked that the lower half is private and the upper half shared (including a mapping made after the spaces existed), switched CR3 between them, mapped a 2 MiB user page in a third space, and destroyed them all without leaking frames. Doc 14.
 
 ```text
-usermode: syscall enabled, star 0x0010000800000000, lstar 0xffffffff800112fc, fmask 0x0000000000044700
+protection: smep on, smap on
+protection: self-test ok, a ring 0 read of a user page faulted and worked inside stac/clac, a ring 0 call into a user page faulted
 ```
-Serial only. `Trap::Setup::initializeUserMode` called `Arch::UserMode::initialize`, which set `EFER.SCE` and wrote three MSRs. `star` is `(0x10 << 48) | (0x08 << 32)`: `SYSCALL` loads CS `0x08`, `SYSRET` loads CS `0x23` and SS `0x1B`. `lstar` is the address of the entry stub and changes with every build. `fmask` `0x44700` is the flags `SYSCALL` clears: TF, IF, DF, NT and AC. Doc 14.
+`Trap::Setup::initializeProtection` set CR4.SMEP and CR4.SMAP, which CPUID leaf 7 reports on this CPU model ("not supported" otherwise). `Tests::Protection::run` mapped one user page and probed it from ring 0: the read faulted with error `0x1`, the same read between `stac` and `clac` worked, and the call faulted with error `0x11` (instruction fetch). Doc 17.
+
+```text
+usermode: syscall enabled, star 0x0010000800000000, lstar 0xffffffff80012dff, fmask 0x0000000000044700
+```
+Serial only. `Trap::Setup::initializeUserMode` called `Arch::UserMode::initialize`, which pointed the GS base at the per-CPU block (doc 18), set `EFER.SCE` and wrote three MSRs. `star` is `(0x10 << 48) | (0x08 << 32)`: `SYSCALL` loads CS `0x08`, `SYSRET` loads CS `0x23` and SS `0x1B`. `lstar` is the address of the entry stub and changes with every build. `fmask` `0x44700` is the flags `SYSCALL` clears: TF, IF, DF, NT and AC. Doc 14.
 
 ### ACPI and interrupt controllers
 
@@ -392,7 +411,7 @@ Both 8259 mask registers read back all ones, so the legacy controller delivers n
 ### Timer and scheduler
 
 ```text
-timer: calibrated on PIT channel 2: 62542704 Hz (divide 16), initial count 625427, 100 Hz periodic, vector 0x0000000000000030
+timer: calibrated on PIT channel 2: 62605844 Hz (divide 16), initial count 626058, 100 Hz periodic, vector 0x0000000000000030
 ```
 `Time::Timer::initialize` measured the APIC timer over 50 ms of PIT time. It counts at about 62.5 MHz at the divide-by-16 setting. The initial count is that rate divided by 100, so the timer interrupts every 10 ms on vector `0x30`. The numbers differ between runs. Doc 12.
 
@@ -439,7 +458,7 @@ Program 1 loaded patterns into 12 registers, called an unknown system call, and 
 
 ```text
 process 3 exited with status 7
-user: 7 timer ticks passed while it ran in ring 3 and every one returned by iretq
+user: 8 timer ticks passed while it ran in ring 3 and every one returned by iretq
 ```
 Program 2 counted down 2^27 in ring 3. The number of ticks varies (a few). Each timer interrupt entered the kernel on `TSS.RSP0` and came back by `iretq`.
 
@@ -452,52 +471,66 @@ user: write, getpid, sched_yield, nanosleep, -ENOSYS, -EFAULT, -EBADF and -EINVA
 Program 3 wrote its message twice, once to descriptor 1 and once to descriptor 2 (both go to the console), and checked every system call and error value. Doc 15.
 
 ```text
-process 5 faulted: #PF Page Fault at rip 0x0000000000400000, error 0x0000000000000006, address 0x0000000000000000
-process 5 killed, status 139
+process 5 exited with status 0
+process 6 exited with status 0
+user: two processes kept their own xmm0-xmm15, MXCSR and x87 control word across 50 yields each
+```
+`Tests::User::runFpu` started program 13 twice. Each copy loaded a pattern made from its pid into the sixteen XMM registers, the MXCSR rounding bits and the x87 control word, then yielded to the other 50 times and checked everything after each yield. Doc 16.
+
+```text
+process 7 exited with status 5
+process 8 exited with status 42
+user: wait blocked until the process was gone, 5 switches for a 200 ms process, none for one that had already ended
+```
+`Tests::User::runWait`. Program 14 slept 200 ms (20 ticks) with `nanosleep` and exited with 5. Waiting for it cost a handful of switches, where waking once per tick would cost about 40. Program 0 then ran and was cleaned up before `wait` was called, so that wait returned 42 without blocking. Doc 13.
+
+```text
+process 9 faulted: #PF Page Fault at rip 0x0000000000400000, error 0x0000000000000006, address 0x0000000000000000
+process 9 killed, status 139
 ```
 Program 4 wrote to address 0. Error code `0x6` is write (bit 1) and user (bit 2) with the page not present (bit 0 clear). Status 139 is 128 + 11, SIGSEGV. `Trap::Exception::killUserProcess` printed the first line. Doc 04.
 
 ```text
-process 6 faulted: #GP General Protection Fault at rip 0x0000000000400000, error 0x0000000000000000
-process 6 killed, status 139
-process 7 faulted: #GP General Protection Fault at rip 0x0000000000400000, error 0x0000000000000000
-process 7 killed, status 139
+process 10 faulted: #GP General Protection Fault at rip 0x0000000000400000, error 0x0000000000000000
+process 10 killed, status 139
+process 11 faulted: #GP General Protection Fault at rip 0x0000000000400000, error 0x0000000000000000
+process 11 killed, status 139
 ```
 Programs 5 and 6 ran `hlt` and `cli` at their first byte. Both are privileged, so ring 3 gets a general protection fault.
 
 ```text
-process 8 faulted: #UD Invalid Opcode at rip 0x0000000000400000
-process 8 killed, status 132
+process 12 faulted: #UD Invalid Opcode at rip 0x0000000000400000
+process 12 killed, status 132
 ```
 Program 7 ran `ud2`. #UD has no error code, so none is printed. 132 is 128 + 4, SIGILL.
 
 ```text
-process 9 faulted: #PF Page Fault at rip 0x000000000040000a, error 0x0000000000000005, address 0xffff800000000000
-process 9 killed, status 139
+process 13 faulted: #PF Page Fault at rip 0x000000000040000a, error 0x0000000000000005, address 0xffff800000000000
+process 13 killed, status 139
 ```
 Program 8 read kernel memory. The address is mapped, but without the user bit. Error `0x5` is user (bit 2) and protection violation (bit 0). `rip` is `0x40000a` because the load follows a 10-byte `mov`.
 
 ```text
-process 10 faulted: #GP General Protection Fault at rip 0x0000000000400006, error 0x0000000000000000
-process 10 killed, status 139
+process 14 faulted: #GP General Protection Fault at rip 0x0000000000400006, error 0x0000000000000000
+process 14 killed, status 139
 ```
 Program 9 executed `out dx, al` to port `0x3F8`. The TSS has no I/O permission bitmap, so ring 3 may not touch any port.
 
 ```text
-process 11 faulted: #PF Page Fault at rip 0x0000000000400007, error 0x0000000000000007, address 0x0000000000400007
-process 11 killed, status 139
+process 15 faulted: #PF Page Fault at rip 0x0000000000400007, error 0x0000000000000007, address 0x0000000000400007
+process 15 killed, status 139
 ```
 Program 10 wrote to its own code page. Error `0x7` is write, user and protection violation. The page is read and execute, so the write fails.
 
 ```text
-process 12 faulted: #PF Page Fault at rip 0x00007fffffffeff8, error 0x0000000000000015, address 0x00007fffffffeff8
-process 12 killed, status 139
+process 16 faulted: #PF Page Fault at rip 0x00007fffffffeff8, error 0x0000000000000015, address 0x00007fffffffeff8
+process 16 killed, status 139
 ```
 Program 11 jumped to its stack. The stack pointer starts at the stack top minus 8, `0x7FFFFFFFEFF8`. Error `0x15` is instruction fetch (bit 4), user (bit 2) and protection violation (bit 0): the stack is no-execute.
 
 ```text
-process 13 faulted: #DE Divide Error at rip 0x0000000000400009
-process 13 killed, status 136
+process 17 faulted: #DE Divide Error at rip 0x0000000000400009
+process 17 killed, status 136
 ```
 Program 12 divided by zero. 136 is 128 + 8, SIGFPE.
 
@@ -509,26 +542,32 @@ user: isolation ok, a null write, hlt, cli, ud2, a kernel read, port I/O, a writ
 ### The ELF program
 
 ```text
-elf: PT_LOAD 0x0000000000400000 file 1682 mem 1682 r-x
-elf: PT_LOAD 0x0000000000401000 file 167 mem 167 r--
+elf: PT_LOAD 0x0000000000400000 file 2082 mem 2082 r-x
+elf: PT_LOAD 0x0000000000401000 file 179 mem 179 r--
 elf: PT_LOAD 0x0000000000402000 file 8 mem 16 rw-
 elf: 3 segments, 3 pages, entry 0x0000000000400000, stack top 0x00007ffffffff000
 ```
 `Proc::Process::startElf` loaded `hello.elf`. One line per segment: address, bytes copied from the file, bytes in memory, permissions. The data segment has 8 file bytes and 16 memory bytes, so the last 8 are zero (`.bss`). The last line is the summary. Doc 15.
 
 ```text
-hello from user mode, pid 14
+hello from user mode, pid 18
 data 42, bss 0 then 1
+i64 minimum = -9223372036854775808
 write(1, 0x1, 5) = -14
 write(7, ...) = -9
 syscall 9999 = -38
 sleep(0.05 s) = 0
 yield() = 0
 goodbye from user mode
-process 14 exited with status 0
+process 18 exited with status 0
 user: hello from a static ELF64 module loaded by Limine ran and exited with status 0
 ```
-The output of `user/hello/src/main.ign`. It is process 14, after the 13 test programs. `data 42` shows `.data` was loaded (41 plus 1), `bss 0 then 1` shows `.bss` was zeroed. The three negative results are `-EFAULT`, `-EBADF` and `-ENOSYS`.
+The output of `user/hello/src/main.ign`. It is process 18, after the 17 test processes. `data 42` shows `.data` was loaded (41 plus 1), `bss 0 then 1` shows `.bss` was zeroed. The i64 minimum line checks that `Io::printNumber` negates in `u64`, where -2^63 has a magnitude. The three negative results are `-EFAULT`, `-EBADF` and `-ENOSYS`.
+
+```text
+cpu local: self-test ok, after ring 3 the kernel GS base is the per-CPU block and the user one is 0
+```
+`Tests::CpuLocal::run`, after every way in and out of ring 3 has run many times: `IA32_GS_BASE` still names the per-CPU block, a `gs:[0]` load returns the block's own address, and `IA32_KERNEL_GS_BASE`, the user's base while the kernel runs, is 0. A missing or extra `swapgs` anywhere would break this. Doc 18.
 
 ### The terminal
 

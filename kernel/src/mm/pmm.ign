@@ -303,7 +303,7 @@ namespace Mm::Pmm {
     return PmmState::freeFrames;
   }
 
-  /// Prints the frame counts: `pmm: 54015 usable frames, 54013 free (210 MiB)`.
+  /// Prints the frame counts: `pmm: 53469 usable frames, 53465 free (208 MiB)`.
   function report(): void {
     Drivers::Console::write("pmm: ");
     Drivers::Console::writeDecimal(totalFrames());

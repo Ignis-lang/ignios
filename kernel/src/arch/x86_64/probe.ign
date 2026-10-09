@@ -31,7 +31,7 @@
 //! faults). They run with interrupts disabled, so no other code can fault
 //! while a probe is armed.
 //!
-//! See concept doc 18.
+//! See concept doc 17.
 
 import _ from "./interrupt_frame";
 

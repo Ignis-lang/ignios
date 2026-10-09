@@ -53,7 +53,7 @@
 //! `initialize` builds that state once and saves it as a template that
 //! `initialState` returns and the thread table copies into each new slot.
 //!
-//! See concept doc 17.
+//! See concept doc 16.
 
 import _ from "./cpu";
 

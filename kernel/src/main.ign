@@ -28,6 +28,7 @@
 //!   ├─ Drivers::Serial::initialize ........ COM1 up, first log line       drivers/   doc 06
 //!   ├─ Trap::Setup::initializeGdt ......... own GDT, TSS, CS/SS/DS        trap/      doc 03
 //!   ├─ Trap::Setup::initializeIdt ......... 50 gates (49 thunks + spur.)  trap/      doc 04
+//!   ├─ Trap::Setup::initializeFpu ......... x87 and SSE on, initial state trap/      doc 16
 //!   ├─ Boot::Limine::require* ............. base revision, framebuffer    boot/      doc 01
 //!   ├─ Drivers::Console::initialize ....... framebuffer text console      drivers/   doc 07
 //!   ├─ banner, framebuffer, memory map lines
@@ -36,8 +37,10 @@
 //!   ├─ Mm::Modules::initialize ............ map Limine modules            mm/        doc 15
 //!   ├─ Mm::Heap::initialize + Tests::Heap . kernel heap                   mm/        doc 10
 //!   ├─ Tests::AddressSpace ................ private user halves           mm/        doc 14
+//!   ├─ Trap::Setup::initializeProtection +
+//!   │  Tests::Protection .................. SMEP and SMAP on, probed      trap/      doc 17
 //!   ├─ Sched::Scheduler::initialize, Proc::Process::initialize, Syscall::initialize
-//!   ├─ Trap::Setup::initializeUserMode .... EFER.SCE, STAR/LSTAR/FMASK    trap/      doc 14
+//!   ├─ Trap::Setup::initializeUserMode .... GS base, EFER.SCE, MSRs       trap/      doc 14, 18
 //!   ├─ Acpi::initialize/report ............ RSDP, XSDT, MADT              acpi/      doc 12
 //!   ├─ Arch::Pic::initialize .............. remap and mask the 8259       arch/      doc 05
 //!   ├─ Apic::Lapic::initialize ............ local APIC on                 apic/      doc 05
@@ -46,6 +49,7 @@
 //!   ├─ Tests::Context, Tests::Scheduler ... context switch, scheduler     tests/     doc 13
 //!   ├─ Sched::Scheduler::enablePreemption
 //!   ├─ Tests::User::run ................... ring 3 smoke tests            tests/     doc 14
+//!   ├─ Tests::CpuLocal::run ............... GS bases balanced             tests/     doc 18
 //!   ├─ Drivers::Keyboard::initialize ...... 8042 enable, IRQ1 live        drivers/   doc 06
 //!   └─ Shell::Terminal::run ............... prompt loop, never returns    shell/
 //! ```

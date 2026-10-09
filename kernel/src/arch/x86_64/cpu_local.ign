@@ -45,7 +45,7 @@
 //! that handles them has to find the right base another way, as Linux's
 //! "paranoid entry" does.
 //!
-//! See concept doc 19 and Intel SDM Vol. 2B, "SWAPGS".
+//! See concept doc 18 and Intel SDM Vol. 2B, "SWAPGS".
 
 import _ from "./cpu";
 

@@ -12,7 +12,7 @@
  *                         recovery pops the return address the call pushed
  *                         and resumes there with rax = 0
  *
- * See concept doc 18. */
+ * See concept doc 17. */
 
 .intel_syntax noprefix
 

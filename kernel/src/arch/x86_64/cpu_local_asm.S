@@ -11,7 +11,7 @@
  *
  * These offsets are used by usermode_asm.S too. Arch::CpuLocal::initialize
  * points IA32_GS_BASE at the block and sets IA32_KERNEL_GS_BASE to 0. See
- * concept doc 19. */
+ * concept doc 18. */
 
 .intel_syntax noprefix
 

@@ -14,13 +14,13 @@ Early, and only tested in QEMU with OVMF.
 |---|---|
 | Boot | Limine (base revision 6) on UEFI, higher-half ELF at `0xffffffff80000000` |
 | Console | Framebuffer text console, Spleen 8x16 font, 16 ANSI colors, cursor, scrolling; mirrored to COM1 |
-| CPU | Own GDT and TSS (IST stack for double faults), IDT with exception reports |
+| CPU | Own GDT and TSS (IST stack for double faults), IDT with exception reports; x87 and SSE enabled with per-thread FXSAVE state; SMEP and SMAP on when the CPU has them; per-CPU data behind the GS base with `swapgs` |
 | Interrupts | ACPI MADT parsed; keyboard routed through the IOAPIC to vector 0x21 with local APIC end of interrupt; 8259 remapped to 0x20-0x2F and fully masked; idle loop sleeps with `sti; hlt` |
 | Timer | Local APIC timer calibrated against PIT channel 2, periodic 100 Hz tick on vector 0x30; `uptime` at the prompt prints the time since boot |
-| Threads | Kernel threads with their own stacks and a guard page, a round-robin run queue, `yield`, `sleep` and `exit`, an idle thread, and preemption by the timer tick with 100 ms time slices; `ps` lists the threads and `threads` starts a demo; the boot thread runs the terminal |
+| Threads | Kernel threads with their own stacks and a guard page, a round-robin run queue, `yield`, `sleep`, `exit` and `join`, an idle thread, and preemption by the timer tick with 100 ms time slices; `ps` lists the threads and `threads` starts a demo; the boot thread runs the terminal |
 | Input | PS/2 keyboard, scancode set 1, US layout, Shift and Caps Lock, line editing at a `>` prompt |
-| Memory | Bitmap frame allocator over the Limine memory map; own 4-level page tables (kernel image per segment with W^X, direct map with 2 MiB pages, write-combining framebuffer, NX and write protection on); kernel heap in the higher half behind the compiler's allocation handlers |
-| User mode | Per-process address spaces (own PML4, shared kernel half, U/S pages, frames freed on exit); ring 3 entered with `iretq`, left through `SYSCALL`/`SYSRET` or an interrupt (TSS.RSP0 follows the running thread); a Linux x86_64 syscall subset (`write`, `exit`, `exit_group`, `getpid`, `sched_yield`, `nanosleep`, `-ENOSYS` for the rest) behind a per-process ABI table; every user pointer validated before use; a static ELF64 loader fed by Limine modules; a fault, privileged instruction or undefined instruction in ring 3 kills only that process |
+| Memory | Bitmap frame allocator over the Limine memory map (4 KiB frames and 2 MiB runs, frees of unmanaged frames rejected); own 4-level page tables (kernel image per segment with W^X, direct map with 2 MiB pages, write-combining framebuffer, NX and write protection on); kernel heap in the higher half behind the compiler's allocation handlers |
+| User mode | Per-process address spaces (own PML4, shared kernel half, U/S pages, frames freed on exit); ring 3 entered with `iretq`, left through `SYSCALL`/`SYSRET` or an interrupt (TSS.RSP0 follows the running thread); a Linux x86_64 syscall subset (`write`, `exit`, `exit_group`, `getpid`, `sched_yield`, `nanosleep`, `-ENOSYS` for the rest) behind a per-process ABI table; every user pointer validated before use; a static ELF64 loader fed by Limine modules; a fault, privileged instruction or undefined instruction in ring 3 kills only that process; waiting for a process blocks until it is gone |
 | Next | a filesystem and a native IgniOS system call ABI |
 
 ## Quick start
@@ -52,7 +52,7 @@ The build also needs an Ignis compiler with freestanding support (Ignis `main` f
 
 ## How it is built
 
-Ignis compiles the whole kernel to one C unit, which clang compiles for `x86_64-unknown-none` with kernel flags (no red zone, no SSE, `-mcmodel=kernel`). The few routines that cannot be written in Ignis are small `.S` files under `kernel/src/arch/x86_64/`: interrupt entry stubs, the code segment reload, the stack switch, the ring 3 entry and the `SYSCALL` stub, and the throwaway user programs of the boot self-tests. `ld.lld` links everything with `kernel/linker.ld`, and `mtools` writes the boot image. No cross GCC is involved.
+Ignis compiles the whole kernel to one C unit, which clang compiles for `x86_64-unknown-none` with kernel flags (no red zone, no SSE in the kernel, `-mcmodel=kernel`). The few routines that cannot be written in Ignis are small `.S` files under `kernel/src/arch/x86_64/`: interrupt entry stubs, the code segment reload, the stack switch, the ring 3 entry and the `SYSCALL` stub, the per-CPU block, the fault probes, and the throwaway user programs of the boot self-tests. `ld.lld` links everything with `kernel/linker.ld`, and `mtools` writes the boot image. No cross GCC is involved.
 
 User programs are Ignis projects under `user/` built with `std = false` and the small user standard library in `user/lib` (`std::sys` wraps the system calls in inline asm, `std::io` prints). The Makefile links each one with `user/user.ld` into a static ELF64 at `0x400000`, copies it into the boot image and `boot/limine.conf` lists it as a Limine module. The kernel runs `hello` at boot, before the keyboard line, and `run hello` at the prompt runs it again.
 
@@ -65,7 +65,7 @@ The kernel is split into subsystems. Each one is a directory under `kernel/src/`
 | Directory | Namespace | Alias | What is in it |
 |---|---|---|---|
 | `kernel/src/lib/` | `Lib` | `@lib` | `memcpy` and friends, integer formatting, the scancode ring buffer |
-| `kernel/src/arch/` | `Arch` | `@arch` | CPU instructions, port I/O, GDT, IDT, PIC, PIT, context switch, ring 3 entry, the interrupt frame, all `.S` files (in `arch/x86_64/`) |
+| `kernel/src/arch/` | `Arch` | `@arch` | CPU instructions, port I/O, GDT, IDT, PIC, PIT, context switch, ring 3 entry, the interrupt frame, x87/SSE state, SMEP/SMAP and fault probes, per-CPU data, all `.S` files (in `arch/x86_64/`) |
 | `kernel/src/boot/` | `Boot` | `@boot` | Limine requests and responses, the higher half direct map |
 | `kernel/src/drivers/` | `Drivers` | `@drivers` | COM1, the framebuffer console and its font, the PS/2 controller, the keyboard decoder |
 | `kernel/src/acpi/` | `Acpi` | `@acpi` | RSDP, XSDT/RSDT and MADT parsing |
