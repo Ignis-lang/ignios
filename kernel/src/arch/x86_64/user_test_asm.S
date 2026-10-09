@@ -350,8 +350,10 @@ user_test_divide_end:
  * processes. Two copies run at the same time. Each one derives a pattern
  * from its pid, loads it into xmm0-xmm15, the MXCSR rounding control and
  * the x87 control word, then yields 50 times and checks all of it after
- * every yield. The other copy holds different values, so a missing save or
- * restore shows up as a mismatch. Exit status 0, or 1 when a value changed.
+ * every yield, then spins 2^29 times without yielding, so the timer has to
+ * preempt it, and checks again. The other copy holds different values, so a
+ * missing save or restore on either kind of switch shows up as a mismatch.
+ * Exit status 0, or 1 when a value changed.
  *
  * Registers:
  *   rbx   pattern seed, pid * 0x0101010101010101; xmm i holds rbx + i in
@@ -361,7 +363,8 @@ user_test_divide_end:
  *   r13   the x87 control word: 0x037F, rounding control (bits 11:10) =
  *         pid & 3
  *   r14   rounds left
- * The kernel preserves all four across SYSCALL. */
+ *   r15   0 in the yield phase, 1 after the spin
+ * The kernel preserves all five across SYSCALL. */
 user_test_fpu_start:
     /* getpid */
     mov eax, 39
@@ -391,12 +394,14 @@ user_test_fpu_start:
 .endr
 
     mov r14d, 50
+    xor r15d, r15d
 
 user_test_fpu_round:
     /* sched_yield */
     mov eax, 24
     syscall
 
+user_test_fpu_check:
     /* Store every xmm register and compare both quadwords of each. */
 .irp i, 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
     movdqu [rsp + 16 * \i], xmm\i
@@ -426,6 +431,21 @@ user_test_fpu_compare:
     dec r14d
     jnz user_test_fpu_round
 
+    /* r15d is 0 after the yield rounds and 1 after the spin. */
+    test r15d, r15d
+    jnz user_test_fpu_done
+
+    /* The preemption phase: a long loop with no system call, then one more
+     * check without a yield before it. */
+    mov r15d, 1
+    mov ecx, 0x20000000
+user_test_fpu_spin:
+    dec ecx
+    jnz user_test_fpu_spin
+    mov r14d, 1
+    jmp user_test_fpu_check
+
+user_test_fpu_done:
     /* exit(0) */
     xor edi, edi
     mov eax, 60

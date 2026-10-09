@@ -72,8 +72,9 @@ record ThreadState {
 
 /// The x87 and SSE save areas, one `Arch::Fpu::STATE_SIZE` (512) bytes per
 /// slot, kept apart from the thread table so each one is 16-byte aligned.
-/// Slot `n` owns bytes `n * 512` to `n * 512 + 511`. The size must equal
-/// `MAX_THREADS * 512` and has to be an integer literal. The field has no
+/// Slot `n` owns bytes `n * 512` to `n * 512 + 511`. The size has to be an
+/// integer literal equal to `Sched::Thread::FPU_AREA_BYTES`, and
+/// `initializeBootThread` panics unless that is `MAX_THREADS * 512`. The field has no
 /// comment of its own because `ignis fmt` rejects a comment before an
 /// attributed field.
 record FpuAreaState {
@@ -116,6 +117,9 @@ namespace Sched::Thread {
 
   /// Size of the thread table, the boot and idle threads included.
   const MAX_THREADS: u64 = 16;
+
+  /// Size of `FpuAreaState::areas` in bytes.
+  const FPU_AREA_BYTES: u64 = 8192;
 
   /// Slot of the boot thread.
   const BOOT_SLOT: u64 = 0;
@@ -353,6 +357,10 @@ namespace Sched::Thread {
   /// at 1. The boot thread already runs on Limine's stack, so it gets no
   /// stack of its own.
   function initializeBootThread(): void {
+    if (MAX_THREADS * Arch::Fpu::STATE_SIZE != FPU_AREA_BYTES) {
+      @panic("thread: the FPU save areas do not match MAX_THREADS");
+    }
+
     let boot: *mut Control = slotPointer(BOOT_SLOT);
 
     (*boot).id = 0;

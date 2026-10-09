@@ -133,8 +133,10 @@ $(OVMF_VARS_COPY):
 run: $(IMAGE) $(OVMF_VARS_COPY)
 	$(QEMU) $(QEMU_FLAGS) -serial stdio
 
-# Boots without a display for HEADLESS_SECONDS, then checks the serial log.
-# The kernel halts instead of exiting, so the timeout is the normal end.
+# Boots without a display for HEADLESS_SECONDS, then checks the serial log:
+# the boot banner, the prompt, and the i64 minimum the hello program prints
+# (it cannot check its own output). The kernel halts instead of exiting, so
+# the timeout is the normal end.
 run-headless: $(IMAGE) $(OVMF_VARS_COPY)
 	rm -f $(SERIAL_LOG)
 	timeout $(HEADLESS_SECONDS) $(QEMU) $(QEMU_FLAGS) -display none \
@@ -143,6 +145,7 @@ run-headless: $(IMAGE) $(OVMF_VARS_COPY)
 	grep -q 'IgniOS booting' $(SERIAL_LOG)
 	grep -q '^ IgniOS ' $(SERIAL_LOG)
 	grep -q '^> ' $(SERIAL_LOG)
+	grep -q '^i64 minimum = -9223372036854775808[^0-9]' $(SERIAL_LOG)
 
 # Boots without a display until the console prompt appears on COM1, then
 # saves the framebuffer to build/screen.ppm and build/screen.png.

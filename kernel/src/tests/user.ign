@@ -79,16 +79,18 @@ namespace Tests::User {
   const DIVIDE: u64 = 12;
 
   /// Index 13: fills the x87 and SSE state with a pattern from its pid,
-  /// yields 50 times and checks the state after each yield.
+  /// yields 50 times and checks the state after each yield, then spins
+  /// until the timer preempts it and checks again.
   const FPU: u64 = 13;
 
   /// Index 14: sleeps 200 ms, then exits with status 5.
   const NAP: u64 = 14;
 
   /// The most thread switches a wait for `NAP` may cost: the waiter blocks
-  /// once and is woken once, plus the switches of the program itself and of
-  /// the idle thread. Polling once per tick would cost about 40.
-  const WAIT_SWITCH_LIMIT: u64 = 10;
+  /// once and is woken once, plus the switches of `NAP`, of the `EXIT`
+  /// program that runs first and of the idle thread. Polling once per tick
+  /// would cost about 40.
+  const WAIT_SWITCH_LIMIT: u64 = 12;
 
   /// What the shell shows for a process that died of SIGSEGV, SIGILL and
   /// SIGFPE: 128 plus 11, 4 and 8.
@@ -209,26 +211,41 @@ namespace Tests::User {
   }
 
   /// Runs two copies of the FPU program at the same time. They yield to
-  /// each other, so each switch between them has to save one x87 and SSE
-  /// state and restore the other.
+  /// each other and then spin until the timer preempts them, so both kinds
+  /// of switch between them have to save one x87 and SSE state and restore
+  /// the other. At least one preemption must have happened.
   function runFpu(): void {
+    let preemptionsBefore: u64 = Sched::Scheduler::preemptionCount();
     let first: u64 = startProgram(FPU);
     let second: u64 = startProgram(FPU);
     let firstStatus: u64 = Proc::Process::wait(first);
     let secondStatus: u64 = Proc::Process::wait(second);
+    let preemptions: u64 = Sched::Scheduler::preemptionCount() - preemptionsBefore;
 
     if (firstStatus != 0 || secondStatus != 0) {
       @panic("user test: the x87 or SSE state of a process changed across a switch");
     }
 
-    Drivers::Console::writeLine("user: two processes kept their own xmm0-xmm15, MXCSR and x87 control word across 50 yields each");
+    if (preemptions == 0) {
+      @panic("user test: the FPU programs were never preempted");
+    }
+
+    Drivers::Console::write("user: two processes kept their own xmm0-xmm15, MXCSR and x87 control word across 50 yields and ");
+    Drivers::Console::writeDecimal(preemptions);
+    Drivers::Console::writeLine(" preemptions");
   }
 
   /// Checks that `Proc::Process::wait` blocks instead of polling. A wait for
   /// a process that sleeps 200 ms must return its status after only a few
   /// thread switches, and a wait for a process that has already ended and
   /// been cleaned up must return at once, without any switch.
+  ///
+  /// The `EXIT` program is started first, so its thread is ahead in the run
+  /// queue and has run, ended and been freed by the time the wait for `NAP`
+  /// returns. That ordering, not a delay, makes the second wait one for a
+  /// finished process.
   function runWait(): void {
+    let quick: u64 = startProgram(EXIT);
     let napper: u64 = startProgram(NAP);
     let before: u64 = Sched::Scheduler::switchCount();
     let status: u64 = Proc::Process::wait(napper);
@@ -244,10 +261,6 @@ namespace Tests::User {
       Drivers::Console::writeLine(" switches");
       @panic("user test: wait polls instead of blocking");
     }
-
-    let quick: u64 = startProgram(EXIT);
-
-    Sched::Scheduler::sleep(5);
 
     let lateBefore: u64 = Sched::Scheduler::switchCount();
     let lateStatus: u64 = Proc::Process::wait(quick);

@@ -366,8 +366,10 @@ namespace Mm::Vmm {
   }
 
   /// Maps the 2 MiB page at `virtualAddress` to `physical` in the kernel
-  /// page tables. Returns false and changes nothing when an address is not
-  /// 2 MiB aligned or anything is already mapped in that range.
+  /// page tables. Returns false, mapping nothing, when an address is not
+  /// 2 MiB aligned or anything is already mapped in that range. The PML4
+  /// and PDPT entries above the page may have been created by then; they
+  /// stay, empty but valid, as with `mapIn`.
   function mapLarge(virtualAddress: u64, physical: u64, flags: u64): boolean {
     return mapLargeIn(VmmState::root, virtualAddress, physical, flags);
   }

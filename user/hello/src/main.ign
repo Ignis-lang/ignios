@@ -12,7 +12,7 @@
 //! | prints its pid           | `getpid` and `write` work                        |
 //! | `seed` is 41, then 42    | `.data` was copied from the ELF file             |
 //! | `counter` is 0, then 1   | `.bss` was zeroed (file size 8, memory size 16)  |
-//! | the i64 minimum          | `Io::printNumber` prints `-9223372036854775808`  |
+//! | the i64 minimum          | `Io::printNumber` prints `-9223372036854775808`; `make run-headless` checks the line |
 //! | `write(1, 0x1, 5)`       | a bad pointer returns `-EFAULT` (-14)            |
 //! | `write(7, ...)`          | a closed descriptor returns `-EBADF` (-9)        |
 //! | syscall 9999             | an unknown call returns `-ENOSYS` (-38)          |

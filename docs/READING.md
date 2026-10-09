@@ -81,7 +81,7 @@ All paths are under `kernel/src/` unless they say otherwise. The assembly files 
 
 Read these first. They define what the kernel is made of and how it gets the machine. Concept docs 01 and 02.
 
-**`Makefile`.** The header comment draws the build pipeline. Ignis compiles all of `kernel/src/**/*.ign` to one C file, clang compiles it, clang assembles the `.S` files, `ld.lld` links them with `kernel/linker.ld`, and `mtools` puts the result in a FAT32 disk image. Look at `QEMU_FLAGS` (q35 machine, the `max` CPU model so SMEP and SMAP exist, OVMF firmware as two flash drives, `-no-reboot`) and at the `run-headless` target, which is the quickest way to see a boot. One thing to know: the link order of the `.S` objects follows the order of `find`, so the layout of `build/kernel.elf` can differ between checkouts.
+**`Makefile`.** The header comment draws the build pipeline. Ignis compiles all of `kernel/src/**/*.ign` to one C file, clang compiles it, clang assembles the `.S` files, `ld.lld` links them with `kernel/linker.ld`, and `mtools` puts the result in a FAT32 disk image. Look at `QEMU_FLAGS` (q35 machine, the `max` CPU model so SMEP and SMAP exist, OVMF firmware as two flash drives, `-no-reboot`) and at the `run-headless` target, which is the quickest way to see a boot. It checks the banner, the prompt and the i64 minimum line that `hello` prints. One thing to know: the link order of the `.S` objects follows the order of `find`, so the layout of `build/kernel.elf` can differ between checkouts.
 
 **`ignis.toml`.** The Ignis project file. `std = false` means no standard library. The `cflags` comment explains each clang flag (no red zone, no SSE, kernel code model, no stack protector). The kernel never uses SSE, user programs may: `user/hello/ignis.toml` leaves it on. Doc 02.
 
@@ -324,7 +324,7 @@ pmm: 53469 usable frames, 53465 free (208 MiB)
 ```text
 pmm: self-test ok
 ```
-`Tests::Pmm::run` allocated and freed 8 frames and checked alignment, uniqueness, the free count and reuse, and that `isAllocated` is false for the kernel image's first frame, which was never usable.
+`Tests::Pmm::run` allocated and freed 8 frames and checked alignment, uniqueness, the free count and reuse, and that `isAllocated` is false for the kernel image's first physical frame (from Limine, since the VMM is not up yet), which was never usable.
 
 ```text
 vmm: cr3 switched, cr3 0x0000000000001000, pml4 0x0000000000001000
@@ -473,16 +473,16 @@ Program 3 wrote its message twice, once to descriptor 1 and once to descriptor 2
 ```text
 process 5 exited with status 0
 process 6 exited with status 0
-user: two processes kept their own xmm0-xmm15, MXCSR and x87 control word across 50 yields each
+user: two processes kept their own xmm0-xmm15, MXCSR and x87 control word across 50 yields and 6 preemptions
 ```
-`Tests::User::runFpu` started program 13 twice. Each copy loaded a pattern made from its pid into the sixteen XMM registers, the MXCSR rounding bits and the x87 control word, then yielded to the other 50 times and checked everything after each yield. Doc 16.
+`Tests::User::runFpu` started program 13 twice. Each copy loaded a pattern made from its pid into the sixteen XMM registers, the MXCSR rounding bits and the x87 control word, yielded to the other 50 times and checked everything after each yield, then spun 2^29 times so the timer had to preempt it, and checked again. The number of preemptions varies, and the test requires at least one. Doc 16.
 
 ```text
-process 7 exited with status 5
-process 8 exited with status 42
-user: wait blocked until the process was gone, 5 switches for a 200 ms process, none for one that had already ended
+process 7 exited with status 42
+process 8 exited with status 5
+user: wait blocked until the process was gone, 6 switches for a 200 ms process, none for one that had already ended
 ```
-`Tests::User::runWait`. Program 14 slept 200 ms (20 ticks) with `nanosleep` and exited with 5. Waiting for it cost a handful of switches, where waking once per tick would cost about 40. Program 0 then ran and was cleaned up before `wait` was called, so that wait returned 42 without blocking. Doc 13.
+`Tests::User::runWait`. Program 0 and then program 14 were started. Program 14 slept 200 ms (20 ticks) with `nanosleep` and exited with 5. Waiting for it cost a handful of switches, where waking once per tick would cost about 40. Program 0 was ahead in the run queue, so it had already ended and been cleaned up by then, and the wait for it returned 42 without blocking. Doc 13.
 
 ```text
 process 9 faulted: #PF Page Fault at rip 0x0000000000400000, error 0x0000000000000006, address 0x0000000000000000
@@ -562,7 +562,7 @@ goodbye from user mode
 process 18 exited with status 0
 user: hello from a static ELF64 module loaded by Limine ran and exited with status 0
 ```
-The output of `user/hello/src/main.ign`. It is process 18, after the 17 test processes. `data 42` shows `.data` was loaded (41 plus 1), `bss 0 then 1` shows `.bss` was zeroed. The i64 minimum line checks that `Io::printNumber` negates in `u64`, where -2^63 has a magnitude. The three negative results are `-EFAULT`, `-EBADF` and `-ENOSYS`.
+The output of `user/hello/src/main.ign`. It is process 18, after the 17 test processes. `data 42` shows `.data` was loaded (41 plus 1), `bss 0 then 1` shows `.bss` was zeroed. The i64 minimum line shows that `Io::printNumber` negates in `u64`, where -2^63 has a magnitude; `make run-headless` fails if it is wrong. The three negative results are `-EFAULT`, `-EBADF` and `-ENOSYS`.
 
 ```text
 cpu local: self-test ok, after ring 3 the kernel GS base is the per-CPU block and the user one is 0
