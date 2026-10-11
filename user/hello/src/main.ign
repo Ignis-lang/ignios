@@ -34,7 +34,7 @@
 //! not position independent) and starts each segment on its own page. For the
 //! current build `.text` is at `0x400000`, `.rodata` at `0x401000` and `.data`
 //! with `.bss` at `0x402000`. The kernel gives it an 8-page stack that ends at
-//! `0x7FFFFFFFF000`. The entry point `_start` is `user/lib/linux/start.S`, which
+//! `0x7FFFFFFFF000`. The entry point `_start` is `user/lib/native/start.S`, which
 //! calls `main`.
 
 import Args from "std::args";
@@ -106,7 +106,7 @@ function run(): u64 {
   return 0;
 }
 
-/// Called by `_start` (`user/lib/linux/start.S`) with argc and argv. Prints the
+/// Called by `_start` (`user/lib/native/start.S`) with argc and argv. Prints the
 /// arguments on one line, `argv: hello one two`, then runs the checks; the
 /// returned value is the exit status.
 @externName("ignis_main")

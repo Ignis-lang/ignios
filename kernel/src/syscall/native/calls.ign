@@ -27,7 +27,8 @@
 //! **Paths** are a user pointer and a length (at most `PATH_MAX - 1` bytes,
 //! else `NAME_TOO_LONG`). The directory argument of `OPEN`, `INFO_AT` and
 //! `MAKE_DIRECTORY` is `ROOT` for `/` or a descriptor open on a directory; an
-//! absolute path ignores it. An empty path is `NOT_FOUND`.
+//! absolute path ignores it. An empty path is `NOT_FOUND`, and a path with a
+//! NUL byte in it is `INVALID`.
 //!
 //! **Open flags** are the `Fs::Files` flags, so nothing is translated:
 //!
@@ -321,7 +322,8 @@ namespace Syscall::Native {
   /// Copies the `length` bytes of the user path at `path` into `pathBuffer`
   /// and finds the directory it is relative to: the root for an absolute
   /// path or `ROOT`, otherwise the open directory `directory`. Returns
-  /// `NOT_FOUND` for an empty path, `NAME_TOO_LONG`, `BAD_ADDRESS`, and the
+  /// `NOT_FOUND` for an empty path, `NAME_TOO_LONG`, `BAD_ADDRESS`,
+  /// `INVALID` for a path with a NUL byte in it, and the
   /// `Fs::Files::directoryOf` codes.
   function resolve(
     table: u64,
@@ -340,6 +342,18 @@ namespace Syscall::Native {
 
     if (!Mm::AddressSpace::copyFromUser(Proc::Process::currentRoot(), pathBuffer(), path, length)) {
       return Syscall::Core::BAD_ADDRESS;
+    }
+
+    // A path is a length, so a NUL byte could sit inside it and make a name
+    // that no NUL-terminated path, Linux or native, could ever reach again.
+    let mut index: u64 = 0;
+
+    while (index < length) {
+      if (*(pathBuffer() + index) == 0) {
+        return Fs::Vfs::INVALID;
+      }
+
+      index += 1;
     }
 
     if (directory == ROOT || *pathBuffer() == 0x2F) {

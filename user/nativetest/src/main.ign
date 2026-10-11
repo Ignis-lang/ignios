@@ -26,6 +26,12 @@
 //! | 70-75  | `MAP` anonymous and of a file; write with execute, an unknown flag, a directory (`NO_DEVICE`), a write-only descriptor (`ACCESS`); `UNMAP` |
 //! | 80-81  | `YIELD` and `SLEEP(20 ms)` return 0                                  |
 //! | 82     | `CLOSE` twice: the second is `BAD_DESCRIPTOR`                        |
+//! | 90-92  | `READ_ENTRY` into a kernel address is `BAD_ADDRESS` and does not consume the entry; 24 bytes for a 25-byte entry is `INVALID`; `SEEK` on a directory |
+//! | 93-94  | `READ` into a kernel address is `BAD_ADDRESS` and moves nothing; an unknown `SEEK` whence is `INVALID` |
+//! | 95-96  | `MAP` of length 0 or at an unaligned offset, `UNMAP` of an unaligned address: `INVALID` |
+//! | 97-98  | RDX comes back 0 from `CLOSE` and `YIELD` even when it went in as `0x1234`; call 512 is `NOT_SUPPORTED` |
+//! | 99     | `OPEN` of a path that crosses the user limit is `BAD_ADDRESS`        |
+//! | 100    | a path with a NUL byte in it (`/nt/x\0y`, length 7) is `INVALID`    |
 //!
 //! The exit status is the number of the first check that failed, 0 when all
 //! passed. `Tests::User::runNative` runs it at boot and removes `/nt`.
@@ -274,6 +280,52 @@ function checkScheduling(): void {
   expect(Sys::call1(Sys::SLEEP, 20000000), Sys::OK, 0, 81);
 }
 
+/// Edge cases of the arguments: kernel addresses, sizes at the limit, bad
+/// alignment, unknown values, and a NUL byte inside a path.
+function checkEdges(): void {
+  let kernel: u64 = 0xFFFF800000001000;
+  let directory: u64 = succeed(open("/nt", 3, Sys::OPEN_READ | Sys::OPEN_DIRECTORY), 90);
+
+  expect(Sys::call3(Sys::READ_ENTRY, directory, kernel, 512), Sys::BAD_ADDRESS, 0, 90);
+  expect(Sys::call3(Sys::READ_ENTRY, directory, buffer(), 512), Sys::OK, 25, 90);
+  require(byte(buffer() + 24) == ('a' as u8), 90);
+  expect(Sys::call3(Sys::READ_ENTRY, directory, buffer(), 24), Sys::INVALID, 0, 91);
+  expect(Sys::call3(Sys::SEEK, directory, 1, Sys::SEEK_SET), Sys::OK, 1, 92);
+  expect(Sys::call3(Sys::READ_ENTRY, directory, buffer(), 512), Sys::OK, 25, 92);
+  require(byte(buffer() + 24) == ('b' as u8), 92);
+  succeed(Sys::call1(Sys::CLOSE, directory), 92);
+
+  let fd: u64 = succeed(open("/etc/motd", 9, Sys::OPEN_READ), 93);
+
+  expect(Sys::call3(Sys::READ, fd, kernel, 5), Sys::BAD_ADDRESS, 0, 93);
+  expect(Sys::call3(Sys::SEEK, fd, 0, Sys::SEEK_CUR), Sys::OK, 0, 93);
+  expect(Sys::call3(Sys::SEEK, fd, 0, 3), Sys::INVALID, 0, 94);
+  expect(Sys::call5(Sys::MAP, 0, Sys::PROT_READ, Sys::MAP_ANONYMOUS, 0, 0), Sys::INVALID, 0, 95);
+  expect(Sys::call5(Sys::MAP, PAGE, Sys::PROT_READ, 0, fd, 1), Sys::INVALID, 0, 95);
+
+  let page: u64 = succeed(Sys::call5(Sys::MAP, PAGE, Sys::PROT_READ | Sys::PROT_WRITE, Sys::MAP_ANONYMOUS, 0, 0), 96);
+
+  expect(Sys::call2(Sys::UNMAP, page + 1, PAGE), Sys::INVALID, 0, 96);
+  succeed(Sys::call2(Sys::UNMAP, page, PAGE), 96);
+  succeed(Sys::call1(Sys::CLOSE, fd), 96);
+
+  expect(Sys::call3(Sys::CLOSE, 99, 0, 0x1234), Sys::BAD_DESCRIPTOR, 0, 97);
+  expect(Sys::call3(Sys::YIELD, 0, 0, 0x1234), Sys::OK, 0, 97);
+  expect(Sys::call0(512), Sys::NOT_SUPPORTED, 0, 98);
+  expect(Sys::call5(Sys::OPEN, Sys::ROOT, 0x7FFFFFFFFFFE, 4, Sys::OPEN_READ, 0), Sys::BAD_ADDRESS, 0, 99);
+
+  let path: *mut u8 = @pointerFromInteger<*mut u8>(buffer());
+
+  *path = 0x2F;
+  *(path + 1) = ('n' as u8);
+  *(path + 2) = ('t' as u8);
+  *(path + 3) = 0x2F;
+  *(path + 4) = ('x' as u8);
+  *(path + 5) = 0;
+  *(path + 6) = ('y' as u8);
+  expect(Sys::call4(Sys::MAKE_DIRECTORY, Sys::ROOT, buffer(), 7, 0x1ED), Sys::INVALID, 0, 100);
+}
+
 /// Called by `_start` with argc and argv.
 @externName("ignis_main")
 function main(count: u64, values: *u64): u64 {
@@ -284,6 +336,7 @@ function main(count: u64, values: *u64): u64 {
   checkDirectories();
   checkMapping();
   checkScheduling();
+  checkEdges();
 
   Io::print("nativetest: every native call, its arguments and its status codes behave as specified\n");
 
