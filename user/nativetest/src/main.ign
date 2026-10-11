@@ -1,7 +1,9 @@
 //!
 //! # nativetest
 //!
-//! Ring 3 checks of the native IgniOS system call ABI.
+//! Ring 3 checks of the native IgniOS system call ABI: every call, its
+//! arguments and its status codes, through the raw `Sys::callN` wrappers so
+//! that RAX and RDX are seen as they come back.
 //!
 //! ## Checks
 //!
@@ -14,9 +16,19 @@
 //! | 14     | call 39 (Linux `getpid`): `NOT_SUPPORTED`; the Linux table is not used |
 //! | 15     | `PROCESS_ID`: status 0, a positive id                                |
 //! | 16     | the portable `Sys::write` returns the count, or the negated status   |
+//! | 20-23  | `OPEN` of `/etc/motd` by length (no NUL needed): descriptor 3; `READ` in pieces, then 0 |
+//! | 24-25  | `SEEK` from start, current, end; -1 is `INVALID`; the console is `NOT_SEEKABLE` |
+//! | 26-27  | `INFO`: kind 1, size 19, mode 0644, an id; the console is kind 3    |
+//! | 30-37  | `OPEN` errors: `NOT_FOUND`, `NOT_DIRECTORY`, `IS_DIRECTORY`, unknown flag bit, no access bit, a bad directory descriptor, `BAD_ADDRESS`, `NAME_TOO_LONG` |
+//! | 40-46  | `MAKE_DIRECTORY` of `/nt`, again `EXISTS`; `CREATE`, `EXCLUSIVE`, `APPEND`, `TRUNCATE` in it |
+//! | 50-53  | `INFO_AT` from `ROOT` and relative to a directory descriptor; an empty path is `NOT_FOUND` |
+//! | 60-64  | `READ_ENTRY`: `a` then `b` with kind and id, no `.` or `..`, then 0; a small buffer is `INVALID`; a file is `NOT_DIRECTORY` |
+//! | 70-75  | `MAP` anonymous and of a file; write with execute, an unknown flag, a directory (`NO_DEVICE`), a write-only descriptor (`ACCESS`); `UNMAP` |
+//! | 80-81  | `YIELD` and `SLEEP(20 ms)` return 0                                  |
+//! | 82     | `CLOSE` twice: the second is `BAD_DESCRIPTOR`                        |
 //!
 //! The exit status is the number of the first check that failed, 0 when all
-//! passed. `Tests::User::runNative` runs it at boot.
+//! passed. `Tests::User::runNative` runs it at boot and removes `/nt`.
 
 import Io from "std::io";
 import Sys from "std::sys";
@@ -26,6 +38,18 @@ const LINE: str = "nativetest: hello through the native ABI\n";
 
 /// Length of `LINE`.
 const LINE_LENGTH: u64 = 41;
+
+/// 4 KiB.
+const PAGE: u64 = 4096;
+
+/// What the checks share.
+record State {
+  /// Bytes read back and directory entries.
+  static mut buffer: u8[512];
+
+  /// One info record.
+  static mut info: u8[32];
+}
 
 /// Exits with `status` unless `result` has `wantedStatus` and `wantedValue`,
 /// after printing what came back.
@@ -42,29 +66,226 @@ function expect(result: Sys::Result, wantedStatus: u64, wantedValue: u64, status
   }
 }
 
-/// Called by `_start` with argc and argv.
-@externName("ignis_main")
-function main(count: u64, values: *u64): u64 {
-  expect(Sys::call3(Sys::WRITE, Sys::STDOUT, @integerFromPointer(LINE as *u8), LINE_LENGTH), Sys::OK, LINE_LENGTH, 10);
+/// Exits with `status` unless `result` has status 0, and returns its value.
+function succeed(result: Sys::Result, status: u64): u64 {
+  if (result.status != Sys::OK) {
+    Io::print("nativetest: check ");
+    Io::printNumber(status as i64);
+    Io::print(" got status ");
+    Io::printNumber(result.status as i64);
+    Io::print("\n");
+    Sys::exit(status);
+  }
+
+  return result.value;
+}
+
+/// Exits with `status` unless `condition` holds.
+function require(condition: boolean, status: u64): void {
+  if (!condition) {
+    Io::print("nativetest: check ");
+    Io::printNumber(status as i64);
+    Io::print(" failed\n");
+    Sys::exit(status);
+  }
+}
+
+/// The address of `text`, a string literal.
+function at(text: str): u64 {
+  return @integerFromPointer(text as *u8);
+}
+
+/// The first byte of `State::buffer`.
+function buffer(): u64 {
+  return @integerFromPointer(&mut State::buffer as *mut u8);
+}
+
+/// The first byte of `State::info`.
+function info(): u64 {
+  return @integerFromPointer(&mut State::info as *mut u8);
+}
+
+/// The 8-byte field at `offset` of the bytes at `address`.
+function word(address: u64, offset: u64): u64 {
+  return *@pointerFromInteger<*u64>(address + offset);
+}
+
+/// The byte at `address`.
+function byte(address: u64): u8 {
+  return *@pointerFromInteger<*u8>(address);
+}
+
+/// True when the `length` bytes at `address` are `text`.
+function same(address: u64, text: str, length: u64): boolean {
+  let mut index: u64 = 0;
+
+  while (index < length) {
+    if (byte(address + index) != *(text as *u8 + index)) {
+      return false;
+    }
+
+    index += 1;
+  }
+
+  return true;
+}
+
+/// `OPEN(ROOT, text, length, flags, 0644)`.
+function open(text: str, length: u64, flags: u64): Sys::Result {
+  return Sys::call5(Sys::OPEN, Sys::ROOT, at(text), length, flags, 0x1A4);
+}
+
+/// The calls of the first version of the ABI.
+function checkBasics(): void {
+  expect(Sys::call3(Sys::WRITE, Sys::STDOUT, at(LINE), LINE_LENGTH), Sys::OK, LINE_LENGTH, 10);
   expect(Sys::call3(Sys::WRITE, Sys::STDOUT, 1, 5), Sys::BAD_ADDRESS, 0, 11);
-  expect(Sys::call3(Sys::WRITE, 7, @integerFromPointer(LINE as *u8), 1), Sys::BAD_DESCRIPTOR, 0, 12);
+  expect(Sys::call3(Sys::WRITE, 7, at(LINE), 1), Sys::BAD_DESCRIPTOR, 0, 12);
   expect(Sys::call0(9999), Sys::NOT_SUPPORTED, 0, 13);
   expect(Sys::call3(9999, 1, 2, 0x1234), Sys::NOT_SUPPORTED, 0, 13);
   expect(Sys::call0(39), Sys::NOT_SUPPORTED, 0, 14);
+  require(succeed(Sys::call0(Sys::PROCESS_ID), 15) > 0, 15);
+  require(Sys::write(Sys::STDOUT, "" as *u8, 0) == 0 && Sys::write(9, "x" as *u8, 1) == 0 - (Sys::BAD_DESCRIPTOR as i64), 16);
+}
 
-  let id: Sys::Result = Sys::call0(Sys::PROCESS_ID);
+/// Opening, reading, seeking and describing `/etc/motd`. The path is passed
+/// with a length that stops before the `x`, so no NUL is needed.
+function checkReading(): void {
+  let fd: u64 = succeed(open("/etc/motdx", 9, Sys::OPEN_READ), 20);
 
-  if (id.status != Sys::OK || id.value == 0) {
-    Io::print("nativetest: check 15 failed\n");
-    return 15;
-  }
+  require(fd == 3, 20);
+  expect(Sys::call3(Sys::READ, fd, buffer(), 7), Sys::OK, 7, 21);
+  require(same(buffer(), "Welcome", 7), 21);
+  expect(Sys::call3(Sys::READ, fd, buffer(), 100), Sys::OK, 12, 22);
+  expect(Sys::call3(Sys::READ, fd, buffer(), 100), Sys::OK, 0, 23);
 
-  if (Sys::write(Sys::STDOUT, "" as *u8, 0) != 0 || Sys::write(9, "x" as *u8, 1) != 0 - (Sys::BAD_DESCRIPTOR as i64)) {
-    Io::print("nativetest: check 16 failed\n");
-    return 16;
-  }
+  expect(Sys::call3(Sys::SEEK, fd, 3, Sys::SEEK_SET), Sys::OK, 3, 24);
+  expect(Sys::call3(Sys::SEEK, fd, 2, Sys::SEEK_CUR), Sys::OK, 5, 24);
+  expect(Sys::call3(Sys::SEEK, fd, 0xFFFFFFFFFFFFFFFF, Sys::SEEK_END), Sys::OK, 18, 24);
+  expect(Sys::call3(Sys::SEEK, fd, 0xFFFFFFFFFFFFFFFF, Sys::SEEK_SET), Sys::INVALID, 0, 25);
+  expect(Sys::call3(Sys::SEEK, Sys::STDOUT, 0, Sys::SEEK_SET), Sys::NOT_SEEKABLE, 0, 25);
 
-  Io::print("nativetest: status in rax, value in rdx, unknown and Linux numbers refused\n");
+  expect(Sys::call2(Sys::INFO, fd, info()), Sys::OK, 0, 26);
+  require(word(info(), 0) == Sys::KIND_FILE && word(info(), 8) == 19 && word(info(), 16) != 0 && word(info(), 24) == 0x1A4, 26);
+  expect(Sys::call2(Sys::INFO, Sys::STDOUT, info()), Sys::OK, 0, 27);
+  require(word(info(), 0) == Sys::KIND_DEVICE, 27);
+
+  expect(Sys::call1(Sys::CLOSE, fd), Sys::OK, 0, 82);
+  expect(Sys::call1(Sys::CLOSE, fd), Sys::BAD_DESCRIPTOR, 0, 82);
+}
+
+/// The errors of `OPEN`.
+function checkOpenErrors(): void {
+  expect(open("/nope", 5, Sys::OPEN_READ), Sys::NOT_FOUND, 0, 30);
+  expect(open("/etc/motd/x", 11, Sys::OPEN_READ), Sys::NOT_DIRECTORY, 0, 31);
+  expect(open("/etc", 4, Sys::OPEN_WRITE), Sys::IS_DIRECTORY, 0, 32);
+  expect(open("/etc/motd", 9, Sys::OPEN_READ | 128), Sys::INVALID, 0, 33);
+  expect(open("/etc/motd", 9, Sys::OPEN_CREATE), Sys::INVALID, 0, 34);
+  expect(Sys::call5(Sys::OPEN, 7, at("motd"), 4, Sys::OPEN_READ, 0), Sys::BAD_DESCRIPTOR, 0, 35);
+  expect(Sys::call5(Sys::OPEN, Sys::ROOT, 1, 4, Sys::OPEN_READ, 0), Sys::BAD_ADDRESS, 0, 36);
+  expect(Sys::call5(Sys::OPEN, Sys::ROOT, at(LINE), 4096, Sys::OPEN_READ, 0), Sys::NAME_TOO_LONG, 0, 37);
+}
+
+/// `MAKE_DIRECTORY` and creating, appending and truncating a file in it.
+function checkWriting(): void {
+  expect(Sys::call4(Sys::MAKE_DIRECTORY, Sys::ROOT, at("/nt"), 3, 0x1ED), Sys::OK, 0, 40);
+  expect(Sys::call4(Sys::MAKE_DIRECTORY, Sys::ROOT, at("/nt"), 3, 0x1ED), Sys::EXISTS, 0, 41);
+
+  let file: u64 = succeed(open("/nt/a", 5, Sys::OPEN_WRITE | Sys::OPEN_CREATE | Sys::OPEN_EXCLUSIVE), 42);
+
+  expect(Sys::call3(Sys::WRITE, file, at("hello"), 5), Sys::OK, 5, 42);
+  succeed(Sys::call1(Sys::CLOSE, file), 42);
+  expect(open("/nt/a", 5, Sys::OPEN_WRITE | Sys::OPEN_CREATE | Sys::OPEN_EXCLUSIVE), Sys::EXISTS, 0, 43);
+
+  let appender: u64 = succeed(open("/nt/a", 5, Sys::OPEN_WRITE | Sys::OPEN_APPEND), 44);
+
+  expect(Sys::call3(Sys::WRITE, appender, at(" world"), 6), Sys::OK, 6, 44);
+  succeed(Sys::call1(Sys::CLOSE, appender), 44);
+
+  let reader: u64 = succeed(open("/nt/a", 5, Sys::OPEN_READ), 45);
+
+  expect(Sys::call3(Sys::READ, reader, buffer(), 100), Sys::OK, 11, 45);
+  require(same(buffer(), "hello world", 11), 45);
+  succeed(Sys::call1(Sys::CLOSE, reader), 45);
+
+  let truncated: u64 = succeed(open("/nt/a", 5, Sys::OPEN_WRITE | Sys::OPEN_TRUNCATE), 46);
+
+  expect(Sys::call3(Sys::WRITE, truncated, at("abc"), 3), Sys::OK, 3, 46);
+  succeed(Sys::call1(Sys::CLOSE, truncated), 46);
+}
+
+/// Paths relative to a directory descriptor, `INFO_AT` and `READ_ENTRY`.
+function checkDirectories(): void {
+  let directory: u64 = succeed(open("/nt", 3, Sys::OPEN_READ | Sys::OPEN_DIRECTORY), 50);
+  let made: u64 = succeed(Sys::call5(Sys::OPEN, directory, at("b"), 1, Sys::OPEN_WRITE | Sys::OPEN_CREATE, 0x1A4), 50);
+
+  succeed(Sys::call1(Sys::CLOSE, made), 50);
+  expect(Sys::call4(Sys::INFO_AT, directory, at("a"), 1, info()), Sys::OK, 0, 51);
+  require(word(info(), 0) == Sys::KIND_FILE && word(info(), 8) == 3, 51);
+  expect(Sys::call4(Sys::INFO_AT, Sys::ROOT, at("/nt"), 3, info()), Sys::OK, 0, 52);
+  require(word(info(), 0) == Sys::KIND_DIRECTORY, 52);
+  expect(Sys::call4(Sys::INFO_AT, Sys::ROOT, at(""), 0, info()), Sys::NOT_FOUND, 0, 53);
+
+  expect(Sys::call3(Sys::READ_ENTRY, directory, buffer(), 10), Sys::INVALID, 0, 60);
+  expect(Sys::call3(Sys::READ_ENTRY, directory, buffer(), 512), Sys::OK, 25, 61);
+  require(word(buffer(), 0) == Sys::KIND_FILE && word(buffer(), 8) != 0 && word(buffer(), 16) == 1 && byte(buffer() + 24) == ('a' as u8), 61);
+  expect(Sys::call3(Sys::READ_ENTRY, directory, buffer(), 512), Sys::OK, 25, 62);
+  require(byte(buffer() + 24) == ('b' as u8), 62);
+  expect(Sys::call3(Sys::READ_ENTRY, directory, buffer(), 512), Sys::OK, 0, 63);
+
+  let file: u64 = succeed(open("/etc/motd", 9, Sys::OPEN_READ), 64);
+
+  expect(Sys::call3(Sys::READ_ENTRY, file, buffer(), 512), Sys::NOT_DIRECTORY, 0, 64);
+  succeed(Sys::call1(Sys::CLOSE, file), 64);
+  succeed(Sys::call1(Sys::CLOSE, directory), 64);
+}
+
+/// `MAP` and `UNMAP`.
+function checkMapping(): void {
+  let anonymous: u64 = succeed(Sys::call5(Sys::MAP, PAGE, Sys::PROT_READ | Sys::PROT_WRITE, Sys::MAP_ANONYMOUS, 0, 0), 70);
+
+  require(anonymous % PAGE == 0 && byte(anonymous) == 0, 70);
+  *@pointerFromInteger<*mut u8>(anonymous) = 7;
+  require(byte(anonymous) == 7, 70);
+  expect(Sys::call2(Sys::UNMAP, anonymous, PAGE), Sys::OK, 0, 70);
+
+  let motd: u64 = succeed(open("/etc/motd", 9, Sys::OPEN_READ), 71);
+  let mapped: u64 = succeed(Sys::call5(Sys::MAP, PAGE, Sys::PROT_READ, 0, motd, 0), 71);
+
+  require(same(mapped, "Welcome to IgniOS.\n", 19) && byte(mapped + 19) == 0, 71);
+  expect(Sys::call2(Sys::UNMAP, mapped, PAGE), Sys::OK, 0, 71);
+  expect(Sys::call5(Sys::MAP, PAGE, Sys::PROT_WRITE | Sys::PROT_EXEC, Sys::MAP_ANONYMOUS, 0, 0), Sys::INVALID, 0, 72);
+  expect(Sys::call5(Sys::MAP, PAGE, Sys::PROT_READ, 2, motd, 0), Sys::INVALID, 0, 73);
+  succeed(Sys::call1(Sys::CLOSE, motd), 73);
+
+  let directory: u64 = succeed(open("/etc", 4, Sys::OPEN_READ), 74);
+
+  expect(Sys::call5(Sys::MAP, PAGE, Sys::PROT_READ, 0, directory, 0), Sys::NO_DEVICE, 0, 74);
+  succeed(Sys::call1(Sys::CLOSE, directory), 74);
+
+  let writeOnly: u64 = succeed(open("/nt/a", 5, Sys::OPEN_WRITE), 75);
+
+  expect(Sys::call5(Sys::MAP, PAGE, Sys::PROT_READ, 0, writeOnly, 0), Sys::ACCESS, 0, 75);
+  succeed(Sys::call1(Sys::CLOSE, writeOnly), 75);
+}
+
+/// `YIELD` and `SLEEP`.
+function checkScheduling(): void {
+  expect(Sys::call0(Sys::YIELD), Sys::OK, 0, 80);
+  expect(Sys::call1(Sys::SLEEP, 20000000), Sys::OK, 0, 81);
+}
+
+/// Called by `_start` with argc and argv.
+@externName("ignis_main")
+function main(count: u64, values: *u64): u64 {
+  checkBasics();
+  checkReading();
+  checkOpenErrors();
+  checkWriting();
+  checkDirectories();
+  checkMapping();
+  checkScheduling();
+
+  Io::print("nativetest: every native call, its arguments and its status codes behave as specified\n");
 
   return 0;
 }

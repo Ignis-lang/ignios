@@ -20,7 +20,7 @@
 //! | hello             | a real static ELF64 from the initramfs, argc and argv  |
 //! | files             | `/bin/fstest` checks every file system call and error from ring 3; nothing leaks |
 //! | memory            | `/bin/mmtest` checks `mmap`, `munmap` and `std::alloc`; four forbidden accesses to mappings are killed; a double free panics; nothing leaks |
-//! | native            | `/bin/nativetest` checks the native ABI; the loader refuses an IgniOS note of another version and one that runs past the file |
+//! | native            | `/bin/nativetest` checks every native call and status code; the loader refuses an IgniOS note of another version and one that runs past the file |
 //! | refused           | a missing program, a directory, a file that is not ELF, an empty line and 33 arguments start nothing and leak nothing |
 //!
 //! `main.ign` calls `Tests::User::run` once, after the scheduler tests and before
@@ -282,12 +282,15 @@ namespace Tests::User {
     Drivers::Console::writeLine("user: mmtest passed, writing read-only, using unmapped, executing non-exec and touching PROT_NONE memory were killed, a double free was caught, no frame leaked");
   }
 
-  /// Runs `/bin/nativetest`, which carries the IgniOS note and checks the
-  /// native ABI from ring 3. Then gives `Proc::Process::startElf` two broken
+  /// Runs `/bin/nativetest`, which carries the IgniOS note and checks every
+  /// native call from ring 3, then removes the directory `/nt` it made and
+  /// checks that the heap and the PMM are back where they were. Then gives `Proc::Process::startElf` two broken
   /// copies of the same file: one whose note names version 2, one whose note
   /// claims a description larger than the file. Both must start nothing, and
   /// no frame or heap byte may leak.
   function runNative(): void {
+    let freeAtStart: u64 = Mm::Pmm::freeFrameCount();
+    let heapAtStart: u64 = Mm::Heap::allocatedBytes();
     let status: u64 = Proc::Programs::runNamed("nativetest");
 
     if (status != 0) {
@@ -295,6 +298,12 @@ namespace Tests::User {
       Drivers::Console::writeDecimal(status);
       Drivers::Console::writeLine("");
       @panic("user test: the native ABI misbehaved");
+    }
+
+    removeDirectory("/nt");
+
+    if (Mm::Pmm::freeFrameCount() != freeAtStart || Mm::Heap::allocatedBytes() != heapAtStart) {
+      @panic("user test: nativetest leaked frames or heap memory");
     }
 
     let freeBefore: u64 = Mm::Pmm::freeFrameCount();
@@ -356,6 +365,29 @@ namespace Tests::User {
     if (Proc::Process::startElf(image as *u8, size, "nativetest" as *u8, 11, 1) != Proc::Process::NO_PROCESS) {
       @panic("user test: the loader started a program with a broken IgniOS note");
     }
+  }
+
+  /// Removes the directory at the absolute `path` that a test program left,
+  /// with the files in it. Panics when it is not there.
+  function removeDirectory(path: str): void {
+    let saved: u64 = Arch::Cpu::saveAndDisableInterrupts();
+    let mut length: u64 = 0;
+    let mut node: *mut Fs::Node = null;
+
+    while (*(path as *u8 + length) != 0) {
+      length += 1;
+    }
+
+    if (Fs::Vfs::lookup(Fs::Vfs::root(), path as *u8, length, &mut node as *mut *mut Fs::Node) != Fs::Vfs::OK) {
+      @panic("user test: a directory a test program made is missing");
+    }
+
+    while ((*node).firstChild != null) {
+      Fs::Vfs::remove((*node).firstChild);
+    }
+
+    Fs::Vfs::remove(node);
+    Arch::Cpu::restoreInterrupts(saved);
   }
 
   /// Removes the regular file at the absolute `path` that a test program

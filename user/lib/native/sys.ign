@@ -36,6 +36,12 @@
 //!
 //! The table is `kernel/src/syscall/native/status.ign`; numbers never change.
 
+/// Scratch space of the portable calls.
+record NativeSysState {
+  /// One directory entry of the longest name: a 24-byte header and 255 bytes.
+  static mut entry: u8[280];
+}
+
 /// The system call wrappers.
 export namespace Sys {
   /// What a native call returns.
@@ -48,14 +54,70 @@ export namespace Sys {
     public value: u64;
   }
 
-  /// Native call number 0: end the process.
+  /// What `Sys::info` and `Sys::infoAt` report about a file: the native info
+  /// record itself, and the same record as in the Linux flavour.
+  @cLayout
+  record FileInfo {
+    /// `Sys::KIND_FILE`, `Sys::KIND_DIRECTORY` or `Sys::KIND_DEVICE`.
+    public kind: u64;
+
+    /// The size in bytes; 0 for a directory or a device.
+    public size: u64;
+
+    /// A number unique to the file.
+    public id: u64;
+
+    /// The permission bits.
+    public mode: u64;
+  }
+
+  /// Call numbers (kernel/src/syscall/native/table.ign). End the process.
   const EXIT: u64 = 0;
 
-  /// Native call number 1: write to a descriptor.
+  /// Write to a descriptor.
   const WRITE: u64 = 1;
 
-  /// Native call number 12: the process id.
+  /// Read from a descriptor.
+  const READ: u64 = 2;
+
+  /// Open a path.
+  const OPEN: u64 = 3;
+
+  /// Close a descriptor.
+  const CLOSE: u64 = 4;
+
+  /// Move the offset of a descriptor.
+  const SEEK: u64 = 5;
+
+  /// Describe the file of a descriptor.
+  const INFO: u64 = 6;
+
+  /// Describe the file of a path.
+  const INFO_AT: u64 = 7;
+
+  /// Read the next directory entry.
+  const READ_ENTRY: u64 = 8;
+
+  /// Create a directory.
+  const MAKE_DIRECTORY: u64 = 9;
+
+  /// Map memory.
+  const MAP: u64 = 10;
+
+  /// Remove mapped memory.
+  const UNMAP: u64 = 11;
+
+  /// The process id.
   const PROCESS_ID: u64 = 12;
+
+  /// Give up the processor.
+  const YIELD: u64 = 13;
+
+  /// Sleep for a number of nanoseconds.
+  const SLEEP: u64 = 14;
+
+  /// The directory argument meaning `/`.
+  const ROOT: u64 = 0xFFFFFFFFFFFFFFFF;
 
   /// Descriptor 0, the console, which reads as empty.
   const STDIN: u64 = 0;
@@ -66,20 +128,182 @@ export namespace Sys {
   /// Descriptor 2, also the console.
   const STDERR: u64 = 2;
 
-  /// Success.
+  /// Open flags (the native values). Read.
+  const OPEN_READ: u64 = 1;
+
+  /// Write.
+  const OPEN_WRITE: u64 = 2;
+
+  /// Create a regular file if missing.
+  const OPEN_CREATE: u64 = 4;
+
+  /// With `OPEN_CREATE`, fail if the name exists.
+  const OPEN_EXCLUSIVE: u64 = 8;
+
+  /// Cut a regular file opened for writing.
+  const OPEN_TRUNCATE: u64 = 16;
+
+  /// Every write goes to the end.
+  const OPEN_APPEND: u64 = 32;
+
+  /// Fail unless a directory.
+  const OPEN_DIRECTORY: u64 = 64;
+
+  /// The portable names of the open flags, as in the Linux flavour.
+  const O_RDONLY: u64 = 1;
+
+  /// Write only.
+  const O_WRONLY: u64 = 2;
+
+  /// Read and write.
+  const O_RDWR: u64 = 3;
+
+  /// Create if missing.
+  const O_CREAT: u64 = 4;
+
+  /// With `O_CREAT`, fail if it exists.
+  const O_EXCL: u64 = 8;
+
+  /// Truncate.
+  const O_TRUNC: u64 = 16;
+
+  /// Append.
+  const O_APPEND: u64 = 32;
+
+  /// Must be a directory.
+  const O_DIRECTORY: u64 = 64;
+
+  /// `SEEK` from the start.
+  const SEEK_SET: u64 = 0;
+
+  /// `SEEK` from the current offset.
+  const SEEK_CUR: u64 = 1;
+
+  /// `SEEK` from the end.
+  const SEEK_END: u64 = 2;
+
+  /// Map protection: none.
+  const PROT_NONE: u64 = 0;
+
+  /// Read.
+  const PROT_READ: u64 = 1;
+
+  /// Write.
+  const PROT_WRITE: u64 = 2;
+
+  /// Execute.
+  const PROT_EXEC: u64 = 4;
+
+  /// Map flag: every native mapping is private, so this is 0.
+  const MAP_PRIVATE: u64 = 0;
+
+  /// Map flag: zeroed memory, not a file.
+  const MAP_ANONYMOUS: u64 = 1;
+
+  /// A regular file, in `FileInfo::kind`.
+  const KIND_FILE: u64 = 1;
+
+  /// A directory.
+  const KIND_DIRECTORY: u64 = 2;
+
+  /// A device (the console).
+  const KIND_DEVICE: u64 = 3;
+
+  /// Status codes (kernel/src/syscall/native/status.ign). Success.
   const OK: u64 = 0;
+
+  /// A path component does not exist.
+  const NOT_FOUND: u64 = 1;
+
+  /// A component that must be a directory is not one.
+  const NOT_DIRECTORY: u64 = 2;
+
+  /// A file operation on a directory.
+  const IS_DIRECTORY: u64 = 3;
+
+  /// The name is already taken.
+  const EXISTS: u64 = 4;
+
+  /// A component or the path is too long.
+  const NAME_TOO_LONG: u64 = 5;
+
+  /// Out of memory.
+  const NO_MEMORY: u64 = 6;
+
+  /// The directory has entries.
+  const NOT_EMPTY: u64 = 7;
 
   /// A malformed argument.
   const INVALID: u64 = 8;
 
+  /// A file would grow past its limit.
+  const TOO_LARGE: u64 = 9;
+
   /// The descriptor is not open, or not for this.
   const BAD_DESCRIPTOR: u64 = 10;
+
+  /// The descriptor table is full.
+  const TOO_MANY_OPEN: u64 = 11;
+
+  /// The descriptor cannot seek.
+  const NOT_SEEKABLE: u64 = 12;
 
   /// A user pointer is not valid for the access.
   const BAD_ADDRESS: u64 = 13;
 
   /// The call number is not part of the ABI.
   const NOT_SUPPORTED: u64 = 14;
+
+  /// Mapping something that is not a regular file.
+  const NO_DEVICE: u64 = 15;
+
+  /// The descriptor lacks the access.
+  const ACCESS: u64 = 16;
+
+  /// The portable error names, as in the Linux flavour, with native values.
+  const ENOENT: i64 = 1;
+
+  /// Not a directory.
+  const ENOTDIR: i64 = 2;
+
+  /// Is a directory.
+  const EISDIR: i64 = 3;
+
+  /// Exists.
+  const EEXIST: i64 = 4;
+
+  /// Name too long.
+  const ENAMETOOLONG: i64 = 5;
+
+  /// Out of memory.
+  const ENOMEM: i64 = 6;
+
+  /// Invalid argument.
+  const EINVAL: i64 = 8;
+
+  /// File too large.
+  const EFBIG: i64 = 9;
+
+  /// Bad descriptor.
+  const EBADF: i64 = 10;
+
+  /// Too many open files.
+  const EMFILE: i64 = 11;
+
+  /// Illegal seek.
+  const ESPIPE: i64 = 12;
+
+  /// Bad address.
+  const EFAULT: i64 = 13;
+
+  /// Not supported.
+  const ENOSYS: i64 = 14;
+
+  /// No device.
+  const ENODEV: i64 = 15;
+
+  /// Access.
+  const EACCES: i64 = 16;
 
   /// A call with no arguments.
   function call0(number: u64): Sys::Result {
@@ -95,10 +319,38 @@ export namespace Sys {
     return Sys::Result { status: status, value: value };
   }
 
+  /// A call with two arguments.
+  function call2(number: u64, first: u64, second: u64): Sys::Result {
+    asm (number in rax, first in rdi, second in rsi) -> (status: u64 in rax, value: u64 in rdx) clobber(rcx, r11, memory) { syscall }
+
+    return Sys::Result { status: status, value: value };
+  }
+
   /// A call with three arguments. The third goes in RDX, which also carries
   /// the value back.
   function call3(number: u64, first: u64, second: u64, third: u64): Sys::Result {
     asm (number in rax, first in rdi, second in rsi, third in rdx) -> (status: u64 in rax, value: u64 in rdx) clobber(rcx, r11, memory) { syscall }
+
+    return Sys::Result { status: status, value: value };
+  }
+
+  /// A call with four arguments; the fourth goes in R10.
+  function call4(number: u64, first: u64, second: u64, third: u64, fourth: u64): Sys::Result {
+    asm (number in rax, first in rdi, second in rsi, third in rdx, fourth in r10) -> (status: u64 in rax, value: u64 in rdx) clobber(rcx, r11, memory) { syscall }
+
+    return Sys::Result { status: status, value: value };
+  }
+
+  /// A call with five arguments; the fifth goes in R8.
+  function call5(
+    number: u64,
+    first: u64,
+    second: u64,
+    third: u64,
+    fourth: u64,
+    fifth: u64
+  ): Sys::Result {
+    asm (number in rax, first in rdi, second in rsi, third in rdx, fourth in r10, fifth in r8) -> (status: u64 in rax, value: u64 in rdx) clobber(rcx, r11, memory) { syscall }
 
     return Sys::Result { status: status, value: value };
   }
@@ -108,10 +360,98 @@ export namespace Sys {
     return result.status == OK ? result.value as i64 : 0 - (result.status as i64);
   }
 
+  /// The length of the NUL-terminated string at `text`.
+  function length(text: *u8): u64 {
+    let mut count: u64 = 0;
+
+    while (*(text + count) != 0) {
+      count += 1;
+    }
+
+    return count;
+  }
+
   /// `WRITE(descriptor, buffer, count)`: the bytes written, or the negated
   /// status.
   function write(descriptor: u64, buffer: *u8, count: u64): i64 {
     return portable(call3(WRITE, descriptor, @integerFromPointer(buffer), count));
+  }
+
+  /// `READ(descriptor, buffer, count)`: the bytes read, 0 at the end.
+  function read(descriptor: u64, buffer: *mut u8, count: u64): i64 {
+    return portable(call3(READ, descriptor, @integerFromPointer(buffer), count));
+  }
+
+  /// `OPEN(ROOT, path, length, flags, mode)` with a NUL-terminated path: the
+  /// descriptor.
+  function open(path: *u8, flags: u64, mode: u64): i64 {
+    return portable(call5(OPEN, ROOT, @integerFromPointer(path), length(path), flags, mode));
+  }
+
+  /// `CLOSE(descriptor)`.
+  function close(descriptor: u64): i64 {
+    return portable(call1(CLOSE, descriptor));
+  }
+
+  /// `SEEK(descriptor, offset, whence)`: the new offset.
+  function seek(descriptor: u64, offset: i64, whence: u64): i64 {
+    return portable(call3(SEEK, descriptor, offset as u64, whence));
+  }
+
+  /// `INFO(descriptor, result)`: 0 or the negated status.
+  function info(descriptor: u64, result: *mut Sys::FileInfo): i64 {
+    return portable(call2(INFO, descriptor, @integerFromPointer(result)));
+  }
+
+  /// `INFO_AT(ROOT, path, length, result)` with a NUL-terminated path.
+  function infoAt(path: *u8, result: *mut Sys::FileInfo): i64 {
+    return portable(call4(INFO_AT, ROOT, @integerFromPointer(path), length(path), @integerFromPointer(result)));
+  }
+
+  /// Reads the next entry of the open directory `descriptor`: writes its
+  /// name, NUL-terminated, to `name` (256 bytes) and its kind to `kind`, and
+  /// returns the name length; 0 after the last entry, the negated status on
+  /// an error. The native call never returns `.` or `..`.
+  function readEntry(descriptor: u64, name: *mut u8, kind: *mut u64): i64 {
+    let entry: *mut u8 = &mut NativeSysState::entry as *mut u8;
+    let result: Sys::Result = call3(READ_ENTRY, descriptor, @integerFromPointer(entry), 280);
+
+    if (result.status != OK || result.value == 0) {
+      return portable(result);
+    }
+
+    let nameLength: u64 = *@pointerFromInteger<*u64>(@integerFromPointer(entry) + 16);
+    let mut index: u64 = 0;
+
+    while (index < nameLength) {
+      *(name + index) = *(entry + 24 + index);
+      index += 1;
+    }
+
+    *(name + nameLength) = 0;
+    *kind = *@pointerFromInteger<*u64>(@integerFromPointer(entry));
+
+    return nameLength as i64;
+  }
+
+  /// `MAKE_DIRECTORY(ROOT, path, length, mode)` with a NUL-terminated path.
+  function makeDirectory(path: *u8, mode: u64): i64 {
+    return portable(call4(MAKE_DIRECTORY, ROOT, @integerFromPointer(path), length(path), mode));
+  }
+
+  /// `MAP(length, protection, flags, descriptor, offset)`: the address.
+  function mmap(size: u64, protection: u64, flags: u64, descriptor: u64, offset: u64): i64 {
+    return portable(call5(MAP, size, protection, flags, descriptor, offset));
+  }
+
+  /// `size` zeroed private bytes that can be read and written.
+  function mapAnonymous(size: u64): i64 {
+    return mmap(size, PROT_READ | PROT_WRITE, MAP_ANONYMOUS, 0, 0);
+  }
+
+  /// `UNMAP(address, length)`.
+  function munmap(address: u64, size: u64): i64 {
+    return portable(call2(UNMAP, address, size));
   }
 
   /// `EXIT(status)`. Does not return.
@@ -125,5 +465,50 @@ export namespace Sys {
   /// The id of the calling process.
   function getPid(): i64 {
     return portable(call0(PROCESS_ID));
+  }
+
+  /// `YIELD`.
+  function yield(): i64 {
+    return portable(call0(YIELD));
+  }
+
+  /// Sleeps `seconds` and `nanoseconds` with `SLEEP`. A negative part or
+  /// nanoseconds of a second or more is the negated `INVALID`, as the Linux
+  /// flavour's `nanosleep` would refuse it.
+  function sleep(seconds: i64, nanoseconds: i64): i64 {
+    if (seconds < 0 || nanoseconds < 0 || nanoseconds >= 1000000000 || seconds > 1000000) {
+      return 0 - (INVALID as i64);
+    }
+
+    return portable(call1(SLEEP, (seconds as u64) * 1000000000 + (nanoseconds as u64)));
+  }
+
+  /// A call by number with no arguments, for tests.
+  function unknown(number: u64): i64 {
+    return portable(call0(number));
+  }
+
+  /// The text of a negated status, with the same wording as the Linux
+  /// flavour, so the commands print the same messages.
+  function errorText(result: i64): str {
+    return match ((0 - result) as u64) {
+      NOT_FOUND -> "No such file or directory",
+      NOT_DIRECTORY -> "Not a directory",
+      IS_DIRECTORY -> "Is a directory",
+      EXISTS -> "File exists",
+      NAME_TOO_LONG -> "File name too long",
+      NO_MEMORY -> "Cannot allocate memory",
+      NOT_EMPTY -> "Directory not empty",
+      INVALID -> "Invalid argument",
+      TOO_LARGE -> "File too large",
+      BAD_DESCRIPTOR -> "Bad file descriptor",
+      TOO_MANY_OPEN -> "Too many open files",
+      NOT_SEEKABLE -> "Illegal seek",
+      BAD_ADDRESS -> "Bad address",
+      NOT_SUPPORTED -> "Function not implemented",
+      NO_DEVICE -> "No such device",
+      ACCESS -> "Permission denied",
+      _ -> "Unknown error",
+    };
   }
 }

@@ -108,6 +108,8 @@ namespace Syscall::Native {
       Fs::Files::TOO_MANY_OPEN -> TOO_MANY_OPEN,
       Fs::Files::NOT_SEEKABLE -> NOT_SEEKABLE,
       Syscall::Core::BAD_ADDRESS -> BAD_ADDRESS,
+      Syscall::Core::NO_DEVICE -> NO_DEVICE,
+      Syscall::Core::ACCESS -> ACCESS,
       _ -> INVALID,
     };
   }

@@ -21,36 +21,143 @@
 //! A value is never folded into the status: an error leaves RDX at 0, and a
 //! success may return any 64-bit value, including ones a Linux call would
 //! read as `-errno`.
+//!
+//! ## Arguments
+//!
+//! **Paths** are a user pointer and a length (at most `PATH_MAX - 1` bytes,
+//! else `NAME_TOO_LONG`). The directory argument of `OPEN`, `INFO_AT` and
+//! `MAKE_DIRECTORY` is `ROOT` for `/` or a descriptor open on a directory; an
+//! absolute path ignores it. An empty path is `NOT_FOUND`.
+//!
+//! **Open flags** are the `Fs::Files` flags, so nothing is translated:
+//!
+//! | Flag        | Value | | Flag        | Value |
+//! |-------------|-------|-|-------------|-------|
+//! | `READ`      | 1     | | `TRUNCATE`  | 16    |
+//! | `WRITE`     | 2     | | `APPEND`    | 32    |
+//! | `CREATE`    | 4     | | `DIRECTORY` | 64    |
+//! | `EXCLUSIVE` | 8     | |             |       |
+//!
+//! At least one of `READ` and `WRITE`; any other bit is `INVALID`.
+//!
+//! **The info record** (`INFO`, `INFO_AT`), 32 bytes:
+//!
+//! | Offset | Field | Value                                         |
+//! |--------|-------|-----------------------------------------------|
+//! | 0      | kind  | 1 regular file, 2 directory, 3 device         |
+//! | 8      | size  | bytes of a file, 0 otherwise                  |
+//! | 16     | id    | unique to the file                            |
+//! | 24     | mode  | the permission bits                           |
+//!
+//! **A directory entry** (`READ_ENTRY`): one per call, 24 bytes then the
+//! name, with no NUL: kind (8 bytes), id (8), name length (8), name. The
+//! value is the bytes written, 0 after the last entry. Unlike `getdents64`
+//! there is no `.` or `..`. A buffer too small for the entry is `INVALID`
+//! and the entry is not consumed. The offset of an open directory is the
+//! index of the next child.
+//!
+//! **Map**: `protection` is the `Proc::Memory` bits (read 1, write 2,
+//! execute 4); `flags` is 0 for a private copy of the file open as the
+//! descriptor, or `ANONYMOUS` (1) for zeroed memory. Every mapping is
+//! private.
+//!
+//! **Sleep** takes a plain count of nanoseconds, rounded up to whole timer
+//! ticks and capped at a million seconds.
 
 import Arch from "@arch";
+import Fs from "@fs";
+import Lib from "@lib";
+import Mm from "@mm";
 import Proc from "@proc";
+import Sched from "@sched";
+import Time from "@time";
 import _ from "../core";
 import _ from "../operation";
 import _ from "./status";
 
+/// The kernel buffers of the native calls. System calls run with interrupts
+/// off on the only processor, so one of each is enough.
+record NativeCallState {
+  /// A path copied from the user. The size must equal `Fs::Vfs::PATH_MAX`.
+  static mut path: u8[4096];
+
+  /// One info record or the header of a directory entry.
+  static mut scratch: u8[32];
+}
+
 /// The native handlers.
 namespace Syscall::Native {
+  /// The directory argument meaning `/`.
+  const ROOT: u64 = 0xFFFFFFFFFFFFFFFF;
+
+  /// The bits `OPEN` accepts.
+  const OPEN_FLAGS: u64 = 0x7F;
+
+  /// `MAP` flag: zeroed memory, not a file.
+  const MAP_ANONYMOUS: u64 = 1;
+
+  /// Bytes of the info record.
+  const INFO_SIZE: u64 = 32;
+
+  /// Bytes of a directory entry before its name.
+  const ENTRY_HEADER: u64 = 24;
+
+  /// Nanoseconds in one timer tick at `Time::Timer::FREQUENCY`.
+  const NANOSECONDS_PER_TICK: u64 = 10000000;
+
+  /// The longest sleep, in ticks: a million seconds.
+  const MAX_SLEEP_TICKS: u64 = 100000000;
+
   /// Runs `operation` with the arguments of `frame`, which a native process
   /// saved, and writes the result back to it. `EXIT` does not return.
   function run(operation: u8, frame: *mut Arch::InterruptFrame): void {
     let first: u64 = (*frame).rdi;
     let second: u64 = (*frame).rsi;
     let third: u64 = (*frame).rdx;
+    let fourth: u64 = (*frame).r10;
+    let fifth: u64 = (*frame).r8;
+    let mut value: u64 = 0;
+    let mut status: u64 = Fs::Vfs::OK;
+    let valuePointer: *mut u64 = &mut value as *mut u64;
 
     if (operation == Operation::EXIT) {
       Proc::Process::exitCurrent(first & 0xFF);
     }
 
     if (operation == Operation::WRITE) {
-      let mut done: u64 = 0;
-      let status: u64 = Syscall::Core::write(first, second, third, &mut done as *mut u64);
-
-      finish(frame, Native::statusFor(status), done);
+      status = Syscall::Core::write(first, second, third, valuePointer);
+    } else if (operation == Operation::READ) {
+      status = Syscall::Core::read(first, second, third, valuePointer);
+    } else if (operation == Operation::OPEN) {
+      status = open(first, second, third, fourth, fifth, valuePointer);
+    } else if (operation == Operation::CLOSE) {
+      status = Fs::Files::close(Proc::Process::currentSlot(), first);
+    } else if (operation == Operation::SEEK) {
+      status = Fs::Files::seek(Proc::Process::currentSlot(), first, second, third, valuePointer);
+    } else if (operation == Operation::STAT) {
+      status = info(first, second);
+    } else if (operation == Operation::STAT_AT) {
+      status = infoAt(first, second, third, fourth);
+    } else if (operation == Operation::READ_DIRECTORY) {
+      status = readEntry(first, second, third, valuePointer);
+    } else if (operation == Operation::MAKE_DIRECTORY) {
+      status = makeDirectory(first, second, third, fourth);
+    } else if (operation == Operation::MAP) {
+      status = map(first, second, third, fourth, fifth, valuePointer);
+    } else if (operation == Operation::UNMAP) {
+      status = Syscall::Core::unmap(first, second);
     } else if (operation == Operation::GET_PID) {
-      finish(frame, Native::OK, Proc::Process::currentId());
+      value = Proc::Process::currentId();
+    } else if (operation == Operation::YIELD) {
+      Sched::Scheduler::yield();
+    } else if (operation == Operation::SLEEP) {
+      sleep(first);
     } else {
       finish(frame, Native::NOT_SUPPORTED, 0);
+      return;
     }
+
+    finish(frame, Native::statusFor(status), value);
   }
 
   /// Stores a native status and its value in the frame. The value is
@@ -58,5 +165,222 @@ namespace Syscall::Native {
   function finish(frame: *mut Arch::InterruptFrame, status: u64, value: u64): void {
     (*frame).rax = status;
     (*frame).rdx = status == Native::OK ? value : 0;
+  }
+
+  /// `OPEN(directory, path, length, flags, mode)`.
+  function open(
+    directory: u64,
+    path: u64,
+    length: u64,
+    flags: u64,
+    mode: u64,
+    descriptor: *mut u64
+  ): u64 {
+    if ((flags & ~OPEN_FLAGS) != 0 || (flags & (Fs::Files::READ | Fs::Files::WRITE)) == 0) {
+      return Fs::Vfs::INVALID;
+    }
+
+    let table: u64 = Proc::Process::currentSlot();
+    let mut base: *mut Fs::Node = null;
+    let status: u64 = resolve(table, directory, path, length, &mut base as *mut *mut Fs::Node);
+
+    if (status != Fs::Vfs::OK) {
+      return status;
+    }
+
+    return Fs::Files::open(table, base, pathBuffer() as *u8, length, flags, mode, descriptor);
+  }
+
+  /// `INFO(descriptor, record)`.
+  function info(descriptor: u64, buffer: u64): u64 {
+    let file: *mut Fs::OpenFile = Fs::Files::get(Proc::Process::currentSlot(), descriptor);
+
+    if (file == null) {
+      return Fs::Files::BAD_DESCRIPTOR;
+    }
+
+    return writeInfo((*file).node, buffer);
+  }
+
+  /// `INFO_AT(directory, path, length, record)`.
+  function infoAt(directory: u64, path: u64, length: u64, buffer: u64): u64 {
+    let mut base: *mut Fs::Node = null;
+    let status: u64 = resolve(Proc::Process::currentSlot(), directory, path, length, &mut base as *mut *mut Fs::Node);
+
+    if (status != Fs::Vfs::OK) {
+      return status;
+    }
+
+    let mut node: *mut Fs::Node = null;
+    let found: u64 = Fs::Vfs::lookup(base, pathBuffer() as *u8, length, &mut node as *mut *mut Fs::Node);
+
+    if (found != Fs::Vfs::OK) {
+      return found;
+    }
+
+    return writeInfo(node, buffer);
+  }
+
+  /// `READ_ENTRY(descriptor, buffer, capacity)`.
+  function readEntry(descriptor: u64, buffer: u64, capacity: u64, written: *mut u64): u64 {
+    let file: *mut Fs::OpenFile = Fs::Files::get(Proc::Process::currentSlot(), descriptor);
+
+    if (file == null) {
+      return Fs::Files::BAD_DESCRIPTOR;
+    }
+
+    if ((*file).kind != Fs::Files::NODE || (*(*file).node).kind != Fs::Vfs::DIRECTORY) {
+      return Fs::Vfs::NOT_DIRECTORY;
+    }
+
+    let child: *mut Fs::Node = Fs::Vfs::child((*file).node, (*file).offset);
+
+    if (child == null) {
+      *written = 0;
+      return Fs::Vfs::OK;
+    }
+
+    let total: u64 = ENTRY_HEADER + (*child).nameLength;
+
+    if (capacity < total) {
+      return Fs::Vfs::INVALID;
+    }
+
+    let root: u64 = Proc::Process::currentRoot();
+    let header: *mut u8 = &mut NativeCallState::scratch as *mut u8;
+
+    putWord(header, 0, (*child).kind);
+    putWord(header, 8, (*child).id);
+    putWord(header, 16, (*child).nameLength);
+
+    if (!Mm::AddressSpace::isAccessible(root, buffer, total, true) || !Mm::AddressSpace::copyToUser(root, buffer, header as *u8, ENTRY_HEADER) || !Mm::AddressSpace::copyToUser(root, buffer + ENTRY_HEADER, (*child).name as *u8, (*child).nameLength)) {
+      return Syscall::Core::BAD_ADDRESS;
+    }
+
+    (*file).offset += 1;
+    *written = total;
+
+    return Fs::Vfs::OK;
+  }
+
+  /// `MAKE_DIRECTORY(directory, path, length, mode)`.
+  function makeDirectory(directory: u64, path: u64, length: u64, mode: u64): u64 {
+    let mut base: *mut Fs::Node = null;
+    let status: u64 = resolve(Proc::Process::currentSlot(), directory, path, length, &mut base as *mut *mut Fs::Node);
+
+    if (status != Fs::Vfs::OK) {
+      return status;
+    }
+
+    let mut parent: *mut Fs::Node = null;
+    let mut nameOffset: u64 = 0;
+    let mut nameLength: u64 = 0;
+    let split: u64 = Fs::Vfs::lookupParent(base, pathBuffer() as *u8, length, &mut parent as *mut *mut Fs::Node, &mut nameOffset as *mut u64, &mut nameLength as *mut u64);
+
+    if (split == Fs::Vfs::INVALID) {
+      return Fs::Vfs::EXISTS;
+    }
+
+    if (split != Fs::Vfs::OK) {
+      return split;
+    }
+
+    let mut created: *mut Fs::Node = null;
+
+    return Fs::Vfs::create(parent, (pathBuffer() as *u8) + nameOffset, nameLength, Fs::Vfs::DIRECTORY, mode & Fs::Files::PERMISSION_MASK, &mut created as *mut *mut Fs::Node);
+  }
+
+  /// `MAP(length, protection, flags, descriptor, offset)`.
+  function map(
+    length: u64,
+    protection: u64,
+    flags: u64,
+    descriptor: u64,
+    offset: u64,
+    address: *mut u64
+  ): u64 {
+    if ((flags & ~MAP_ANONYMOUS) != 0) {
+      return Fs::Vfs::INVALID;
+    }
+
+    return Syscall::Core::map(flags == MAP_ANONYMOUS, descriptor, offset, length, protection, address);
+  }
+
+  /// `SLEEP(nanoseconds)`: rounded up to whole ticks, at most a million
+  /// seconds.
+  function sleep(nanoseconds: u64): void {
+    let mut ticks: u64 = nanoseconds / NANOSECONDS_PER_TICK;
+
+    if (nanoseconds % NANOSECONDS_PER_TICK != 0) {
+      ticks += 1;
+    }
+
+    Sched::Scheduler::sleep(ticks < MAX_SLEEP_TICKS ? ticks : MAX_SLEEP_TICKS);
+  }
+
+  /// Copies the `length` bytes of the user path at `path` into `pathBuffer`
+  /// and finds the directory it is relative to: the root for an absolute
+  /// path or `ROOT`, otherwise the open directory `directory`. Returns
+  /// `NOT_FOUND` for an empty path, `NAME_TOO_LONG`, `BAD_ADDRESS`, and the
+  /// `Fs::Files::directoryOf` codes.
+  function resolve(
+    table: u64,
+    directory: u64,
+    path: u64,
+    length: u64,
+    base: *mut *mut Fs::Node
+  ): u64 {
+    if (length == 0) {
+      return Fs::Vfs::NOT_FOUND;
+    }
+
+    if (length >= Fs::Vfs::PATH_MAX) {
+      return Fs::Vfs::NAME_TOO_LONG;
+    }
+
+    if (!Mm::AddressSpace::copyFromUser(Proc::Process::currentRoot(), pathBuffer(), path, length)) {
+      return Syscall::Core::BAD_ADDRESS;
+    }
+
+    if (directory == ROOT || *pathBuffer() == 0x2F) {
+      *base = Fs::Vfs::root();
+      return Fs::Vfs::OK;
+    }
+
+    return Fs::Files::directoryOf(table, directory, base);
+  }
+
+  /// Writes the info record of `node`, or of the console when `node` is
+  /// null, to the user address `buffer`.
+  function writeInfo(node: *mut Fs::Node, buffer: u64): u64 {
+    let scratch: *mut u8 = &mut NativeCallState::scratch as *mut u8;
+
+    Lib::Mem::fill(scratch, 0, INFO_SIZE);
+
+    if (node == null) {
+      putWord(scratch, 0, Fs::Vfs::DEVICE);
+      putWord(scratch, 24, Fs::Vfs::CONSOLE_MODE);
+    } else {
+      putWord(scratch, 0, (*node).kind);
+      putWord(scratch, 8, (*node).size);
+      putWord(scratch, 16, (*node).id);
+      putWord(scratch, 24, (*node).mode);
+    }
+
+    if (!Mm::AddressSpace::copyToUser(Proc::Process::currentRoot(), buffer, scratch as *u8, INFO_SIZE)) {
+      return Syscall::Core::BAD_ADDRESS;
+    }
+
+    return Fs::Vfs::OK;
+  }
+
+  /// The kernel copy of the current path.
+  function pathBuffer(): *mut u8 {
+    return &mut NativeCallState::path as *mut u8;
+  }
+
+  /// Stores the 8-byte `value` at `offset` of `bytes`.
+  function putWord(bytes: *mut u8, offset: u64, value: u64): void {
+    *@pointerFromInteger<*mut u64>(@integerFromPointer(bytes) + offset) = value;
   }
 }

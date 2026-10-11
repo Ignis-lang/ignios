@@ -24,8 +24,8 @@ Early, and only tested in QEMU with OVMF.
 | Files | A ustar initramfs loaded by Limine and checked at boot; an in-memory file tree seeded from it with copy on write, `/dev/console`, path rules as on Linux; per-process descriptor tables (16 descriptors, 0 to 2 on the console); nothing is saved across reboots |
 | Commands | `cat`, `ls`, `touch` and `mkdir` in `/bin`, written in Ignis on the Linux system calls; any line at the prompt that is not a built-in runs as a program |
 | Memory mappings | `mmap` of anonymous memory and private copies of files, `munmap` that trims and splits regions, `PROT_READ`/`PROT_WRITE`/`PROT_EXEC`/`PROT_NONE` enforced by the page tables, write with execute refused; up to 32 regions per process; `std::alloc`, a user heap on `mmap` behind the compiler's allocation hooks; `cat` reads files through `mmap` |
-| Native ABI | A second system call ABI next to Linux, chosen per program by an `IgniOS` ELF note: own call numbers, the status in RAX and the value in RDX, a published table of status codes; both ABIs share descriptors and the checked transfers of `Syscall::Core` |
-| Next | the native file and memory calls, and the commands on the native ABI |
+| Native ABI | A second system call ABI next to Linux, chosen per program by an `IgniOS` ELF note: own call numbers (15 calls: files, directories, memory, scheduling), the status in RAX and the value in RDX, a published table of status codes, paths as pointer and length; both ABIs share descriptors and the checked transfers of `Syscall::Core`; `hello`, `cat`, `ls`, `touch` and `mkdir` are native programs, `fstest` and `mmtest` keep testing the Linux layer |
+| Next | `unlink`, `rmdir` and a current directory; a writable console input for programs |
 
 ## Quick start
 
@@ -59,7 +59,7 @@ The build also needs an Ignis compiler with freestanding support (Ignis `main` f
 
 Ignis compiles the whole kernel to one C unit, which clang compiles for `x86_64-unknown-none` with kernel flags (no red zone, no SSE in the kernel, `-mcmodel=kernel`). The few routines that cannot be written in Ignis are small `.S` files under `kernel/src/arch/x86_64/`: interrupt entry stubs, the code segment reload, the stack switch, the ring 3 entry and the `SYSCALL` stub, the per-CPU block, the fault probes, and the throwaway user programs of the boot self-tests. `ld.lld` links everything with `kernel/linker.ld`, and `mtools` writes the boot image. No cross GCC is involved.
 
-User programs are Ignis projects under `user/` built with `std = false` and the small user standard library in `user/lib`, shared code in `common/` and one `sys` per system call ABI in `linux/` (`std::sys` wraps the system calls in inline asm, `std::io` prints, `std::args` reads argv, `std::alloc` is a heap on `mmap`). The Makefile links each one after the entry stub `user/lib/linux/start.S` with `user/user.ld` into a static ELF64 at `0x400000` and packs it into the initramfs as `/bin/NAME`. The kernel runs `hello one two` at boot, before the keyboard line, and `run hello` at the prompt runs it again; `run PROGRAM ARG...` passes arguments.
+User programs are Ignis projects under `user/` built with `std = false` and the small user standard library in `user/lib`, shared code in `common/` and one `sys` per system call ABI in `linux/` and `native/` (`std::sys` wraps the system calls in inline asm, `std::io` prints, `std::args` reads argv, `std::alloc` is a heap on `mmap`). The Makefile links each one after the entry stub `user/lib/linux/start.S` with `user/user.ld` into a static ELF64 at `0x400000` and packs it into the initramfs as `/bin/NAME`. The kernel runs `hello one two` at boot, before the keyboard line, and `run hello` at the prompt runs it again; `run PROGRAM ARG...` passes arguments.
 
 ## Layout
 

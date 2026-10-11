@@ -19,6 +19,9 @@
 //! | the whole user range checked first     | a bad buffer moves nothing                     |
 //! | an error after some bytes moved        | `OK` with the bytes moved so far              |
 //!
+//! `map` and `unmap` do the same for `Proc::Memory`: the descriptor checks of
+//! a file mapping and the status of the region table, as kernel codes.
+//!
 //! System calls run with interrupts off on the only processor, so one
 //! staging buffer is enough.
 
@@ -38,6 +41,12 @@ namespace Syscall::Core {
   /// A user pointer failed validation. Next to the `Fs` codes, which stay
   /// below 100.
   const BAD_ADDRESS: u64 = 100;
+
+  /// Mapping something that is not a regular file. Next to `BAD_ADDRESS`.
+  const NO_DEVICE: u64 = 101;
+
+  /// The descriptor lacks the access the call needs.
+  const ACCESS: u64 = 102;
 
   /// The most one `read` or `write` moves.
   const MAX_TRANSFER: u64 = 65536;
@@ -137,5 +146,75 @@ namespace Syscall::Core {
     *done = moved;
 
     return Fs::Vfs::OK;
+  }
+
+  /// Maps `length` bytes with the `Proc::Memory` `protection` into the
+  /// running process and writes the address to `address`. An `anonymous`
+  /// mapping is zeroed; otherwise it is a private copy of the file open as
+  /// `descriptor`, from `offset` (a page multiple), with zeros past its end.
+  /// Returns `Fs::Vfs::INVALID` for a bad length, protection or offset,
+  /// `Fs::Files::BAD_DESCRIPTOR`, `NO_DEVICE` for something other than a
+  /// regular file, `ACCESS` for a descriptor not open for reading, and
+  /// `Fs::Vfs::NO_MEMORY` when frames or region entries run out.
+  function map(
+    anonymous: boolean,
+    descriptor: u64,
+    offset: u64,
+    length: u64,
+    protection: u64,
+    address: *mut u64
+  ): u64 {
+    if (length == 0 || offset % 4096 != 0 || (protection & ~(Proc::Memory::READ | Proc::Memory::WRITE | Proc::Memory::EXECUTE)) != 0) {
+      return Fs::Vfs::INVALID;
+    }
+
+    let slot: u64 = Proc::Process::currentSlot();
+    let mut source: *u8 = null;
+    let mut sourceLength: u64 = 0;
+
+    if (!anonymous) {
+      let file: *mut Fs::OpenFile = Fs::Files::get(slot, descriptor);
+
+      if (file == null) {
+        return Fs::Files::BAD_DESCRIPTOR;
+      }
+
+      if ((*file).kind != Fs::Files::NODE || (*(*file).node).kind != Fs::Vfs::FILE) {
+        return NO_DEVICE;
+      }
+
+      if (((*file).flags & Fs::Files::READ) == 0) {
+        return ACCESS;
+      }
+
+      let node: *mut Fs::Node = (*file).node;
+
+      if (offset < (*node).size) {
+        source = ((*node).data as *u8) + offset;
+        sourceLength = (*node).size - offset < length ? (*node).size - offset : length;
+      }
+    }
+
+    let status: u64 = Proc::Memory::map(slot, Proc::Process::currentRoot(), length, protection, source, sourceLength, address);
+
+    if (status == Proc::Memory::OK) {
+      return Fs::Vfs::OK;
+    }
+
+    return status == Proc::Memory::INVALID ? Fs::Vfs::INVALID : Fs::Vfs::NO_MEMORY;
+  }
+
+  /// Removes `[address, address + length)` from the mappings of the running
+  /// process. Returns `Fs::Vfs::INVALID` for an unaligned address, a length
+  /// of 0 or a range outside the user half, and `Fs::Vfs::NO_MEMORY` when a
+  /// split needs a region entry and none is free.
+  function unmap(address: u64, length: u64): u64 {
+    let status: u64 = Proc::Memory::unmap(Proc::Process::currentSlot(), Proc::Process::currentRoot(), address, length);
+
+    if (status == Proc::Memory::OK) {
+      return Fs::Vfs::OK;
+    }
+
+    return status == Proc::Memory::INVALID ? Fs::Vfs::INVALID : Fs::Vfs::NO_MEMORY;
   }
 }

@@ -37,6 +37,7 @@
 
 import Fs from "@fs";
 import Proc from "@proc";
+import _ from "../core";
 import _ from "./errno";
 
 /// The memory system call handlers.
@@ -83,61 +84,17 @@ namespace Syscall::Linux {
       return Linux::failure(Linux::EINVAL);
     }
 
-    let slot: u64 = Proc::Process::currentSlot();
-    let mut source: *u8 = null;
-    let mut sourceLength: u64 = 0;
-
-    if ((flags & MAP_ANONYMOUS) == 0) {
-      let file: *mut Fs::OpenFile = Fs::Files::get(slot, descriptor);
-
-      if (file == null) {
-        return Linux::failure(Linux::EBADF);
-      }
-
-      if ((*file).kind != Fs::Files::NODE || (*(*file).node).kind != Fs::Vfs::FILE) {
-        return Linux::failure(Linux::ENODEV);
-      }
-
-      if (((*file).flags & Fs::Files::READ) == 0) {
-        return Linux::failure(Linux::EACCES);
-      }
-
-      let node: *mut Fs::Node = (*file).node;
-
-      if (offset < (*node).size) {
-        source = ((*node).data as *u8) + offset;
-        sourceLength = (*node).size - offset < length ? (*node).size - offset : length;
-      }
-    }
-
-    let neutral: u64 = translateProtection(protection);
     let mut address: u64 = 0;
-    let status: u64 = Proc::Memory::map(slot, Proc::Process::currentRoot(), length, neutral, source, sourceLength, &mut address as *mut u64);
+    let status: u64 = Syscall::Core::map((flags & MAP_ANONYMOUS) != 0, descriptor, offset, length, translateProtection(protection), &mut address as *mut u64);
 
-    if (status == Proc::Memory::INVALID) {
-      return Linux::failure(Linux::EINVAL);
-    }
-
-    if (status != Proc::Memory::OK) {
-      return Linux::failure(Linux::ENOMEM);
-    }
-
-    return address;
+    return status == Fs::Vfs::OK ? address : Linux::failureFor(status);
   }
 
   /// `munmap(addr, length)`.
   function munmap(address: u64, length: u64): u64 {
-    let status: u64 = Proc::Memory::unmap(Proc::Process::currentSlot(), Proc::Process::currentRoot(), address, length);
+    let status: u64 = Syscall::Core::unmap(address, length);
 
-    if (status == Proc::Memory::INVALID) {
-      return Linux::failure(Linux::EINVAL);
-    }
-
-    if (status != Proc::Memory::OK) {
-      return Linux::failure(Linux::ENOMEM);
-    }
-
-    return 0;
+    return status == Fs::Vfs::OK ? 0 : Linux::failureFor(status);
   }
 
   /// The `Proc::Memory` protection of Linux `prot` bits.

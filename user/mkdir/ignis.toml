@@ -9,7 +9,7 @@ description = "Creates directories"
 # not the Ignis one.
 [ignis]
 std = false
-std_path = "../lib/linux"
+std_path = "../lib/native"
 
 [build]
 bin = false

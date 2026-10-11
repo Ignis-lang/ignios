@@ -28,7 +28,7 @@ The concept documents explain the x86_64 and kernel background, and this guide r
 | 07 | Framebuffer console | 15 | System calls and ELF programs |
 | 16 | x87 and SSE state | 17 | SMEP, SMAP and fault probes |
 | 18 | Per-CPU data and `swapgs` | 19 | Files: initramfs, VFS and descriptors |
-| 20 | Memory mappings: `mmap` and a user heap | | |
+| 20 | Memory mappings: `mmap` and a user heap | 21 | The native IgniOS ABI |
 
 ## The subsystems
 
@@ -200,7 +200,7 @@ Docs 14 and 15.
 
 **`proc/process.ign`.** The process table. A process is a slot plus a kernel thread that owns the address space. The header draws the lifetime from `startElf` to `wait`, which blocks in `Sched::Scheduler::join` until the process thread is gone.
 
-**`syscall/dispatch.ign`, `operation.ign` and `linux/`.** Two-step dispatch: the call number maps to an operation through a per-process table, then the operation runs. `dispatch.ign` draws the flow, `operation.ign` has the ABI independent operations, `linux/table.ign` lists the calls, `linux/files.ign` (part 10) and `linux/nanosleep.ign` are the handlers, and `linux/errno.ign` turns the status codes of `Fs` into errno values. `native/` is the second ABI, chosen by the IgniOS ELF note that `Proc::Elf::findAbi` looks for: `native/table.ign` has its call numbers, `native/status.ign` its published status codes, `native/calls.ign` the handlers, which put the status in RAX and the value in RDX. `core.ign` moves bytes for both ABIs with the user pointers checked, so they cannot drift apart. Doc 21. Every user pointer goes through `Mm::AddressSpace::copyFromUser`, `copyToUser` or `copyStringFromUser`, and a bad one is `-EFAULT`.
+**`syscall/dispatch.ign`, `operation.ign` and `linux/`.** Two-step dispatch: the call number maps to an operation through a per-process table, then the operation runs. `dispatch.ign` draws the flow, `operation.ign` has the ABI independent operations, `linux/table.ign` lists the calls, `linux/files.ign` (part 10) and `linux/nanosleep.ign` are the handlers, and `linux/errno.ign` turns the status codes of `Fs` into errno values. `native/` is the second ABI, chosen by the IgniOS ELF note that `Proc::Elf::findAbi` looks for: `native/table.ign` has its call numbers, `native/status.ign` its published status codes, `native/calls.ign` the handlers, which put the status in RAX and the value in RDX; its header has the argument rules (paths as pointer and length, `ROOT` for `/`), the open flags, the 32-byte info record and the directory entry layout. `core.ign` moves bytes for both ABIs with the user pointers checked, so they cannot drift apart. Doc 21. Every user pointer goes through `Mm::AddressSpace::copyFromUser`, `copyToUser` or `copyStringFromUser`, and a bad one is `-EFAULT`.
 
 **`proc/elf.ign`.** The ELF64 loader. The header maps the segments of `build/user/hello.elf` to user addresses and shows the header structures. It refuses a segment that is both writable and executable.
 
@@ -210,7 +210,7 @@ Docs 14 and 15.
 
 **`user/lib/common/alloc.ign`.** `std::alloc`, the heap of user programs: first-fit over 64 KiB arenas from `mmap`, an address-ordered free list that merges neighbours, and a mapping of its own for a block over 16 KiB, given back with `munmap`. It also defines the compiler's `@allocHandler` and `@freeHandler`, so closures that capture values work in a program that imports it. The header draws both block layouts.
 
-**`user/lib/native/` and `user/nativetest/`.** The native flavour of the library. `start.S` carries the IgniOS note (a section that `user/user.ld` places at the start of rodata and in a `PT_NOTE` segment) and ends the program with the native `EXIT`. `sys.ign` returns a `Sys::Result` (status, value) from the raw calls and the same portable `i64` functions as the Linux flavour, so `io` and `args` build against both. `nativetest` checks the convention from ring 3.
+**`user/lib/native/` and `user/nativetest/`.** The native flavour of the library, which `hello`, `cat`, `ls`, `touch` and `mkdir` use; `fstest` and `mmtest` stay on the Linux flavour so both ABIs keep a ring 3 test. `start.S` carries the IgniOS note (a section that `user/user.ld` places at the start of rodata and in a `PT_NOTE` segment) and ends the program with the native `EXIT`. `sys.ign` returns a `Sys::Result` (status, value) from the raw calls and the same portable `i64` functions as the Linux flavour, so `io` and `args` build against both. `nativetest` checks the convention from ring 3.
 
 **`user/`.** The user side. `lib/linux/start.S` is `_start`, the entry point of every program: it reads argc and argv from the initial stack and calls the program's `main`, because a compiled function cannot start on a stack that holds no return address. `lib/linux/sys.ign` wraps the `syscall` instruction and offers a portable layer (`Sys::FileInfo`, `info`, `infoAt`, `readEntry`) over the Linux structures, `lib/common/io.ign` prints, `lib/common/args.ign` reads argv, and `hello/src/main.ign` is the first program. `user/user.ld` places programs at `0x400000`.
 
@@ -369,9 +369,9 @@ vmm: self-test ok
 `Tests::Vmm::run` mapped a frame at a test address, wrote through it, read it through the direct map, and unmapped it.
 
 ```text
-modules: initramfs is /initramfs.tar, 122880 bytes at 0xffff80000a0a3000
+modules: initramfs is /initramfs.tar, 133120 bytes at 0xffff80000a0c0000
 ```
-The Limine module from `boot/limine.conf`. `initramfs` is the `module_string`, `/initramfs.tar` the path. `Mm::Modules::initialize` mapped its pages read only. The address is in the direct map, so the file sits at physical `0x0a0a3000`. Doc 15.
+The Limine module from `boot/limine.conf`. `initramfs` is the `module_string`, `/initramfs.tar` the path. `Mm::Modules::initialize` mapped its pages read only. The address is in the direct map, so the file sits at physical `0x0a0c0000`. Doc 15.
 
 ```text
 heap: self-test ok, 1092 KiB mapped, 0 bytes in use
@@ -379,16 +379,16 @@ heap: self-test ok, 1092 KiB mapped, 0 bytes in use
 `Tests::Heap::run` checked alignment, reuse, merging, growth (it allocates 1 MiB) and the compiler allocation handlers. 1092 KiB of heap pages stayed mapped and every block was freed. Doc 10.
 
 ```text
-initramfs: 122880 bytes, 9 files with 106299 bytes of data, 3 directories
+initramfs: 133120 bytes, 9 files with 114483 bytes of data, 3 directories
 initramfs: self-test ok, 6 malformed headers refused, 2 valid ones read, etc/motd read back
 ```
 `Fs::Initramfs::initialize` walked the archive: `etc/motd` and the eight programs in `bin` (`cat`, `fstest`, `hello`, `ls`, `mkdir`, `mmtest`, `nativetest`, `touch`) are the files, and `.`, `bin` and `etc` the directories. The size is a multiple of 10240 bytes because tar pads the archive to whole records. `Tests::Initramfs::run` then fed the reader one broken header per error code (checksum, magic, a non-octal number, a `..` path, a symbolic link, data past the end), a file and a directory with a prefix, and compared `etc/motd` with the text it should hold.
 
 ```text
-vfs: 14 nodes, 106299 bytes in files, seeded from the initramfs
+vfs: 14 nodes, 114483 bytes in files, seeded from the initramfs
 vfs: self-test ok, lookup, create, read, write, truncate, remove and copy on write
 ```
-`Fs::Vfs::initialize` built the tree: the root, `bin` with its eight programs, `etc` and `etc/motd` from the archive, then `dev` and the device node `dev/console`. The file bytes are the same 106299 as in the archive, because nothing was copied. `Tests::Vfs::run` checked every path rule, created, wrote, read, truncated and removed a test directory `/t` and checked that the heap returned to where it was, then wrote to `/etc/motd` to check that the write copied the file and left the archive alone.
+`Fs::Vfs::initialize` built the tree: the root, `bin` with its eight programs, `etc` and `etc/motd` from the archive, then `dev` and the device node `dev/console`. The file bytes are the same 114483 as in the archive, because nothing was copied. `Tests::Vfs::run` checked every path rule, created, wrote, read, truncated and removed a test directory `/t` and checked that the heap returned to where it was, then wrote to `/etc/motd` to check that the write copied the file and left the archive alone.
 
 ```text
 address space: self-test ok, private user half, shared kernel half, frames returned
@@ -592,28 +592,28 @@ user: isolation ok, a null write, hlt, cli, ud2, a kernel read, port I/O, a writ
 ### The ELF program
 
 ```text
-elf: PT_LOAD 0x0000000000400000 file 2210 mem 2210 r-x
-elf: PT_LOAD 0x0000000000401000 file 187 mem 187 r--
+elf: PT_LOAD 0x0000000000400000 file 2354 mem 2354 r-x
+elf: PT_LOAD 0x0000000000401000 file 211 mem 211 r--
 elf: PT_LOAD 0x0000000000402000 file 8 mem 16 rw-
-elf: 3 segments, 3 pages, entry 0x0000000000400000, stack pointer 0x00007fffffffef90, argc 3, abi linux
+elf: 3 segments, 3 pages, entry 0x0000000000400000, stack pointer 0x00007fffffffef90, argc 3, abi native
 ```
-`Tests::User::runHello` ran the line `hello one two`, so `Proc::Programs::run` looked up `/bin/hello` in the file tree and `Proc::Process::startElf` loaded it. One line per segment: address, bytes copied from the file, bytes in memory, permissions. The data segment has 8 file bytes and 16 memory bytes, so the last 8 are zero (`.bss`). The last line is the summary. The entry is `_start` of `user/lib/linux/start.S`, linked first. The stack pointer is the address of argc: the 14 bytes of `hello\0one\0two\0` rounded up to 16 below the top, then 12 words (argc, three argv entries, two zeros, three auxiliary pairs), rounded down to 16. Doc 15.
+`Tests::User::runHello` ran the line `hello one two`, so `Proc::Programs::run` looked up `/bin/hello` in the file tree and `Proc::Process::startElf` loaded it. One line per segment: address, bytes copied from the file, bytes in memory, permissions. The data segment has 8 file bytes and 16 memory bytes, so the last 8 are zero (`.bss`). The last line is the summary. The entry is `_start` of `user/lib/native/start.S`, linked first; its IgniOS note made the loader pick the native ABI (`abi native`). The stack pointer is the address of argc: the 14 bytes of `hello\0one\0two\0` rounded up to 16 below the top, then 12 words (argc, three argv entries, two zeros, three auxiliary pairs), rounded down to 16. Doc 15.
 
 ```text
 argv: hello one two
 hello from user mode, pid 19
 data 42, bss 0 then 1
 i64 minimum = -9223372036854775808
-write(1, 0x1, 5) = -14
-write(7, ...) = -9
-syscall 9999 = -38
+write(1, 0x1, 5) = -13
+write(7, ...) = -10
+syscall 9999 = -14
 sleep(0.05 s) = 0
 yield() = 0
 goodbye from user mode
 process 19 exited with status 0
 user: /bin/hello from the initramfs ran with 3 arguments and exited with status 0
 ```
-The output of `user/hello/src/main.ign`. The first line is argv as `main` received it from `_start`; `make run-headless` checks it. It is process 19, after the 18 test processes. `data 42` shows `.data` was loaded (41 plus 1), `bss 0 then 1` shows `.bss` was zeroed. The i64 minimum line shows that `Io::printNumber` negates in `u64`, where -2^63 has a magnitude; `make run-headless` fails if it is wrong. The three negative results are `-EFAULT`, `-EBADF` and `-ENOSYS`.
+The output of `user/hello/src/main.ign`. The first line is argv as `main` received it from `_start`; `make run-headless` checks it. It is process 19, after the 18 test processes. `data 42` shows `.data` was loaded (41 plus 1), `bss 0 then 1` shows `.bss` was zeroed. The i64 minimum line shows that `Io::printNumber` negates in `u64`, where -2^63 has a magnitude; `make run-headless` fails if it is wrong. The three negative results are native status codes, negated by the portable `Sys` functions: `BAD_ADDRESS` (13), `BAD_DESCRIPTOR` (10) and `NOT_SUPPORTED` (14). A Linux program would see `-EFAULT`, `-EBADF` and `-ENOSYS` (-14, -9, -38) from the same mistakes.
 
 ```text
 run: /bin/nope: no such file or directory
@@ -655,15 +655,15 @@ user: mmtest passed, writing read-only, using unmapped, executing non-exec and t
 `Tests::User::runMemory` ran `/bin/mmtest` (the loader's `elf:` lines left out). The first line is `/etc/motd`, which the program read into a mapping and wrote from it, to show that system calls take mapped memory as a buffer. The checks also mapped `/etc/motd` and a page of `/bin/hello` privately, and ran `std::alloc` through 200 blocks, a large block and a closure. Then the program ran four more times with an argument, each one doing something the page tables must stop, and each one was killed. Every first mapping of a process is the page below `0x7F0000000000`, `0x7EFFFFFFF000`. The error codes say why: `0x7` is a write to a present read-only user page, `0x4` a user read of a page that is not present (unmapped, or `PROT_NONE`, which maps nothing), `0x15` an instruction fetch from a no-execute page; `rip` equal to the address is the jump into the mapping. The last run freed a `std::alloc` block twice; the allocator panicked and the program's panic handler exited with 101. The PMM free count was the same afterwards. Doc 20.
 
 ```text
-elf: 2 segments, 2 pages, entry 0x0000000000400000, stack pointer 0x00007fffffffefa0, argc 1, abi native
+elf: 3 segments, 4 pages, entry 0x0000000000400000, stack pointer 0x00007fffffffefa0, argc 1, abi native
 nativetest: hello through the native ABI
-nativetest: status in rax, value in rdx, unknown and Linux numbers refused
+nativetest: every native call, its arguments and its status codes behave as specified
 process 27 exited with status 0
 elf: the IgniOS ABI note names an unknown version
 elf: a note runs past the end of the file
 user: nativetest passed, a note of version 2 and a note past the end of the file were refused
 ```
-`Tests::User::runNative` ran `/bin/nativetest`. Its ELF carries the IgniOS note, so the loader printed `abi native` (every other program says `abi linux`) and the process used the native call table. The program checked that a call returns its status in RAX and its value in RDX, that an error leaves RDX at 0 even when RDX went in with another value, and that call 9999 and Linux's `getpid` number 39 are both `NOT_SUPPORTED`. Then the test handed the loader two copies of the same file with the note broken, one claiming version 2 and one with a description larger than the file; both were refused before anything was mapped, and no memory leaked. Doc 21.
+`Tests::User::runNative` ran `/bin/nativetest`. Its ELF carries the IgniOS note, so the loader printed `abi native` (every other program says `abi linux`) and the process used the native call table. The program checked that a call returns its status in RAX and its value in RDX, that an error leaves RDX at 0 even when RDX went in with another value, and that call 9999 and Linux's `getpid` number 39 are both `NOT_SUPPORTED`; then every native call with its errors, in a directory `/nt` that the test removed afterwards (the table in `user/nativetest/src/main.ign` lists the checks). Then the test handed the loader two copies of the same file with the note broken, one claiming version 2 and one with a description larger than the file; both were refused before anything was mapped, and no memory leaked. Doc 21.
 
 ```text
 cpu local: self-test ok, after ring 3 the kernel GS base is the per-CPU block and the user one is 0

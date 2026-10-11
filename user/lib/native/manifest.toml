@@ -4,13 +4,14 @@
 # IgniOS ELF note, and its `std::sys` returns the status of each call in RAX
 # and the value in RDX.
 #
-# `io` and `args` are shared with the Linux flavour (../linux) and reach the
+# `io`, `args` and `alloc` are shared with the Linux flavour (../linux) and reach the
 # kernel only through `std::sys`.
 
 [modules]
 sys = "sys.ign"
 io = "../common/io.ign"
 args = "../common/args.ign"
+alloc = "../common/alloc.ign"
 
 [auto_load]
 modules = []

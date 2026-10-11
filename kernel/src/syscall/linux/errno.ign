@@ -91,6 +91,8 @@ namespace Syscall::Linux {
       Fs::Files::TOO_MANY_OPEN -> EMFILE,
       Fs::Files::NOT_SEEKABLE -> ESPIPE,
       Syscall::Core::BAD_ADDRESS -> EFAULT,
+      Syscall::Core::NO_DEVICE -> ENODEV,
+      Syscall::Core::ACCESS -> EACCES,
       _ -> EINVAL,
     };
   }

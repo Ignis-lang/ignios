@@ -19,10 +19,25 @@
 //! |--------|------------------|---------------------------------------------|----------------|
 //! | 0      | `EXIT`           | status                                      | (no return)    |
 //! | 1      | `WRITE`          | descriptor, buffer, count                   | bytes written  |
+//! | 2      | `READ`           | descriptor, buffer, count                   | bytes read, 0 at the end |
+//! | 3      | `OPEN`           | directory, path, path length, flags, mode   | the descriptor |
+//! | 4      | `CLOSE`          | descriptor                                  | 0              |
+//! | 5      | `SEEK`           | descriptor, offset (signed), whence         | the new offset |
+//! | 6      | `INFO`           | descriptor, info record                     | 0              |
+//! | 7      | `INFO_AT`        | directory, path, path length, info record   | 0              |
+//! | 8      | `READ_ENTRY`     | descriptor, buffer, capacity                | bytes written, 0 after the last entry |
+//! | 9      | `MAKE_DIRECTORY` | directory, path, path length, mode          | 0              |
+//! | 10     | `MAP`            | length, protection, flags, descriptor, offset | the address  |
+//! | 11     | `UNMAP`          | address, length                             | 0              |
 //! | 12     | `PROCESS_ID`     |                                             | the process id |
+//! | 13     | `YIELD`          |                                             | 0              |
+//! | 14     | `SLEEP`          | nanoseconds                                 | 0              |
 //!
-//! The other numbers up to 14 are reserved for the file and memory calls.
-//! Like the status codes, a number is never renumbered or reused.
+//! Paths are a pointer and a length, not NUL-terminated strings. The
+//! directory argument is a descriptor open on a directory, or `ROOT` (all
+//! bits set) for `/`; an absolute path ignores it. `calls.ign` has the
+//! layouts of the info record and the directory entry, and the flags. Like
+//! the status codes, a number is never renumbered or reused.
 
 import _ from "../operation";
 
@@ -41,8 +56,44 @@ namespace Syscall::Native {
   /// Write to a descriptor.
   const NUMBER_WRITE: u64 = 1;
 
+  /// Read from a descriptor.
+  const NUMBER_READ: u64 = 2;
+
+  /// Open a path.
+  const NUMBER_OPEN: u64 = 3;
+
+  /// Close a descriptor.
+  const NUMBER_CLOSE: u64 = 4;
+
+  /// Move the offset of a descriptor.
+  const NUMBER_SEEK: u64 = 5;
+
+  /// Describe the file of a descriptor.
+  const NUMBER_INFO: u64 = 6;
+
+  /// Describe the file of a path.
+  const NUMBER_INFO_AT: u64 = 7;
+
+  /// Read the next entry of a directory.
+  const NUMBER_READ_ENTRY: u64 = 8;
+
+  /// Create a directory.
+  const NUMBER_MAKE_DIRECTORY: u64 = 9;
+
+  /// Map memory.
+  const NUMBER_MAP: u64 = 10;
+
+  /// Remove mapped memory.
+  const NUMBER_UNMAP: u64 = 11;
+
   /// The id of the calling process.
   const NUMBER_PROCESS_ID: u64 = 12;
+
+  /// Give up the processor.
+  const NUMBER_YIELD: u64 = 13;
+
+  /// Sleep for a number of nanoseconds.
+  const NUMBER_SLEEP: u64 = 14;
 
   /// Fills the table.
   function initialize(): void {
@@ -50,7 +101,19 @@ namespace Syscall::Native {
 
     *(table + NUMBER_EXIT) = Operation::EXIT;
     *(table + NUMBER_WRITE) = Operation::WRITE;
+    *(table + NUMBER_READ) = Operation::READ;
+    *(table + NUMBER_OPEN) = Operation::OPEN;
+    *(table + NUMBER_CLOSE) = Operation::CLOSE;
+    *(table + NUMBER_SEEK) = Operation::SEEK;
+    *(table + NUMBER_INFO) = Operation::STAT;
+    *(table + NUMBER_INFO_AT) = Operation::STAT_AT;
+    *(table + NUMBER_READ_ENTRY) = Operation::READ_DIRECTORY;
+    *(table + NUMBER_MAKE_DIRECTORY) = Operation::MAKE_DIRECTORY;
+    *(table + NUMBER_MAP) = Operation::MAP;
+    *(table + NUMBER_UNMAP) = Operation::UNMAP;
     *(table + NUMBER_PROCESS_ID) = Operation::GET_PID;
+    *(table + NUMBER_YIELD) = Operation::YIELD;
+    *(table + NUMBER_SLEEP) = Operation::SLEEP;
   }
 
   /// The first byte of the table.
