@@ -36,6 +36,13 @@ nix develop
 make run
 ```
 
+With [direnv](https://direnv.net) and nix-direnv, the repository's `.envrc` loads the same shell when you enter the directory. Allow it once, then `make run` works without `nix develop`:
+
+```sh
+direnv allow
+make run
+```
+
 QEMU opens a window. Click it to give it the keyboard and type at the prompt: `ls /`, `cat /etc/motd`, `mkdir /tmp`, `touch /tmp/a`, `ls /tmp`. The programs are in `/bin`, and the files you create live in memory until the next boot. The terminal shows the serial log.
 
 The build also needs an Ignis compiler with freestanding support (Ignis `main` from October 2026 or later). The Makefile uses the `ignis` on your `PATH`; point elsewhere with `make IGNIS=/path/to/ignis`.
