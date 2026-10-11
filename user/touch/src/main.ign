@@ -19,6 +19,7 @@
 import Args from "std::args";
 import Io from "std::io";
 import Sys from "std::sys";
+import _ from "std::panic";
 
 /// rw-r--r--.
 const FILE_MODE: u64 = 0x1A4;
@@ -67,13 +68,4 @@ function main(count: u64, values: *u64): u64 {
   }
 
   return status;
-}
-
-/// Prints the message and exits with status 101.
-@panicHandler
-function onPanic(message: str, file: str, line: u32): never {
-  Io::error("touch: panic: ");
-  Io::error(message);
-  Io::error("\n");
-  Sys::exit(101);
 }

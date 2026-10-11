@@ -42,6 +42,7 @@ import Alloc from "std::alloc";
 import Args from "std::args";
 import Io from "std::io";
 import Sys from "std::sys";
+import _ from "std::panic";
 
 /// 4 KiB.
 const PAGE: u64 = 4096;
@@ -521,13 +522,4 @@ function main(count: u64, values: *u64): u64 {
   Io::print("mmtest: anonymous and file mappings, protection, munmap, their errors and std::alloc behave as expected\n");
 
   return 0;
-}
-
-/// Prints the message and exits with status 101.
-@panicHandler
-function onPanic(message: str, file: str, line: u32): never {
-  Io::print("panic: ");
-  Io::print(message);
-  Io::print("\n");
-  Sys::exit(101);
 }

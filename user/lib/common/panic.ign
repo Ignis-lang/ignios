@@ -1,0 +1,45 @@
+//!
+//! # Panic Handler (user side)
+//!
+//! The `@panicHandler` of every user program: one definition instead of one
+//! per program.
+//!
+//! ## Overview
+//!
+//! A freestanding Ignis program must declare a panic handler, or the compiler
+//! refuses a program that can panic (error A0211). A program gets this one by
+//! importing the module for its effect:
+//!
+//! ```ignis
+//! import _ from "std::panic";
+//! ```
+//!
+//! On a panic it writes one line to standard error and exits with status
+//! 101, the status the kernel's tests treat as "the program panicked":
+//!
+//! ```text
+//!   panic: alloc: free of a pointer that is not a live block at <file>:<line>
+//! ```
+//!
+//! There is no kernel panic path from ring 3: a user panic only ends the
+//! process.
+
+import Io from "std::io";
+import Sys from "std::sys";
+
+/// The exit status of a program that panicked.
+const PANIC_STATUS: u64 = 101;
+
+/// Writes `panic: MESSAGE at FILE:LINE` to standard error and exits with
+/// `PANIC_STATUS`.
+@panicHandler
+function onPanic(message: str, file: str, line: u32): never {
+  Io::error("panic: ");
+  Io::error(message);
+  Io::error(" at ");
+  Io::error(file);
+  Io::error(":");
+  Io::errorNumber(line as i64);
+  Io::error("\n");
+  Sys::exit(PANIC_STATUS);
+}

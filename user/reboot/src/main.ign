@@ -12,6 +12,7 @@
 
 import Io from "std::io";
 import Sys from "std::sys";
+import _ from "std::panic";
 
 /// Called by `_start` with argc and argv.
 @externName("ignis_main")
@@ -23,13 +24,4 @@ function main(count: u64, values: *u64): u64 {
   Io::error("\n");
 
   return 1;
-}
-
-/// Prints the message and exits with status 101.
-@panicHandler
-function onPanic(message: str, file: str, line: u32): never {
-  Io::error("reboot: panic: ");
-  Io::error(message);
-  Io::error("\n");
-  Sys::exit(101);
 }

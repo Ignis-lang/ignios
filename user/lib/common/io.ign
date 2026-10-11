@@ -68,8 +68,19 @@ export namespace Io {
   ///
   /// The magnitude of a negative value is computed in `u64` as `0 - value`,
   /// where the subtraction wraps modulo 2^64. Negating in `i64` instead would
-  /// overflow for the minimum, -2^63, whose magnitude 2^63 has no `i64`.
+  /// Writes `value` in decimal, with a `-` when negative, to standard output.
   function printNumber(value: i64): void {
+    writeNumber(Sys::STDOUT, value);
+  }
+
+  /// Writes `value` in decimal to standard error.
+  function errorNumber(value: i64): void {
+    writeNumber(Sys::STDERR, value);
+  }
+
+  /// Writes `value` in decimal, with a `-` when negative, to `descriptor`.
+  /// The magnitude is computed in `u64`, so the `i64` minimum has one.
+  function writeNumber(descriptor: u64, value: i64): void {
     let mut digits: u8[24];
     let mut length: u64 = 0;
     let negative: boolean = value < 0;
@@ -92,12 +103,12 @@ export namespace Io {
     }
 
     if (negative) {
-      Sys::write(Sys::STDOUT, "-" as *u8, 1);
+      Sys::write(descriptor, "-" as *u8, 1);
     }
 
     while (length > 0) {
       length -= 1;
-      Sys::write(Sys::STDOUT, &digits[length] as *u8, 1);
+      Sys::write(descriptor, &digits[length] as *u8, 1);
     }
   }
 }
