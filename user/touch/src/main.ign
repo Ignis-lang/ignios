@@ -13,8 +13,8 @@
 //! | no arguments                 | `touch: missing file operand` on standard error | 1      |
 //!
 //! The file is opened with `O_CREAT | O_RDONLY`, which creates it when it is
-//! missing and also succeeds on an existing directory, the way GNU touch
-//! accepts one.
+//! missing. On an existing directory that is `-EISDIR`, which `touch` takes
+//! as success, the way GNU touch accepts a directory.
 
 import Args from "std::args";
 import Io from "std::io";
@@ -26,6 +26,12 @@ const FILE_MODE: u64 = 0x1A4;
 /// Creates `path` if missing. Returns true on success.
 function touchFile(path: *u8): boolean {
   let descriptor: i64 = Sys::open(path, Sys::O_CREAT | Sys::O_RDONLY, FILE_MODE);
+
+  // An existing directory is -EISDIR, as on Linux. GNU touch accepts it, and
+  // with no clock date to set there is nothing more to do.
+  if (descriptor == 0 - Sys::EISDIR) {
+    return true;
+  }
 
   if (descriptor < 0) {
     Io::error("touch: cannot touch '");

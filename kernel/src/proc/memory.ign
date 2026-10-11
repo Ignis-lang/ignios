@@ -37,8 +37,8 @@
 //!
 //! ## Unmapping
 //!
-//! `unmap` frees every page of the range that lies in a region and trims the
-//! regions: a range that covers a whole region removes it, one at an end
+//! `unmap` frees every page of the range that lies in a region (a `PROT_NONE`
+//! region has none, and is not walked) and trims the regions: a range that covers a whole region removes it, one at an end
 //! shortens it, one in the middle splits it in two (which needs a free table
 //! entry). Pages outside every region are left alone.
 //!
@@ -77,6 +77,10 @@ namespace Proc::Memory {
   /// Regions per process.
   const MAX_REGIONS: u64 = 32;
 
+  /// Process slots, `Proc::Process::MAX_PROCESSES` (this file cannot import
+  /// `process.ign`, which imports it). A slot at or above it is refused.
+  const MAX_SLOTS: u64 = 8;
+
   /// The end of the first region.
   const MAP_TOP: u64 = 0x00007F0000000000;
 
@@ -111,6 +115,10 @@ namespace Proc::Memory {
   /// Gives `slot` an empty table and the first address. Called when a
   /// process starts in the slot.
   function reset(slot: u64): void {
+    if (slot >= MAX_SLOTS) {
+      return;
+    }
+
     let mut index: u64 = 0;
 
     while (index < MAX_REGIONS) {
@@ -136,7 +144,7 @@ namespace Proc::Memory {
     sourceLength: u64,
     address: *mut u64
   ): u64 {
-    if (length == 0 || length > MAP_TOP - MAP_BOTTOM || ((protection & WRITE) != 0 && (protection & EXECUTE) != 0)) {
+    if (slot >= MAX_SLOTS || length == 0 || length > MAP_TOP - MAP_BOTTOM || ((protection & WRITE) != 0 && (protection & EXECUTE) != 0)) {
       return INVALID;
     }
 
@@ -155,14 +163,18 @@ namespace Proc::Memory {
 
     let start: u64 = end - rounded;
 
-    if (protection != 0 && !populate(root, start, rounded, pageFlags(protection))) {
-      release(root, start, rounded);
-      return NO_MEMORY;
-    }
+    if (protection != 0) {
+      let populated: u64 = populate(root, start, rounded, pageFlags(protection));
 
-    if (protection != 0 && sourceLength > 0 && !Mm::AddressSpace::loadBytes(root, start, source, sourceLength)) {
-      release(root, start, rounded);
-      return NO_MEMORY;
+      if (populated != rounded) {
+        release(root, start, populated);
+        return NO_MEMORY;
+      }
+
+      if (sourceLength > 0 && !Mm::AddressSpace::loadBytes(root, start, source, sourceLength)) {
+        release(root, start, rounded);
+        return NO_MEMORY;
+      }
     }
 
     let region: *mut Proc::Region = regionAt(slot, entry);
@@ -182,7 +194,7 @@ namespace Proc::Memory {
   /// that leaves the user half, and `TOO_MANY` when splitting a region needs
   /// a table entry and none is free (nothing is changed then).
   function unmap(slot: u64, root: u64, address: u64, length: u64): u64 {
-    if (length == 0 || address % PAGE_SIZE != 0 || !Mm::AddressSpace::isUserRange(address, length)) {
+    if (slot >= MAX_SLOTS || length == 0 || address % PAGE_SIZE != 0 || !Mm::AddressSpace::isUserRange(address, length)) {
       return INVALID;
     }
 
@@ -203,7 +215,11 @@ namespace Proc::Memory {
         let cutStart: u64 = address > regionStart ? address : regionStart;
         let cutEnd: u64 = end < regionEnd ? end : regionEnd;
 
-        release(root, cutStart, cutEnd - cutStart);
+        // A PROT_NONE region maps no page, so there is nothing to free, and
+        // walking a huge one page by page would stall the processor.
+        if ((*region).protection != 0) {
+          release(root, cutStart, cutEnd - cutStart);
+        }
 
         if (cutStart == regionStart && cutEnd == regionEnd) {
           (*region).start = 0;
@@ -262,20 +278,22 @@ namespace Proc::Memory {
     return false;
   }
 
-  /// Allocates a zeroed frame for every page of `[start, start + length)`.
-  /// Returns false at the first page that fails; the caller frees the rest.
-  function populate(root: u64, start: u64, length: u64, flags: u64): boolean {
+  /// Allocates a zeroed frame for every page of `[start, start + length)`
+  /// and returns the bytes it mapped: `length` on success, less when a page
+  /// failed. The caller frees exactly what was mapped, and nothing that was
+  /// there before.
+  function populate(root: u64, start: u64, length: u64, flags: u64): u64 {
     let mut offset: u64 = 0;
 
     while (offset < length) {
       if (Mm::AddressSpace::allocatePage(root, start + offset, flags) == Mm::Pmm::NO_FRAME) {
-        return false;
+        return offset;
       }
 
       offset += PAGE_SIZE;
     }
 
-    return true;
+    return length;
   }
 
   /// Frees every mapped page of `[start, start + length)`.

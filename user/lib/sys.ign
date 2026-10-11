@@ -177,6 +177,9 @@ export namespace Sys {
   /// Is a directory.
   const EISDIR: i64 = 21;
 
+  /// File too large.
+  const EFBIG: i64 = 27;
+
   /// Too many open files.
   const EMFILE: i64 = 24;
 
@@ -351,6 +354,7 @@ export namespace Sys {
       EEXIST -> "File exists",
       ENOTDIR -> "Not a directory",
       EISDIR -> "Is a directory",
+      EFBIG -> "File too large",
       EINVAL -> "Invalid argument",
       EMFILE -> "Too many open files",
       ESPIPE -> "Illegal seek",

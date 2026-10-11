@@ -34,7 +34,7 @@
 //! |-------------|--------------------------------------------------------------|
 //! | `READ`      | the descriptor may read                                      |
 //! | `WRITE`     | the descriptor may write; refused on a directory             |
-//! | `CREATE`    | create a regular file when the name does not exist           |
+//! | `CREATE`    | create a regular file when the name does not exist; `IS_DIRECTORY` when it is a directory |
 //! | `EXCLUSIVE` | with `CREATE`, fail with `EXISTS` when the name exists       |
 //! | `TRUNCATE`  | with `WRITE`, cut a regular file to 0 bytes                  |
 //! | `APPEND`    | every write goes to the end of the file                      |
@@ -149,6 +149,10 @@ namespace Fs::Files {
   /// Points descriptors 0, 1 and 2 of `table` at one console open file,
   /// readable and writable. The table must be empty. Returns `NO_MEMORY`.
   function openStandard(table: u64): u64 {
+    if (table >= MAX_TABLES) {
+      return Fs::Vfs::INVALID;
+    }
+
     let file: *mut Fs::OpenFile = newOpenFile(CONSOLE, null, READ | WRITE);
 
     if (file == null) {
@@ -165,6 +169,10 @@ namespace Fs::Files {
 
   /// Closes every descriptor of `table`.
   function closeAll(table: u64): void {
+    if (table >= MAX_TABLES) {
+      return;
+    }
+
     let mut descriptor: u64 = 0;
 
     while (descriptor < MAX_DESCRIPTORS) {
@@ -206,8 +214,9 @@ namespace Fs::Files {
   /// gets the permission bits of `mode`. Returns the `Fs::Vfs` codes of the
   /// lookup or the creation, `TOO_MANY_OPEN` before anything is created,
   /// `NOT_DIRECTORY` for `DIRECTORY` on something else, `IS_DIRECTORY` for
-  /// `WRITE` on a directory or `CREATE` on a path that ends with `/`, and
-  /// `NO_MEMORY`.
+  /// `WRITE` on a directory, `CREATE` on a directory or on a path that ends
+  /// with `/`, `NO_MEMORY`, and `BAD_DESCRIPTOR` for a `table` that is not a
+  /// process slot.
   function open(
     table: u64,
     base: *mut Fs::Node,
@@ -217,6 +226,10 @@ namespace Fs::Files {
     mode: u64,
     descriptor: *mut u64
   ): u64 {
+    if (table >= MAX_TABLES) {
+      return BAD_DESCRIPTOR;
+    }
+
     let free: u64 = freeDescriptor(table);
 
     if (free == MAX_DESCRIPTORS) {
@@ -393,7 +406,8 @@ namespace Fs::Files {
   }
 
   /// Finds the last component of `path` under its parent, or creates it as a
-  /// regular file. `EXCLUSIVE` turns an existing name into `EXISTS`.
+  /// regular file. `EXCLUSIVE` turns an existing name into `EXISTS`, and an
+  /// existing directory is `IS_DIRECTORY`, as Linux's `open` with `O_CREAT`.
   function findOrCreate(
     base: *mut Fs::Node,
     path: *u8,
@@ -416,6 +430,10 @@ namespace Fs::Files {
     if (existing != null) {
       if ((flags & EXCLUSIVE) != 0) {
         return Fs::Vfs::EXISTS;
+      }
+
+      if ((*existing).kind == Fs::Vfs::DIRECTORY) {
+        return Fs::Vfs::IS_DIRECTORY;
       }
 
       *result = existing;

@@ -6,7 +6,8 @@
 //! ## Overview
 //!
 //! The test checks alignment, blocks that do not overlap, reuse of freed
-//! blocks, merging of neighbours, growth, and the compiler's allocation and
+//! blocks, merging of neighbours, growth, the refusal of sizes larger than the
+//! heap, and the compiler's allocation and
 //! release handlers (through a closure that captures a value). It panics on
 //! the first violation.
 
@@ -60,6 +61,12 @@ namespace Tests::Heap {
 
     if (Mm::Heap::allocate(8, 3) != null) {
       @panic("heap self-test: accepted an alignment that is not a power of two");
+    }
+
+    // Sizes no heap can hold: the internal sums would wrap, so they must be
+    // refused up front, and nothing may change.
+    if (Mm::Heap::allocate(0x8000000000000000, 16) != null || Mm::Heap::allocate(0xFFFFFFFFFFFFFFF0, 16) != null || Mm::Heap::allocatedBytes() != baseline) {
+      @panic("heap self-test: accepted a size larger than the heap");
     }
 
     testClosureRelease();

@@ -58,6 +58,7 @@
 //! | `NO_MEMORY`     | the heap is exhausted                      | `ENOMEM`  |
 //! | `NOT_EMPTY`     | removing a directory that has children     | `ENOTEMPTY` |
 //! | `INVALID`       | a malformed request (an empty name, `..`)  | `EINVAL`  |
+//! | `TOO_LARGE`     | a file would grow past `MAX_FILE_SIZE` (64 MiB) | `EFBIG` |
 //!
 //! The VFS has no locks. Every caller runs with interrupts off on the only
 //! processor (the system call handlers do), so no two operations overlap.
@@ -165,6 +166,14 @@ namespace Fs::Vfs {
   /// A malformed request.
   const INVALID: u64 = 8;
 
+  /// The file would grow past `MAX_FILE_SIZE`.
+  const TOO_LARGE: u64 = 9;
+
+  /// The largest file: 64 MiB. Files live on the kernel heap, which holds at
+  /// most 256 MiB, and a write or a `truncate` past this is `TOO_LARGE`
+  /// before anything is allocated.
+  const MAX_FILE_SIZE: u64 = 0x4000000;
+
   /// The longest name of one component, as on Linux.
   const NAME_MAX: u64 = 255;
 
@@ -230,6 +239,7 @@ namespace Fs::Vfs {
       NO_MEMORY -> "out of memory",
       NOT_EMPTY -> "directory not empty",
       INVALID -> "invalid argument",
+      TOO_LARGE -> "file too large",
       _ -> "unknown error",
     };
   }
@@ -510,9 +520,9 @@ namespace Fs::Vfs {
   /// Writes the `count` bytes at `source` to file `node` at `offset`. The
   /// file grows as needed, and a gap between the old end and `offset` reads
   /// as zeros. The first write to a file whose data is in the archive copies
-  /// it to the heap. Returns `IS_DIRECTORY`, `INVALID` for a device, `NO_MEMORY`,
-  /// or `INVALID` when
-  /// `offset + count` overflows.
+  /// it to the heap. Returns `IS_DIRECTORY`, `INVALID` for a device,
+  /// `TOO_LARGE` past `MAX_FILE_SIZE`, `NO_MEMORY`, or `INVALID` when
+  /// `offset + count` does not fit a signed 64-bit offset.
   function write(node: *mut Fs::Node, offset: u64, source: *u8, count: u64): u64 {
     if ((*node).kind != FILE) {
       return notFileStatus(node);
@@ -520,8 +530,14 @@ namespace Fs::Vfs {
 
     let end: u64 = offset + count;
 
-    if (end < offset) {
+    // Offsets are signed 64-bit values everywhere (`Fs::Files::seek`), so an
+    // end past 2^63 - 1 is malformed, whether or not the unsigned sum wraps.
+    if (end < offset || (end as i64) < 0) {
       return INVALID;
+    }
+
+    if (end > MAX_FILE_SIZE) {
+      return TOO_LARGE;
     }
 
     let mut newSize: u64 = (*node).size;
@@ -545,10 +561,15 @@ namespace Fs::Vfs {
   }
 
   /// Cuts file `node` to `length` bytes, or extends it with zeros. Returns
-  /// `IS_DIRECTORY`, `INVALID` for a device, or `NO_MEMORY`.
+  /// `IS_DIRECTORY`, `INVALID` for a device, `TOO_LARGE` past
+  /// `MAX_FILE_SIZE`, or `NO_MEMORY`.
   function truncate(node: *mut Fs::Node, length: u64): u64 {
     if ((*node).kind != FILE) {
       return notFileStatus(node);
+    }
+
+    if (length > MAX_FILE_SIZE) {
+      return TOO_LARGE;
     }
 
     if (length > (*node).size) {
@@ -588,6 +609,8 @@ namespace Fs::Vfs {
 
     let mut capacity: u64 = MIN_CAPACITY;
 
+    // Doubling cannot wrap: callers keep `size` at most `MAX_FILE_SIZE`, so
+    // the loop stops at twice that at most.
     while (capacity < size) {
       capacity = capacity * 2;
     }

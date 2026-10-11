@@ -137,8 +137,9 @@ namespace Mm::Heap {
   }
 
   /// Allocates `size` bytes aligned to `align`, which must be a power of
-  /// two. Returns null when the alignment is invalid or the heap cannot grow
-  /// any further.
+  /// two. Returns null when the alignment is invalid, when the size or the
+  /// alignment is larger than the whole heap (`LIMIT_SIZE`), or when the heap
+  /// cannot grow any further.
   function allocate(size: u64, align: u64): *mut u8 {
     let saved: u64 = Arch::Cpu::saveAndDisableInterrupts();
     let pointer: *mut u8 = allocateLocked(size, align);
@@ -152,6 +153,12 @@ namespace Mm::Heap {
   /// as a 1-byte request, so every allocation returns a distinct pointer.
   function allocateLocked(size: u64, align: u64): *mut u8 {
     if (align == 0 || (align & (align - 1)) != 0) {
+      return null;
+    }
+
+    // A request larger than the whole heap can never be served, and the
+    // sums below (payload + size, size + alignment + header) would wrap.
+    if (size > LIMIT_SIZE || align > LIMIT_SIZE) {
       return null;
     }
 

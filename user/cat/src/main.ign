@@ -15,8 +15,8 @@
 //! `cat: /nope: No such file or directory`, `cat: /etc: Is a directory`.
 //!
 //! A regular file that is not empty is mapped with `mmap` (`PROT_READ`,
-//! `MAP_PRIVATE`) and written to standard output in one `write`, then
-//! unmapped. Anything else, and a file `mmap` refuses, goes through a
+//! `MAP_PRIVATE`) and written to standard output, in as many `write` calls as
+//! the kernel's 64 KiB per call needs, then unmapped. Anything else, and a file `mmap` refuses, goes through a
 //! 512-byte buffer with `read`: standard input, a directory (whose `read` is
 //! `EISDIR`), an empty file.
 
@@ -84,7 +84,20 @@ function mapped(descriptor: u64): boolean {
     return false;
   }
 
-  Sys::write(Sys::STDOUT, @pointerFromInteger<*u8>(address as u64), size);
+  let mut done: u64 = 0;
+
+  // The kernel moves at most 64 KiB per write, so a larger file takes
+  // several.
+  while (done < size) {
+    let written: i64 = Sys::write(Sys::STDOUT, @pointerFromInteger<*u8>((address as u64) + done), size - done);
+
+    if (written <= 0) {
+      break;
+    }
+
+    done += written as u64;
+  }
+
   Sys::munmap(address as u64, size);
 
   return true;

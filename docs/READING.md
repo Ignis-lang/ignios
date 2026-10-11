@@ -222,7 +222,7 @@ Doc 19.
 
 **`fs/initramfs.ign`.** Finds the module, walks every member once and refuses to boot if one is malformed. Later readers can then trust the archive. The data is never copied: it stays where Limine loaded it.
 
-**`fs/vfs.ign`.** The file tree. Every file and directory is a `Fs::Node` on the heap, and a directory keeps its children in a linked list in creation order. The header has the path rules (`.`, `..`, repeated and trailing slashes, the `NAME_MAX` and `PATH_MAX` limits) and the table of status codes with the Linux error each one becomes. Look at `seedEntry`, which builds the tree from the archive without copying file data, and at `reserve`, which copies a seeded file to the heap the first time it is written (copy on write), so the read-only archive is never touched. The VFS has no locks: its callers run with interrupts off on the only processor.
+**`fs/vfs.ign`.** The file tree. Every file and directory is a `Fs::Node` on the heap, and a directory keeps its children in a linked list in creation order. The header has the path rules (`.`, `..`, repeated and trailing slashes, the `NAME_MAX` and `PATH_MAX` limits) and the table of status codes with the Linux error each one becomes. Files are limited to 64 MiB (`MAX_FILE_SIZE`, `-EFBIG` past it), checked before anything is allocated. Look at `seedEntry`, which builds the tree from the archive without copying file data, and at `reserve`, which copies a seeded file to the heap the first time it is written (copy on write), so the read-only archive is never touched. The VFS has no locks: its callers run with interrupts off on the only processor.
 
 **`fs/files.ign`.** Descriptors and open files. The header draws a descriptor table: descriptors 0, 1 and 2 of a new process share one console open file, and an open file is freed with its last descriptor. The flags and status codes are this module's own, not Linux's, so another ABI can use the same functions. `Proc::Process::launch` calls `openStandard` and `finishCurrent` calls `closeAll`.
 
@@ -230,7 +230,7 @@ Doc 19.
 
 **`user/fstest/`.** A ring 3 program that checks each call and each error the way a Linux program sees them, and exits with the number of the first check that failed. The table in its header lists the checks.
 
-**`user/cat/`, `user/ls/`, `user/touch/` and `user/mkdir/`.** The commands, each one a short Ignis program on `std::sys`. Each header has a table of what it does in each case and the exact error line, in the format of GNU coreutils (`ls: cannot access '/nope': No such file or directory`). `cat` maps a regular file with `mmap` and writes it in one call, and falls back to `read` for anything else; `ls` reads `struct linux_dirent64` records and hides `.` and `..`; `touch` opens with `O_CREAT | O_RDONLY`, which also accepts an existing directory. `Sys::errorText` in `user/lib/sys.ign` is their `strerror`.
+**`user/cat/`, `user/ls/`, `user/touch/` and `user/mkdir/`.** The commands, each one a short Ignis program on `std::sys`. Each header has a table of what it does in each case and the exact error line, in the format of GNU coreutils (`ls: cannot access '/nope': No such file or directory`). `cat` maps a regular file with `mmap` and writes it out, 64 KiB per call at most, and falls back to `read` for anything else; `ls` reads `struct linux_dirent64` records and hides `.` and `..`; `touch` opens with `O_CREAT | O_RDONLY` and takes `-EISDIR` (an existing directory) as success, as GNU touch does. `Sys::errorText` in `user/lib/sys.ign` is their `strerror`.
 
 ## Part 11. Boot self-tests
 
@@ -367,9 +367,9 @@ vmm: self-test ok
 `Tests::Vmm::run` mapped a frame at a test address, wrote through it, read it through the direct map, and unmapped it.
 
 ```text
-modules: initramfs is /initramfs.tar, 112640 bytes at 0xffff80000a0a5000
+modules: initramfs is /initramfs.tar, 112640 bytes at 0xffff80000a0c6000
 ```
-The Limine module from `boot/limine.conf`. `initramfs` is the `module_string`, `/initramfs.tar` the path. `Mm::Modules::initialize` mapped its pages read only. The address is in the direct map, so the file sits at physical `0x0a0a5000`. Doc 15.
+The Limine module from `boot/limine.conf`. `initramfs` is the `module_string`, `/initramfs.tar` the path. `Mm::Modules::initialize` mapped its pages read only. The address is in the direct map, so the file sits at physical `0x0a0c6000`. Doc 15.
 
 ```text
 heap: self-test ok, 1092 KiB mapped, 0 bytes in use
@@ -377,16 +377,16 @@ heap: self-test ok, 1092 KiB mapped, 0 bytes in use
 `Tests::Heap::run` checked alignment, reuse, merging, growth (it allocates 1 MiB) and the compiler allocation handlers. 1092 KiB of heap pages stayed mapped and every block was freed. Doc 10.
 
 ```text
-initramfs: 112640 bytes, 8 files with 97059 bytes of data, 3 directories
+initramfs: 112640 bytes, 8 files with 97083 bytes of data, 3 directories
 initramfs: self-test ok, 6 malformed headers refused, 2 valid ones read, etc/motd read back
 ```
 `Fs::Initramfs::initialize` walked the archive: `etc/motd` and the seven programs in `bin` (`cat`, `fstest`, `hello`, `ls`, `mkdir`, `mmtest`, `touch`) are the files, and `.`, `bin` and `etc` the directories. The size is a multiple of 10240 bytes because tar pads the archive to whole records. `Tests::Initramfs::run` then fed the reader one broken header per error code (checksum, magic, a non-octal number, a `..` path, a symbolic link, data past the end), a file and a directory with a prefix, and compared `etc/motd` with the text it should hold.
 
 ```text
-vfs: 13 nodes, 97059 bytes in files, seeded from the initramfs
+vfs: 13 nodes, 97083 bytes in files, seeded from the initramfs
 vfs: self-test ok, lookup, create, read, write, truncate, remove and copy on write
 ```
-`Fs::Vfs::initialize` built the tree: the root, `bin` with its seven programs, `etc` and `etc/motd` from the archive, then `dev` and the device node `dev/console`. The file bytes are the same 97059 as in the archive, because nothing was copied. `Tests::Vfs::run` checked every path rule, created, wrote, read, truncated and removed a test directory `/t` and checked that the heap returned to where it was, then wrote to `/etc/motd` to check that the write copied the file and left the archive alone.
+`Fs::Vfs::initialize` built the tree: the root, `bin` with its seven programs, `etc` and `etc/motd` from the archive, then `dev` and the device node `dev/console`. The file bytes are the same 97083 as in the archive, because nothing was copied. `Tests::Vfs::run` checked every path rule, created, wrote, read, truncated and removed a test directory `/t` and checked that the heap returned to where it was, then wrote to `/etc/motd` to check that the write copied the file and left the archive alone.
 
 ```text
 address space: self-test ok, private user half, shared kernel half, frames returned

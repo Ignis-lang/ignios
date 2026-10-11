@@ -29,13 +29,14 @@
 //! | 40-42  | `munmap` of the middle page of three keeps the other two and their data |
 //! | 50-51  | a `PROT_READ` mapping reads as zeros; `read` into it is `-EFAULT`    |
 //! | 52     | `write` from a mapping works: the kernel sees it in the page tables |
-//! | 60     | the region table fills up: `-ENOMEM`, then every mapping is removed |
+//! | 60-61  | the region table fills up: `-ENOMEM`; a split that needs one more entry is `-ENOMEM` and leaves the region whole; then every mapping is removed |
 //! | 70-72  | a private mapping of `/etc/motd`: the file, then zeros to the page end; a write changes the mapping, not the file |
 //! | 73     | an offset: page 1 of `/bin/hello` mapped equals page 1 read with `read` |
 //! | 74     | an offset past the end of the file maps zeros                       |
 //! | 75-78  | file mapping errors: a closed descriptor `-EBADF`, a directory and the console `-ENODEV`, a write-only descriptor `-EACCES` |
 //! | 80-84  | `std::alloc`: 200 blocks aligned and apart, reuse after `free`, freed space merges back into one free block, a large block gets its own pages |
 //! | 85     | a closure that captures a value allocates through `@allocHandler` and frees through `@freeHandler` |
+//! | 86     | a `PROT_READ \| PROT_EXEC` private mapping of a file runs: `/mmexec` holds a `ret`, the mapping is called and returns (the kernel test removes `/mmexec`) |
 
 import Alloc from "std::alloc";
 import Args from "std::args";
@@ -206,11 +207,15 @@ function checkProtection(): void {
   expect(Sys::munmap(writable as u64, PAGE), 0, 52);
 }
 
-/// The region table holds 32 regions: asking for more ends in `-ENOMEM`.
+/// The region table holds 32 regions: a 3-page one and 31 more, then
+/// `-ENOMEM`. A split that needs a 33rd entry is refused too.
 function checkLimit(): void {
   let addresses: *mut u64 = &mut State::addresses as *mut u64;
-  let mut count: u64 = 0;
+  let three: i64 = Sys::mapAnonymous(3 * PAGE);
+  let mut count: u64 = 1;
   let mut last: i64 = 0;
+
+  require(three > 0, 60);
 
   while (count < LIMIT_ATTEMPTS) {
     last = Sys::mapAnonymous(PAGE);
@@ -226,7 +231,13 @@ function checkLimit(): void {
   expect(last, 0 - Sys::ENOMEM, 60);
   expect(count as i64, 32, 60);
 
-  while (count > 0) {
+  // Unmapping the middle page of the 3-page region would split it in two,
+  // which needs a 33rd entry: refused, and the region is still whole.
+  expect(Sys::munmap(three as u64 + PAGE, PAGE), 0 - Sys::ENOMEM, 61);
+  poke(three as u64 + PAGE, 7);
+  expect(Sys::munmap(three as u64, 3 * PAGE), 0, 61);
+
+  while (count > 1) {
     count -= 1;
     expect(Sys::munmap(*@pointerFromInteger<*u64>(@integerFromPointer(addresses) + count * 8), PAGE), 0, 60);
   }
@@ -415,6 +426,29 @@ function checkClosure(): void {
   expect(Alloc::bytesInUse() as i64, before as i64, 85);
 }
 
+/// A `PROT_READ | PROT_EXEC` mapping can run code: its page has no NX.
+/// `/mmexec` holds one byte, `ret` (`0xC3`); the mapping is called and must
+/// come back.
+function checkExecutable(): void {
+  let fd: i64 = Sys::open("/mmexec" as *u8, Sys::O_CREAT | Sys::O_RDWR | Sys::O_TRUNC, 0x1ED);
+
+  let mut instruction: u8 = 0xC3;
+
+  require(fd >= 0, 86);
+  expect(Sys::write(fd as u64, &mut instruction as *u8, 1), 1, 86);
+
+  let mapped: i64 = Sys::mmap(PAGE, Sys::PROT_READ | Sys::PROT_EXEC, Sys::MAP_PRIVATE, fd as u64, 0);
+
+  require(mapped > 0 && peek(mapped as u64) == 0xC3, 86);
+
+  let address: u64 = mapped as u64;
+
+  asm (address in rax) clobber(memory) { call rax }
+
+  expect(Sys::munmap(address, PAGE), 0, 86);
+  expect(Sys::close(fd as u64), 0, 86);
+}
+
 /// True when the NUL-terminated `text` is `word`.
 function modeIs(text: *u8, word: str): boolean {
   let length: u64 = Args::length(text);
@@ -482,6 +516,7 @@ function main(count: u64, values: *u64): u64 {
   checkFiles();
   checkAllocator();
   checkClosure();
+  checkExecutable();
 
   Io::print("mmtest: anonymous and file mappings, protection, munmap, their errors and std::alloc behave as expected\n");
 

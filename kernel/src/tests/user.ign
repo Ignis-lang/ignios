@@ -247,7 +247,8 @@ namespace Tests::User {
   /// tables must stop: write to a read-only one, read one after `munmap`,
   /// execute one without `PROT_EXEC`, read a `PROT_NONE` one. Each must be
   /// killed with SIGSEGV. A last run frees a `std::alloc` block twice, which
-  /// must end in the allocator's panic. The PMM free count must be the same at the end:
+  /// must end in the allocator's panic. The file `/mmexec` that the first run
+  /// made is removed. The PMM free count must be the same at the end:
   /// mappings are freed by `munmap` or when the process ends.
   function runMemory(): void {
     let freeBefore: u64 = Mm::Pmm::freeFrameCount();
@@ -269,11 +270,31 @@ namespace Tests::User {
       @panic("user test: std::alloc did not catch a double free");
     }
 
+    removeFile("/mmexec");
+
     if (Mm::Pmm::freeFrameCount() != freeBefore) {
       @panic("user test: mappings leaked frames");
     }
 
     Drivers::Console::writeLine("user: mmtest passed, writing read-only, using unmapped, executing non-exec and touching PROT_NONE memory were killed, a double free was caught, no frame leaked");
+  }
+
+  /// Removes the regular file at the absolute `path` that a test program
+  /// left behind. Panics when it is not there.
+  function removeFile(path: str): void {
+    let saved: u64 = Arch::Cpu::saveAndDisableInterrupts();
+    let mut length: u64 = 0;
+    let mut node: *mut Fs::Node = null;
+
+    while (*(path as *u8 + length) != 0) {
+      length += 1;
+    }
+
+    if (Fs::Vfs::lookup(Fs::Vfs::root(), path as *u8, length, &mut node as *mut *mut Fs::Node) != Fs::Vfs::OK || Fs::Vfs::remove(node) != Fs::Vfs::OK) {
+      @panic("user test: a file a test program made is missing");
+    }
+
+    Arch::Cpu::restoreInterrupts(saved);
   }
 
   /// Panics unless running `line` ends with SIGSEGV.

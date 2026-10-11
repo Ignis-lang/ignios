@@ -53,6 +53,9 @@ namespace Syscall::Linux {
   /// Too many open files in the process (24).
   const EMFILE: i64 = 24;
 
+  /// File too large (27): a write or truncation past the largest file.
+  const EFBIG: i64 = 27;
+
   /// Illegal seek (29): the descriptor is the console.
   const ESPIPE: i64 = 29;
 
@@ -86,6 +89,7 @@ namespace Syscall::Linux {
       Fs::Vfs::NAME_TOO_LONG -> ENAMETOOLONG,
       Fs::Vfs::NO_MEMORY -> ENOMEM,
       Fs::Vfs::NOT_EMPTY -> ENOTEMPTY,
+      Fs::Vfs::TOO_LARGE -> EFBIG,
       Fs::Files::BAD_DESCRIPTOR -> EBADF,
       Fs::Files::TOO_MANY_OPEN -> EMFILE,
       Fs::Files::NOT_SEEKABLE -> ESPIPE,

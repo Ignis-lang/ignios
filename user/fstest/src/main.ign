@@ -19,6 +19,9 @@
 //! | 90-95  | `getdents64` lists `.`, `..`, `a` and `b` with their types, then 0; a small buffer is `-EINVAL`; a file is `-ENOTDIR` |
 //! | 100    | 16 descriptors per process, then `-EMFILE`                          |
 //! | 110-112 | descriptors 0 to 2: `fstat` says character device `0x501`; `read(0)` is 0 |
+//! | 120-122 | a write at 2^62 or at 64 MiB is `-EFBIG`, one whose end overflows is `-EINVAL`; the file stays empty |
+//! | 123-124 | a bad buffer is `-EFAULT` for `read`, `write`, `fstat`, `newfstatat`, `getdents64`; a 48-byte `getdents64` buffer takes `.` and `..` |
+//! | 125    | `O_CREAT` on an existing directory is `-EISDIR`                      |
 //!
 //! The exit status is the number of the first check that failed, 0 when all
 //! passed. `Tests::User::runFiles` runs it at boot and then removes the
@@ -296,6 +299,51 @@ function checkLimit(): void {
   }
 }
 
+/// Writes at huge offsets are refused before anything is allocated, and the
+/// file stays empty: past the 64 MiB file limit is `-EFBIG`, an offset that
+/// overflows with the count is `-EINVAL`.
+function checkHugeOffsets(): void {
+  let fd: i64 = Sys::open("/fstest/huge" as *u8, Sys::O_CREAT | Sys::O_RDWR, 0x1A4);
+
+  require(fd >= 0, 120);
+  expect(Sys::seek(fd as u64, 4611686018427387904, Sys::SEEK_SET), 4611686018427387904, 120);
+  expect(Sys::write(fd as u64, "ab" as *u8, 2), 0 - Sys::EFBIG, 120);
+  expect(Sys::seek(fd as u64, 67108864, Sys::SEEK_SET), 67108864, 121);
+  expect(Sys::write(fd as u64, "ab" as *u8, 2), 0 - Sys::EFBIG, 121);
+  expect(Sys::seek(fd as u64, 9223372036854775807, Sys::SEEK_SET), 9223372036854775807, 121);
+  expect(Sys::write(fd as u64, "ab" as *u8, 2), 0 - Sys::EINVAL, 121);
+  expect(Sys::fstat(fd as u64, stat()), 0, 122);
+  expect(word(stat(), 48) as i64, 0, 122);
+  expect(Sys::close(fd as u64), 0, 122);
+}
+
+/// Bad buffers are `-EFAULT` for every call that takes one, and a
+/// `getdents64` buffer of 48 bytes takes `.` and `..` only, the rest coming
+/// on the next call.
+function checkBuffers(): void {
+  let bad: *mut u8 = @pointerFromInteger<*mut u8>(1);
+  let motd: i64 = Sys::open("/etc/motd" as *u8, Sys::O_RDONLY, 0);
+
+  expect(Sys::read(motd as u64, bad, 4), 0 - Sys::EFAULT, 123);
+  expect(Sys::write(Sys::STDOUT, bad as *u8, 4), 0 - Sys::EFAULT, 123);
+  expect(Sys::fstat(motd as u64, bad), 0 - Sys::EFAULT, 123);
+  expect(Sys::statAt(Sys::AT_FDCWD, "/etc" as *u8, bad, 0), 0 - Sys::EFAULT, 123);
+  expect(Sys::close(motd as u64), 0, 123);
+
+  let directory: i64 = Sys::open("/fstest" as *u8, Sys::O_RDONLY | Sys::O_DIRECTORY, 0);
+
+  expect(Sys::readDirectory(directory as u64, bad, 512), 0 - Sys::EFAULT, 124);
+  expect(Sys::readDirectory(directory as u64, buffer(), 48), 48, 124);
+  require(same((buffer() + 19) as *u8, ".", 1) && same((buffer() + 43) as *u8, "..", 2), 124);
+  require(Sys::readDirectory(directory as u64, buffer(), 512) > 0, 124);
+  expect(Sys::close(directory as u64), 0, 124);
+}
+
+/// `O_CREAT` on an existing directory is `-EISDIR`, as on Linux.
+function checkCreateDirectory(): void {
+  expect(Sys::open("/etc" as *u8, Sys::O_CREAT | Sys::O_RDONLY, 0x1A4), 0 - Sys::EISDIR, 125);
+}
+
 /// The standard descriptors are the console.
 function checkConsole(): void {
   expect(Sys::fstat(Sys::STDOUT, stat()), 0, 110);
@@ -312,6 +360,9 @@ function main(count: u64, values: *u64): u64 {
   checkDirectories();
   checkLimit();
   checkConsole();
+  checkHugeOffsets();
+  checkBuffers();
+  checkCreateDirectory();
 
   Io::print("fstest: openat, read, write, lseek, close, fstat, newfstatat, getdents64 and mkdirat behave as on Linux\n");
 
