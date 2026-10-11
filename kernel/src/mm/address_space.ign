@@ -257,6 +257,51 @@ namespace Mm::AddressSpace {
     return true;
   }
 
+  /// Copies the NUL-terminated string at the user address `source` to the
+  /// kernel buffer `destination`, which holds `capacity` bytes, NUL
+  /// included. Returns the string length without the NUL; `capacity` when no
+  /// NUL came within `capacity` bytes (the string is too long); `NOT_MAPPED`
+  /// when a byte before the NUL is outside the user half or on a page the
+  /// process cannot read. Reads one page at a time, so a string that ends
+  /// just before an unmapped page is fine.
+  function copyStringFromUser(root: u64, destination: *mut u8, source: u64, capacity: u64): u64 {
+    let mut done: u64 = 0;
+
+    while (done < capacity) {
+      let address: u64 = source + done;
+
+      if (!isUserRange(address, 1)) {
+        return NOT_MAPPED;
+      }
+
+      let physical: u64 = translateUser(root, address, false);
+
+      if (physical == NOT_MAPPED) {
+        return NOT_MAPPED;
+      }
+
+      let chunk: u64 = bytesToPageEnd(address, capacity - done);
+      let bytes: *u8 = Boot::Hhdm::toVirtual(physical) as *u8;
+      let mut index: u64 = 0;
+
+      while (index < chunk) {
+        let byte: u8 = *(bytes + index);
+
+        *(destination + done + index) = byte;
+
+        if (byte == 0) {
+          return done + index;
+        }
+
+        index += 1;
+      }
+
+      done += chunk;
+    }
+
+    return capacity;
+  }
+
   /// Copies `length` bytes from the kernel buffer `source` to the user
   /// address `destination`. Returns false, with the range partly written,
   /// when any byte of it is outside the user half or on a page the process

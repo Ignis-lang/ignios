@@ -19,7 +19,7 @@
 //!                ▼
 //!            Syscall::dispatch(frame)
 //!                ├─ lookup(abi, frame.rax)     number -> operation (Operation::WRITE ...)
-//!                ├─ run the operation          arguments from rdi, rsi, rdx
+//!                ├─ run the operation          arguments from rdi, rsi, rdx, r10
 //!                └─ frame.rax := result        value or -errno
 //!                │
 //!                ▼
@@ -46,9 +46,9 @@ import Drivers from "@drivers";
 import Proc from "@proc";
 import Sched from "@sched";
 import _ from "./linux/errno";
+import _ from "./linux/files";
 import _ from "./linux/nanosleep";
 import _ from "./linux/table";
-import _ from "./linux/write";
 import _ from "./operation";
 
 /// The dispatcher.
@@ -67,6 +67,7 @@ namespace Syscall {
     let first: u64 = (*frame).rdi;
     let second: u64 = (*frame).rsi;
     let third: u64 = (*frame).rdx;
+    let fourth: u64 = (*frame).r10;
 
     if (operation == Operation::EXIT) {
       Proc::Process::exitCurrent(first & 0xFF);
@@ -74,6 +75,22 @@ namespace Syscall {
 
     if (operation == Operation::WRITE) {
       (*frame).rax = Linux::write(first, second, third);
+    } else if (operation == Operation::READ) {
+      (*frame).rax = Linux::read(first, second, third);
+    } else if (operation == Operation::OPEN) {
+      (*frame).rax = Linux::openAt(first, second, third, fourth);
+    } else if (operation == Operation::CLOSE) {
+      (*frame).rax = Linux::close(first);
+    } else if (operation == Operation::SEEK) {
+      (*frame).rax = Linux::seek(first, second, third);
+    } else if (operation == Operation::STAT) {
+      (*frame).rax = Linux::stat(first, second);
+    } else if (operation == Operation::STAT_AT) {
+      (*frame).rax = Linux::statAt(first, second, third, fourth);
+    } else if (operation == Operation::READ_DIRECTORY) {
+      (*frame).rax = Linux::readDirectory(first, second, third);
+    } else if (operation == Operation::MAKE_DIRECTORY) {
+      (*frame).rax = Linux::makeDirectoryAt(first, second, third);
     } else if (operation == Operation::GET_PID) {
       (*frame).rax = Proc::Process::currentId();
     } else if (operation == Operation::YIELD) {

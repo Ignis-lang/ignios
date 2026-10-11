@@ -37,7 +37,7 @@ IGNIS_OBJECT := $(BUILD)/ignis/user/obj/kernel.o
 # The user programs. Each NAME is an Ignis project in user/NAME whose ignis.toml
 # writes its object to build/user/NAME; it is linked with the entry stub
 # user/lib/start.S and shipped in the initramfs as /bin/NAME.
-USER_PROGRAMS := hello
+USER_PROGRAMS := hello fstest
 USER_ELFS := $(patsubst %,$(BUILD)/user/%.elf,$(USER_PROGRAMS))
 USER_LIB_SOURCES := $(shell find user/lib -name '*.ign' -o -name '*.toml')
 USER_START := $(BUILD)/user/start.o

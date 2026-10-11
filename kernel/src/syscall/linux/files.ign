@@ -1,0 +1,562 @@
+//!
+//! # Linux File System Calls
+//!
+//! `read`, `write`, `openat`, `close`, `lseek`, `fstat`, `newfstatat`,
+//! `getdents64` and `mkdirat`, with Linux numbers, flags, structures and
+//! errno values, on top of `Fs::Files` and `Fs::Vfs`.
+//!
+//! ## Overview
+//!
+//! Each handler checks every user pointer before it acts, translates the
+//! Linux arguments into the ABI-neutral ones of `Fs`, and turns the status
+//! it gets back into a negated errno with `errorFor`. User memory is never
+//! dereferenced: bytes go through a kernel buffer and
+//! `Mm::AddressSpace::copyFromUser` or `copyToUser`, and paths through
+//! `copyStringFromUser`.
+//!
+//! ```text
+//!   openat(dirfd, path, flags, mode)
+//!     ├─ base directory     AT_FDCWD (-100) is the root, otherwise dirfd must be
+//!     │                     an open directory
+//!     ├─ copy the path      at most PATH_MAX bytes, NUL included
+//!     ├─ translate flags    O_RDONLY/O_WRONLY/O_RDWR, O_CREAT, O_EXCL, O_TRUNC,
+//!     │                     O_APPEND, O_DIRECTORY -> Fs::Files flags
+//!     └─ Fs::Files::open    lowest free descriptor
+//! ```
+//!
+//! There is no current directory yet: `AT_FDCWD` means `/` for every
+//! process.
+//!
+//! ## Flags of `openat`
+//!
+//! | Linux flag    | Value     | Effect                                   |
+//! |---------------|-----------|------------------------------------------|
+//! | `O_RDONLY`    | 0         | read                                     |
+//! | `O_WRONLY`    | 1         | write                                    |
+//! | `O_RDWR`      | 2         | read and write                           |
+//! | `O_CREAT`     | `0x40`    | create a regular file if missing         |
+//! | `O_EXCL`      | `0x80`    | with `O_CREAT`, `-EEXIST` if it exists   |
+//! | `O_TRUNC`     | `0x200`   | cut a regular file opened for writing    |
+//! | `O_APPEND`    | `0x400`   | write at the end                         |
+//! | `O_DIRECTORY` | `0x10000` | `-ENOTDIR` unless a directory            |
+//!
+//! Any other bit (`O_CLOEXEC`, `O_NOCTTY`, `O_LARGEFILE`, ...) is accepted and
+//! has no effect, as nothing here could act on it. An access mode of 3 is
+//! `-EINVAL`.
+//!
+//! ## `struct stat` (144 bytes, x86_64)
+//!
+//! | Offset | Field        | Value here                                            |
+//! |--------|--------------|-------------------------------------------------------|
+//! | 0      | `st_dev`     | 1, the only file system                               |
+//! | 8      | `st_ino`     | the node id                                           |
+//! | 16     | `st_nlink`   | 2 for a directory, 1 otherwise                        |
+//! | 24     | `st_mode`    | `S_IFREG` `0x8000`, `S_IFDIR` `0x4000` or `S_IFCHR` `0x2000`, with the permission bits |
+//! | 28, 32 | `st_uid`, `st_gid` | 0                                               |
+//! | 40     | `st_rdev`    | `0x501` (major 5, minor 1) for the console, else 0    |
+//! | 48     | `st_size`    | the file size, 0 otherwise                            |
+//! | 56     | `st_blksize` | 4096                                                  |
+//! | 64     | `st_blocks`  | 512-byte blocks: size rounded up                      |
+//! | 72-119 | the three times | 0, there is no clock date yet                      |
+//!
+//! ## `struct linux_dirent64`
+//!
+//! | Offset | Field      | Size | Value                                        |
+//! |--------|------------|------|----------------------------------------------|
+//! | 0      | `d_ino`    | 8    | the node id                                  |
+//! | 8      | `d_off`    | 8    | the offset of the next entry (its index)     |
+//! | 16     | `d_reclen` | 2    | this record's length, a multiple of 8        |
+//! | 18     | `d_type`   | 1    | `DT_DIR` 4, `DT_REG` 8, `DT_CHR` 2           |
+//! | 19     | `d_name`   | n+1  | the name and a NUL, then padding             |
+//!
+//! A directory lists `.` and `..` first (indexes 0 and 1), then its children
+//! in creation order. The offset of a directory's open file is the index of
+//! the next entry.
+
+import Fs from "@fs";
+import Lib from "@lib";
+import Mm from "@mm";
+import Proc from "@proc";
+import _ from "./errno";
+
+/// The kernel buffers of the file calls. One is enough: system calls run
+/// with interrupts off on the only processor.
+record LinuxFilesState {
+  /// Staging buffer for the bytes of `read` and `write`. The size must equal
+  /// `Syscall::Linux::COPY_BUFFER_SIZE`.
+  static mut copyBuffer: u8[512];
+
+  /// A path copied from the user. The size must equal `Fs::Vfs::PATH_MAX`.
+  static mut path: u8[4096];
+
+  /// One `struct stat`. The size must equal `STAT_SIZE`.
+  static mut stat: u8[144];
+
+  /// One directory record. The size must equal `DIRENT_CAPACITY`.
+  static mut dirent: u8[280];
+}
+
+/// The file system call handlers.
+namespace Syscall::Linux {
+  /// The most one `read` or `write` moves. A longer request is a short
+  /// transfer, which the caller already has to handle.
+  const MAX_TRANSFER: u64 = 65536;
+
+  /// Bytes of `LinuxFilesState::copyBuffer`.
+  const COPY_BUFFER_SIZE: u64 = 512;
+
+  /// `dirfd` of the `*at` calls meaning the current directory: -100.
+  const AT_FDCWD: u64 = 0xFFFFFFFFFFFFFF9C;
+
+  /// `newfstatat` flag: an empty path means `dirfd` itself.
+  const AT_EMPTY_PATH: u64 = 0x1000;
+
+  /// The access mode bits of the `openat` flags.
+  const O_ACCMODE: u64 = 3;
+
+  /// Open for writing only.
+  const O_WRONLY: u64 = 1;
+
+  /// Open for reading and writing.
+  const O_RDWR: u64 = 2;
+
+  /// Create a regular file if missing.
+  const O_CREAT: u64 = 0x40;
+
+  /// With `O_CREAT`, fail if the name exists.
+  const O_EXCL: u64 = 0x80;
+
+  /// Cut a regular file opened for writing to 0 bytes.
+  const O_TRUNC: u64 = 0x200;
+
+  /// Write at the end.
+  const O_APPEND: u64 = 0x400;
+
+  /// Fail unless the path is a directory.
+  const O_DIRECTORY: u64 = 0x10000;
+
+  /// Size of `struct stat` on x86_64.
+  const STAT_SIZE: u64 = 144;
+
+  /// File type bits of `st_mode`: regular file.
+  const S_IFREG: u64 = 0x8000;
+
+  /// Directory.
+  const S_IFDIR: u64 = 0x4000;
+
+  /// Character device.
+  const S_IFCHR: u64 = 0x2000;
+
+  /// `st_rdev` of the console: major 5, minor 1, `makedev(5, 1)`.
+  const CONSOLE_RDEV: u64 = 0x501;
+
+  /// `d_type` of a directory.
+  const DT_DIR: u8 = 4;
+
+  /// `d_type` of a regular file.
+  const DT_REG: u8 = 8;
+
+  /// `d_type` of a character device.
+  const DT_CHR: u8 = 2;
+
+  /// The fixed part of `struct linux_dirent64`, before the name.
+  const DIRENT_HEADER: u64 = 19;
+
+  /// The longest record: the header, a `NAME_MAX` name and its NUL, rounded
+  /// up to 8.
+  const DIRENT_CAPACITY: u64 = 280;
+
+  /// `read(fd, buf, count)`. The whole range must be writable before any
+  /// byte moves, so a bad buffer is `-EFAULT` and reads nothing.
+  function read(descriptor: u64, buffer: u64, count: u64): u64 {
+    let total: u64 = count < MAX_TRANSFER ? count : MAX_TRANSFER;
+    let root: u64 = Proc::Process::currentRoot();
+    let table: u64 = Proc::Process::currentSlot();
+    let chunk: *mut u8 = &mut LinuxFilesState::copyBuffer as *mut u8;
+
+    if (Fs::Files::get(table, descriptor) == null) {
+      return Linux::failure(Linux::EBADF);
+    }
+
+    if (!Mm::AddressSpace::isAccessible(root, buffer, total, true)) {
+      return Linux::failure(Linux::EFAULT);
+    }
+
+    let mut done: u64 = 0;
+
+    while (done < total) {
+      let wanted: u64 = total - done < COPY_BUFFER_SIZE ? total - done : COPY_BUFFER_SIZE;
+      let mut got: u64 = 0;
+      let status: u64 = Fs::Files::read(table, descriptor, chunk, wanted, &mut got as *mut u64);
+
+      if (status != Fs::Vfs::OK) {
+        return done > 0 ? done : Linux::failureFor(status);
+      }
+
+      if (got > 0 && !Mm::AddressSpace::copyToUser(root, buffer + done, chunk as *u8, got)) {
+        return Linux::failure(Linux::EFAULT);
+      }
+
+      done += got;
+
+      if (got < wanted) {
+        break;
+      }
+    }
+
+    return done;
+  }
+
+  /// `write(fd, buf, count)`. The whole range must be readable before the
+  /// first byte is written, so a bad pointer is `-EFAULT` and writes
+  /// nothing. The bytes pass through a small kernel buffer, so a long
+  /// request is copied and written piece by piece.
+  function write(descriptor: u64, buffer: u64, count: u64): u64 {
+    let total: u64 = count < MAX_TRANSFER ? count : MAX_TRANSFER;
+    let root: u64 = Proc::Process::currentRoot();
+    let table: u64 = Proc::Process::currentSlot();
+    let chunk: *mut u8 = &mut LinuxFilesState::copyBuffer as *mut u8;
+
+    if (Fs::Files::get(table, descriptor) == null) {
+      return Linux::failure(Linux::EBADF);
+    }
+
+    if (!Mm::AddressSpace::isAccessible(root, buffer, total, false)) {
+      return Linux::failure(Linux::EFAULT);
+    }
+
+    let mut done: u64 = 0;
+
+    while (done < total) {
+      let piece: u64 = total - done < COPY_BUFFER_SIZE ? total - done : COPY_BUFFER_SIZE;
+      let mut written: u64 = 0;
+
+      if (!Mm::AddressSpace::copyFromUser(root, chunk, buffer + done, piece)) {
+        return Linux::failure(Linux::EFAULT);
+      }
+
+      let status: u64 = Fs::Files::write(table, descriptor, chunk as *u8, piece, &mut written as *mut u64);
+
+      if (status != Fs::Vfs::OK) {
+        return done > 0 ? done : Linux::failureFor(status);
+      }
+
+      done += written;
+    }
+
+    return done;
+  }
+
+  /// `openat(dirfd, path, flags, mode)`. Returns the new descriptor.
+  function openAt(directory: u64, path: u64, flags: u64, mode: u64): u64 {
+    let table: u64 = Proc::Process::currentSlot();
+    let mut base: *mut Fs::Node = null;
+    let mut length: u64 = 0;
+    let status: u64 = resolve(table, directory, path, &mut base as *mut *mut Fs::Node, &mut length as *mut u64);
+
+    if (status != Fs::Vfs::OK) {
+      return Linux::failureFor(status);
+    }
+
+    let access: u64 = flags & O_ACCMODE;
+
+    if (access == O_ACCMODE) {
+      return Linux::failure(Linux::EINVAL);
+    }
+
+    let mut neutral: u64 = access == O_WRONLY ? Fs::Files::WRITE : (access == O_RDWR ? Fs::Files::READ | Fs::Files::WRITE : Fs::Files::READ);
+
+    neutral = neutral | translate(flags, O_CREAT, Fs::Files::CREATE);
+    neutral = neutral | translate(flags, O_EXCL, Fs::Files::EXCLUSIVE);
+    neutral = neutral | translate(flags, O_TRUNC, Fs::Files::TRUNCATE);
+    neutral = neutral | translate(flags, O_APPEND, Fs::Files::APPEND);
+    neutral = neutral | translate(flags, O_DIRECTORY, Fs::Files::DIRECTORY);
+
+    let mut descriptor: u64 = 0;
+    let opened: u64 = Fs::Files::open(table, base, pathBuffer() as *u8, length, neutral, mode, &mut descriptor as *mut u64);
+
+    if (opened != Fs::Vfs::OK) {
+      return Linux::failureFor(opened);
+    }
+
+    return descriptor;
+  }
+
+  /// `close(fd)`.
+  function close(descriptor: u64): u64 {
+    let status: u64 = Fs::Files::close(Proc::Process::currentSlot(), descriptor);
+
+    return status == Fs::Vfs::OK ? 0 : Linux::failureFor(status);
+  }
+
+  /// `lseek(fd, offset, whence)`. Returns the new offset.
+  function seek(descriptor: u64, offset: u64, whence: u64): u64 {
+    let mut position: u64 = 0;
+    let status: u64 = Fs::Files::seek(Proc::Process::currentSlot(), descriptor, offset, whence, &mut position as *mut u64);
+
+    return status == Fs::Vfs::OK ? position : Linux::failureFor(status);
+  }
+
+  /// `fstat(fd, statbuf)`.
+  function stat(descriptor: u64, buffer: u64): u64 {
+    let file: *mut Fs::OpenFile = Fs::Files::get(Proc::Process::currentSlot(), descriptor);
+
+    if (file == null) {
+      return Linux::failure(Linux::EBADF);
+    }
+
+    return writeStat((*file).node, buffer);
+  }
+
+  /// `newfstatat(dirfd, path, statbuf, flags)`. With `AT_EMPTY_PATH` an empty
+  /// path describes `dirfd` itself, which may be any open descriptor.
+  function statAt(directory: u64, path: u64, buffer: u64, flags: u64): u64 {
+    let table: u64 = Proc::Process::currentSlot();
+    let root: u64 = Proc::Process::currentRoot();
+    let length: u64 = Mm::AddressSpace::copyStringFromUser(root, pathBuffer(), path, Fs::Vfs::PATH_MAX);
+
+    if (length == Mm::AddressSpace::NOT_MAPPED) {
+      return Linux::failure(Linux::EFAULT);
+    }
+
+    if (length == 0 && (flags & AT_EMPTY_PATH) != 0) {
+      return stat(directory, buffer);
+    }
+
+    let mut base: *mut Fs::Node = null;
+    let mut pathLength: u64 = 0;
+    let status: u64 = resolve(table, directory, path, &mut base as *mut *mut Fs::Node, &mut pathLength as *mut u64);
+
+    if (status != Fs::Vfs::OK) {
+      return Linux::failureFor(status);
+    }
+
+    if (pathLength == 0) {
+      return Linux::failure(Linux::ENOENT);
+    }
+
+    let mut node: *mut Fs::Node = null;
+    let found: u64 = Fs::Vfs::lookup(base, pathBuffer() as *u8, pathLength, &mut node as *mut *mut Fs::Node);
+
+    if (found != Fs::Vfs::OK) {
+      return Linux::failureFor(found);
+    }
+
+    return writeStat(node, buffer);
+  }
+
+  /// `getdents64(fd, dirp, count)`. Fills the buffer with as many whole
+  /// records as fit, from the offset of the open directory, and returns the
+  /// bytes written: 0 at the end. A buffer too small for the next record is
+  /// `-EINVAL`.
+  function readDirectory(descriptor: u64, buffer: u64, count: u64): u64 {
+    let root: u64 = Proc::Process::currentRoot();
+    let file: *mut Fs::OpenFile = Fs::Files::get(Proc::Process::currentSlot(), descriptor);
+
+    if (file == null) {
+      return Linux::failure(Linux::EBADF);
+    }
+
+    if ((*file).kind != Fs::Files::NODE || (*(*file).node).kind != Fs::Vfs::DIRECTORY) {
+      return Linux::failure(Linux::ENOTDIR);
+    }
+
+    if (!Mm::AddressSpace::isAccessible(root, buffer, count, true)) {
+      return Linux::failure(Linux::EFAULT);
+    }
+
+    let directory: *mut Fs::Node = (*file).node;
+    let recordBytes: *mut u8 = &mut LinuxFilesState::dirent as *mut u8;
+    let mut written: u64 = 0;
+
+    while (true) {
+      let index: u64 = (*file).offset;
+      let mut entry: *mut Fs::Node = null;
+      let mut name: *u8 = null;
+      let mut nameLength: u64 = 0;
+
+      if (index == 0) {
+        entry = directory;
+        name = "." as *u8;
+        nameLength = 1;
+      } else if (index == 1) {
+        entry = (*directory).parent;
+        name = ".." as *u8;
+        nameLength = 2;
+      } else {
+        entry = Fs::Vfs::child(directory, index - 2);
+
+        if (entry == null) {
+          break;
+        }
+
+        name = (*entry).name as *u8;
+        nameLength = (*entry).nameLength;
+      }
+
+      let length: u64 = (DIRENT_HEADER + nameLength + 1 + 7) / 8 * 8;
+
+      if (written + length > count) {
+        if (written == 0) {
+          return Linux::failure(Linux::EINVAL);
+        }
+
+        break;
+      }
+
+      fillDirent(recordBytes, entry, index + 1, length, name, nameLength);
+
+      if (!Mm::AddressSpace::copyToUser(root, buffer + written, recordBytes as *u8, length)) {
+        return Linux::failure(Linux::EFAULT);
+      }
+
+      written += length;
+      (*file).offset = index + 1;
+    }
+
+    return written;
+  }
+
+  /// `mkdirat(dirfd, path, mode)`.
+  function makeDirectoryAt(directory: u64, path: u64, mode: u64): u64 {
+    let table: u64 = Proc::Process::currentSlot();
+    let mut base: *mut Fs::Node = null;
+    let mut length: u64 = 0;
+    let status: u64 = resolve(table, directory, path, &mut base as *mut *mut Fs::Node, &mut length as *mut u64);
+
+    if (status != Fs::Vfs::OK) {
+      return Linux::failureFor(status);
+    }
+
+    if (length == 0) {
+      return Linux::failure(Linux::ENOENT);
+    }
+
+    let mut parent: *mut Fs::Node = null;
+    let mut nameOffset: u64 = 0;
+    let mut nameLength: u64 = 0;
+    let split: u64 = Fs::Vfs::lookupParent(base, pathBuffer() as *u8, length, &mut parent as *mut *mut Fs::Node, &mut nameOffset as *mut u64, &mut nameLength as *mut u64);
+
+    if (split == Fs::Vfs::INVALID) {
+      return Linux::failure(Linux::EEXIST);
+    }
+
+    if (split != Fs::Vfs::OK) {
+      return Linux::failureFor(split);
+    }
+
+    let mut created: *mut Fs::Node = null;
+    let made: u64 = Fs::Vfs::create(parent, (pathBuffer() as *u8) + nameOffset, nameLength, Fs::Vfs::DIRECTORY, mode & Fs::Files::PERMISSION_MASK, &mut created as *mut *mut Fs::Node);
+
+    return made == Fs::Vfs::OK ? 0 : Linux::failureFor(made);
+  }
+
+  /// Copies the path at the user address `path` into `pathBuffer` and finds
+  /// the directory it is relative to: the root for an absolute path or
+  /// `AT_FDCWD`, otherwise the open directory `directory`. Writes the base
+  /// and the path length. Returns `BAD_ADDRESS` for a bad pointer,
+  /// `NAME_TOO_LONG` for a path of `PATH_MAX` bytes or more, and the
+  /// `Fs::Files::directoryOf` codes.
+  function resolve(
+    table: u64,
+    directory: u64,
+    path: u64,
+    base: *mut *mut Fs::Node,
+    length: *mut u64
+  ): u64 {
+    let copied: u64 = Mm::AddressSpace::copyStringFromUser(Proc::Process::currentRoot(), pathBuffer(), path, Fs::Vfs::PATH_MAX);
+
+    if (copied == Mm::AddressSpace::NOT_MAPPED) {
+      return Linux::BAD_ADDRESS;
+    }
+
+    if (copied == Fs::Vfs::PATH_MAX) {
+      return Fs::Vfs::NAME_TOO_LONG;
+    }
+
+    *length = copied;
+
+    if (directory == AT_FDCWD || (copied > 0 && *pathBuffer() == 0x2F)) {
+      *base = Fs::Vfs::root();
+      return Fs::Vfs::OK;
+    }
+
+    return Fs::Files::directoryOf(table, directory, base);
+  }
+
+  /// Fills `LinuxFilesState::stat` for `node`, or for the console when
+  /// `node` is null, and copies it to the user address `buffer`.
+  function writeStat(node: *mut Fs::Node, buffer: u64): u64 {
+    let stat: *mut u8 = &mut LinuxFilesState::stat as *mut u8;
+    let mut kind: u64 = Fs::Vfs::DEVICE;
+    let mut id: u64 = 0;
+    let mut mode: u64 = Fs::Vfs::CONSOLE_MODE;
+    let mut size: u64 = 0;
+
+    if (node != null) {
+      kind = (*node).kind;
+      id = (*node).id;
+      mode = (*node).mode;
+      size = (*node).size;
+    }
+
+    let typeBits: u64 = kind == Fs::Vfs::DIRECTORY ? S_IFDIR : (kind == Fs::Vfs::DEVICE ? S_IFCHR : S_IFREG);
+
+    Lib::Mem::fill(stat, 0, STAT_SIZE);
+    putWord(stat, 0, 1);
+    putWord(stat, 8, id);
+    putWord(stat, 16, kind == Fs::Vfs::DIRECTORY ? 2 : 1);
+    putHalf(stat, 24, typeBits | (mode & Fs::Files::PERMISSION_MASK));
+    putWord(stat, 40, kind == Fs::Vfs::DEVICE ? CONSOLE_RDEV : 0);
+    putWord(stat, 48, size);
+    putWord(stat, 56, 4096);
+    putWord(stat, 64, (size + 511) / 512);
+
+    if (!Mm::AddressSpace::copyToUser(Proc::Process::currentRoot(), buffer, stat as *u8, STAT_SIZE)) {
+      return Linux::failure(Linux::EFAULT);
+    }
+
+    return 0;
+  }
+
+  /// Writes one `linux_dirent64` of `length` bytes to `record`.
+  function fillDirent(
+    recordBytes: *mut u8,
+    node: *mut Fs::Node,
+    next: u64,
+    length: u64,
+    name: *u8,
+    nameLength: u64
+  ): void {
+    let kind: u64 = (*node).kind;
+    let typeByte: u8 = kind == Fs::Vfs::DIRECTORY ? DT_DIR : (kind == Fs::Vfs::DEVICE ? DT_CHR : DT_REG);
+
+    Lib::Mem::fill(recordBytes, 0, length);
+    putWord(recordBytes, 0, (*node).id);
+    putWord(recordBytes, 8, next);
+    *(recordBytes + 16) = (length & 0xFF) as u8;
+    *(recordBytes + 17) = (length >> 8) as u8;
+    *(recordBytes + 18) = typeByte;
+    Lib::Mem::copy(recordBytes + DIRENT_HEADER, name, nameLength);
+  }
+
+  /// `neutral` when `flags` has `linux`, else 0.
+  function translate(flags: u64, linux: u64, neutral: u64): u64 {
+    return (flags & linux) != 0 ? neutral : 0;
+  }
+
+  /// The kernel copy of the current path.
+  function pathBuffer(): *mut u8 {
+    return &mut LinuxFilesState::path as *mut u8;
+  }
+
+  /// Stores the 8-byte little-endian `value` at `offset` of `bytes`.
+  function putWord(bytes: *mut u8, offset: u64, value: u64): void {
+    *@pointerFromInteger<*mut u64>(@integerFromPointer(bytes) + offset) = value;
+  }
+
+  /// Stores the low 4 bytes of `value` at `offset` of `bytes`.
+  function putHalf(bytes: *mut u8, offset: u64, value: u64): void {
+    *@pointerFromInteger<*mut u32>(@integerFromPointer(bytes) + offset) = value as u32;
+  }
+}

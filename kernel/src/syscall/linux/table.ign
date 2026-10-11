@@ -31,8 +31,20 @@ record LinuxTableState {
 
 /// The Linux numbers and the table.
 namespace Syscall::Linux {
-  /// Linux numbers, from arch/x86/entry/syscalls/syscall_64.tbl.
+  /// Linux numbers, from arch/x86/entry/syscalls/syscall_64.tbl. `read`, 0.
+  const NUMBER_READ: u64 = 0;
+
+  /// `write`, number 1.
   const NUMBER_WRITE: u64 = 1;
+
+  /// `close`, number 3.
+  const NUMBER_CLOSE: u64 = 3;
+
+  /// `fstat`, number 5.
+  const NUMBER_FSTAT: u64 = 5;
+
+  /// `lseek`, number 8.
+  const NUMBER_LSEEK: u64 = 8;
 
   /// `sched_yield`, number 24.
   const NUMBER_SCHED_YIELD: u64 = 24;
@@ -46,14 +58,34 @@ namespace Syscall::Linux {
   /// `exit`, number 60.
   const NUMBER_EXIT: u64 = 60;
 
+  /// `getdents64`, number 217.
+  const NUMBER_GETDENTS64: u64 = 217;
+
   /// `exit_group`, number 231.
   const NUMBER_EXIT_GROUP: u64 = 231;
+
+  /// `openat`, number 257.
+  const NUMBER_OPENAT: u64 = 257;
+
+  /// `mkdirat`, number 258.
+  const NUMBER_MKDIRAT: u64 = 258;
+
+  /// `newfstatat`, number 262.
+  const NUMBER_NEWFSTATAT: u64 = 262;
 
   /// Fills the table of the Linux ABI.
   function initialize(): void {
     let table: *mut u8 = tableBase();
 
+    *(table + NUMBER_READ) = Operation::READ;
     *(table + NUMBER_WRITE) = Operation::WRITE;
+    *(table + NUMBER_CLOSE) = Operation::CLOSE;
+    *(table + NUMBER_FSTAT) = Operation::STAT;
+    *(table + NUMBER_LSEEK) = Operation::SEEK;
+    *(table + NUMBER_GETDENTS64) = Operation::READ_DIRECTORY;
+    *(table + NUMBER_OPENAT) = Operation::OPEN;
+    *(table + NUMBER_MKDIRAT) = Operation::MAKE_DIRECTORY;
+    *(table + NUMBER_NEWFSTATAT) = Operation::STAT_AT;
     *(table + NUMBER_SCHED_YIELD) = Operation::YIELD;
     *(table + NUMBER_NANOSLEEP) = Operation::SLEEP;
     *(table + NUMBER_GETPID) = Operation::GET_PID;

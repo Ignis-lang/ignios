@@ -1,0 +1,466 @@
+//!
+//! # Open Files and Descriptors
+//!
+//! What a process holds open: one descriptor table per process slot, and
+//! the open files the descriptors point to.
+//!
+//! ## Overview
+//!
+//! A descriptor is a small number, an index into the table of the process.
+//! It points to an open file, which records what was opened and where the
+//! next read or write happens. Two descriptors can share one open file and
+//! its offset; the three standard descriptors of a new process do, since
+//! they all name the console.
+//!
+//! ```text
+//!   descriptor table of a process (one per slot, MAX_DESCRIPTORS entries)
+//!     0 ──┐
+//!     1 ──┼──► OpenFile { CONSOLE, READ | WRITE, references 3 }
+//!     2 ──┘
+//!     3 ─────► OpenFile { NODE, node ─► /etc/motd, offset 12, READ, references 1 }
+//!     4       (free)
+//! ```
+//!
+//! An open file is freed when its last descriptor is closed. A process that
+//! ends closes everything it still has (`closeAll`).
+//!
+//! ## Flags
+//!
+//! The functions take this module's own flags, not any ABI's. The system call
+//! layer translates (`O_RDWR | O_CREAT` from Linux becomes `READ | WRITE |
+//! CREATE`).
+//!
+//! | Flag        | Meaning                                                      |
+//! |-------------|--------------------------------------------------------------|
+//! | `READ`      | the descriptor may read                                      |
+//! | `WRITE`     | the descriptor may write; refused on a directory             |
+//! | `CREATE`    | create a regular file when the name does not exist           |
+//! | `EXCLUSIVE` | with `CREATE`, fail with `EXISTS` when the name exists       |
+//! | `TRUNCATE`  | with `WRITE`, cut a regular file to 0 bytes                  |
+//! | `APPEND`    | every write goes to the end of the file                      |
+//! | `DIRECTORY` | fail with `NOT_DIRECTORY` unless the path is a directory     |
+//!
+//! ## Status codes
+//!
+//! The `Fs::Vfs` codes, plus three of this module:
+//!
+//! | Code             | Meaning                                         | Linux    |
+//! |------------------|-------------------------------------------------|----------|
+//! | `BAD_DESCRIPTOR` | the descriptor is not open, or lacks the access | `EBADF`  |
+//! | `TOO_MANY_OPEN`  | the table of the process is full                | `EMFILE` |
+//! | `NOT_SEEKABLE`   | seeking the console                             | `ESPIPE` |
+//!
+//! The console reads as an empty file (0 bytes): the keyboard belongs to the
+//! kernel terminal, and a program has no input yet.
+
+import Drivers from "@drivers";
+import Mm from "@mm";
+import _ from "./vfs";
+
+namespace Fs {
+  /// What a descriptor points to.
+  @cLayout
+  record OpenFile {
+    /// `Fs::Files::NODE` or `Fs::Files::CONSOLE`.
+    public kind: u64;
+
+    /// The file or directory of a `NODE` open file.
+    public node: *mut Fs::Node;
+
+    /// Where the next read or write starts. For a directory, the index of
+    /// the next entry `getdents64` returns.
+    public offset: u64;
+
+    /// The `READ`, `WRITE` and `APPEND` flags it was opened with.
+    public flags: u64;
+
+    /// The descriptors that point to it.
+    public references: u64;
+  }
+}
+
+/// The descriptor tables of every process slot.
+record FilesState {
+  /// `MAX_TABLES` tables of `MAX_DESCRIPTORS` entries each, the address of
+  /// an `Fs::OpenFile` or 0 for a free descriptor. Table `t`, descriptor `d`
+  /// is entry `t * MAX_DESCRIPTORS + d`. The size must be 8 * 16.
+  static mut tables: u64[128];
+}
+
+/// The descriptor API.
+namespace Fs::Files {
+  /// Tables, one per process slot (`Proc::Process::MAX_PROCESSES`).
+  const MAX_TABLES: u64 = 8;
+
+  /// Descriptors per process: 0 to 15.
+  const MAX_DESCRIPTORS: u64 = 16;
+
+  /// An open file or directory of the tree.
+  const NODE: u64 = 1;
+
+  /// The console.
+  const CONSOLE: u64 = 2;
+
+  /// The descriptor may read.
+  const READ: u64 = 1;
+
+  /// The descriptor may write.
+  const WRITE: u64 = 2;
+
+  /// Create a regular file when the name does not exist.
+  const CREATE: u64 = 4;
+
+  /// With `CREATE`, fail when the name exists.
+  const EXCLUSIVE: u64 = 8;
+
+  /// With `WRITE`, cut a regular file to 0 bytes.
+  const TRUNCATE: u64 = 16;
+
+  /// Every write goes to the end.
+  const APPEND: u64 = 32;
+
+  /// The path must be a directory.
+  const DIRECTORY: u64 = 64;
+
+  /// The descriptor is not open or lacks the access.
+  const BAD_DESCRIPTOR: u64 = 20;
+
+  /// The descriptor table is full.
+  const TOO_MANY_OPEN: u64 = 21;
+
+  /// The open file cannot seek.
+  const NOT_SEEKABLE: u64 = 22;
+
+  /// `seek` from the start.
+  const SEEK_SET: u64 = 0;
+
+  /// `seek` from the current offset.
+  const SEEK_CURRENT: u64 = 1;
+
+  /// `seek` from the end.
+  const SEEK_END: u64 = 2;
+
+  /// The permission bits a created file keeps: rwxrwxrwx.
+  const PERMISSION_MASK: u64 = 0x1FF;
+
+  /// ASCII `/`.
+  const SLASH: u8 = 0x2F;
+
+  /// Points descriptors 0, 1 and 2 of `table` at one console open file,
+  /// readable and writable. The table must be empty. Returns `NO_MEMORY`.
+  function openStandard(table: u64): u64 {
+    let file: *mut Fs::OpenFile = newOpenFile(CONSOLE, null, READ | WRITE);
+
+    if (file == null) {
+      return Fs::Vfs::NO_MEMORY;
+    }
+
+    (*file).references = 3;
+    setEntry(table, 0, file);
+    setEntry(table, 1, file);
+    setEntry(table, 2, file);
+
+    return Fs::Vfs::OK;
+  }
+
+  /// Closes every descriptor of `table`.
+  function closeAll(table: u64): void {
+    let mut descriptor: u64 = 0;
+
+    while (descriptor < MAX_DESCRIPTORS) {
+      close(table, descriptor);
+      descriptor += 1;
+    }
+  }
+
+  /// The open file of `descriptor` in `table`, or null when it is not open.
+  function get(table: u64, descriptor: u64): *mut Fs::OpenFile {
+    if (table >= MAX_TABLES || descriptor >= MAX_DESCRIPTORS) {
+      return null;
+    }
+
+    return @pointerFromInteger<*mut Fs::OpenFile>(*entryPointer(table, descriptor));
+  }
+
+  /// The directory a relative path of a `*at` call starts from:
+  /// `descriptor` must be open on a directory. Writes it to `directory`.
+  /// Returns `BAD_DESCRIPTOR` or `NOT_DIRECTORY`.
+  function directoryOf(table: u64, descriptor: u64, directory: *mut *mut Fs::Node): u64 {
+    let file: *mut Fs::OpenFile = get(table, descriptor);
+
+    if (file == null) {
+      return BAD_DESCRIPTOR;
+    }
+
+    if ((*file).kind != NODE || (*(*file).node).kind != Fs::Vfs::DIRECTORY) {
+      return Fs::Vfs::NOT_DIRECTORY;
+    }
+
+    *directory = (*file).node;
+
+    return Fs::Vfs::OK;
+  }
+
+  /// Opens the `length` bytes of `path`, relative to `base`, with `flags`,
+  /// and writes the lowest free descriptor to `descriptor`. A created file
+  /// gets the permission bits of `mode`. Returns the `Fs::Vfs` codes of the
+  /// lookup or the creation, `TOO_MANY_OPEN` before anything is created,
+  /// `NOT_DIRECTORY` for `DIRECTORY` on something else, `IS_DIRECTORY` for
+  /// `WRITE` on a directory or `CREATE` on a path that ends with `/`, and
+  /// `NO_MEMORY`.
+  function open(
+    table: u64,
+    base: *mut Fs::Node,
+    path: *u8,
+    length: u64,
+    flags: u64,
+    mode: u64,
+    descriptor: *mut u64
+  ): u64 {
+    let free: u64 = freeDescriptor(table);
+
+    if (free == MAX_DESCRIPTORS) {
+      return TOO_MANY_OPEN;
+    }
+
+    if (length == 0) {
+      return Fs::Vfs::NOT_FOUND;
+    }
+
+    let mut node: *mut Fs::Node = null;
+    let mut status: u64 = Fs::Vfs::OK;
+
+    if ((flags & CREATE) != 0) {
+      if (*(path + length - 1) == SLASH) {
+        return Fs::Vfs::IS_DIRECTORY;
+      }
+
+      status = findOrCreate(base, path, length, flags, mode, &mut node as *mut *mut Fs::Node);
+    } else {
+      status = Fs::Vfs::lookup(base, path, length, &mut node as *mut *mut Fs::Node);
+    }
+
+    if (status != Fs::Vfs::OK) {
+      return status;
+    }
+
+    if ((flags & DIRECTORY) != 0 && (*node).kind != Fs::Vfs::DIRECTORY) {
+      return Fs::Vfs::NOT_DIRECTORY;
+    }
+
+    if ((flags & WRITE) != 0 && (*node).kind == Fs::Vfs::DIRECTORY) {
+      return Fs::Vfs::IS_DIRECTORY;
+    }
+
+    let kind: u64 = (*node).kind == Fs::Vfs::DEVICE ? CONSOLE : NODE;
+    let file: *mut Fs::OpenFile = newOpenFile(kind, node, flags & (READ | WRITE | APPEND));
+
+    if (file == null) {
+      return Fs::Vfs::NO_MEMORY;
+    }
+
+    if ((flags & TRUNCATE) != 0 && (flags & WRITE) != 0 && (*node).kind == Fs::Vfs::FILE) {
+      Fs::Vfs::truncate(node, 0);
+    }
+
+    setEntry(table, free, file);
+    *descriptor = free;
+
+    return Fs::Vfs::OK;
+  }
+
+  /// Frees `descriptor`, and its open file when no other descriptor points
+  /// to it. Returns `BAD_DESCRIPTOR` when it is not open.
+  function close(table: u64, descriptor: u64): u64 {
+    let file: *mut Fs::OpenFile = get(table, descriptor);
+
+    if (file == null) {
+      return BAD_DESCRIPTOR;
+    }
+
+    *entryPointer(table, descriptor) = 0;
+    (*file).references -= 1;
+
+    if ((*file).references == 0) {
+      Mm::Heap::free(file as *mut u8);
+    }
+
+    return Fs::Vfs::OK;
+  }
+
+  /// Reads up to `count` bytes from `descriptor` at its offset into the
+  /// kernel buffer `buffer`, advances the offset and writes the number read
+  /// to `done`: 0 at the end of the file and always for the console.
+  /// Returns `BAD_DESCRIPTOR` when it is not open for reading and
+  /// `IS_DIRECTORY` for a directory.
+  function read(table: u64, descriptor: u64, buffer: *mut u8, count: u64, done: *mut u64): u64 {
+    let file: *mut Fs::OpenFile = get(table, descriptor);
+
+    if (file == null || ((*file).flags & READ) == 0) {
+      return BAD_DESCRIPTOR;
+    }
+
+    if ((*file).kind == CONSOLE) {
+      *done = 0;
+      return Fs::Vfs::OK;
+    }
+
+    let status: u64 = Fs::Vfs::read((*file).node, (*file).offset, buffer, count, done);
+
+    if (status == Fs::Vfs::OK) {
+      (*file).offset += *done;
+    }
+
+    return status;
+  }
+
+  /// Writes the `count` bytes of the kernel buffer `source` to `descriptor`
+  /// at its offset, or at the end with `APPEND`, advances the offset and
+  /// writes the number written to `done`. Returns `BAD_DESCRIPTOR` when it is
+  /// not open for writing, and the `Fs::Vfs::write` codes.
+  function write(table: u64, descriptor: u64, source: *u8, count: u64, done: *mut u64): u64 {
+    let file: *mut Fs::OpenFile = get(table, descriptor);
+
+    if (file == null || ((*file).flags & WRITE) == 0) {
+      return BAD_DESCRIPTOR;
+    }
+
+    if ((*file).kind == CONSOLE) {
+      let mut index: u64 = 0;
+
+      while (index < count) {
+        Drivers::Console::writeChar(*(source + index));
+        index += 1;
+      }
+
+      *done = count;
+      return Fs::Vfs::OK;
+    }
+
+    if (((*file).flags & APPEND) != 0) {
+      (*file).offset = (*(*file).node).size;
+    }
+
+    let status: u64 = Fs::Vfs::write((*file).node, (*file).offset, source, count);
+
+    if (status != Fs::Vfs::OK) {
+      return status;
+    }
+
+    (*file).offset += count;
+    *done = count;
+
+    return Fs::Vfs::OK;
+  }
+
+  /// Moves the offset of `descriptor` to `offset` (a signed value in two's
+  /// complement) from the start, the current offset or the end, and writes
+  /// the new offset to `position`. Returns `BAD_DESCRIPTOR`, `NOT_SEEKABLE`
+  /// for the console, and `INVALID` for an unknown `whence` or a result
+  /// below 0. An offset past the end is allowed: a write there leaves a gap
+  /// of zeros.
+  function seek(table: u64, descriptor: u64, offset: u64, whence: u64, position: *mut u64): u64 {
+    let file: *mut Fs::OpenFile = get(table, descriptor);
+
+    if (file == null) {
+      return BAD_DESCRIPTOR;
+    }
+
+    if ((*file).kind == CONSOLE) {
+      return NOT_SEEKABLE;
+    }
+
+    let mut origin: u64 = 0;
+
+    if (whence == SEEK_CURRENT) {
+      origin = (*file).offset;
+    } else if (whence == SEEK_END) {
+      origin = (*(*file).node).size;
+    } else if (whence != SEEK_SET) {
+      return Fs::Vfs::INVALID;
+    }
+
+    let result: i64 = (origin as i64) + (offset as i64);
+
+    if (result < 0 || ((offset as i64) > 0 && result < (origin as i64))) {
+      return Fs::Vfs::INVALID;
+    }
+
+    (*file).offset = result as u64;
+    *position = result as u64;
+
+    return Fs::Vfs::OK;
+  }
+
+  /// Finds the last component of `path` under its parent, or creates it as a
+  /// regular file. `EXCLUSIVE` turns an existing name into `EXISTS`.
+  function findOrCreate(
+    base: *mut Fs::Node,
+    path: *u8,
+    length: u64,
+    flags: u64,
+    mode: u64,
+    result: *mut *mut Fs::Node
+  ): u64 {
+    let mut parent: *mut Fs::Node = null;
+    let mut nameOffset: u64 = 0;
+    let mut nameLength: u64 = 0;
+    let status: u64 = Fs::Vfs::lookupParent(base, path, length, &mut parent as *mut *mut Fs::Node, &mut nameOffset as *mut u64, &mut nameLength as *mut u64);
+
+    if (status != Fs::Vfs::OK) {
+      return status;
+    }
+
+    let existing: *mut Fs::Node = Fs::Vfs::findChild(parent, path + nameOffset, nameLength);
+
+    if (existing != null) {
+      if ((flags & EXCLUSIVE) != 0) {
+        return Fs::Vfs::EXISTS;
+      }
+
+      *result = existing;
+      return Fs::Vfs::OK;
+    }
+
+    return Fs::Vfs::create(parent, path + nameOffset, nameLength, Fs::Vfs::FILE, mode & PERMISSION_MASK, result);
+  }
+
+  /// The lowest free descriptor of `table`, or `MAX_DESCRIPTORS` when it is
+  /// full.
+  function freeDescriptor(table: u64): u64 {
+    let mut descriptor: u64 = 0;
+
+    while (descriptor < MAX_DESCRIPTORS && *entryPointer(table, descriptor) != 0) {
+      descriptor += 1;
+    }
+
+    return descriptor;
+  }
+
+  /// Allocates an open file with one reference and offset 0, or returns null.
+  function newOpenFile(kind: u64, node: *mut Fs::Node, flags: u64): *mut Fs::OpenFile {
+    let file: *mut Fs::OpenFile = Mm::Heap::allocate(@sizeOf<Fs::OpenFile>(), 16) as *mut Fs::OpenFile;
+
+    if (file == null) {
+      return null;
+    }
+
+    (*file).kind = kind;
+    (*file).node = node;
+    (*file).offset = 0;
+    (*file).flags = flags;
+    (*file).references = 1;
+
+    return file;
+  }
+
+  /// Stores `file` as `descriptor` of `table`.
+  function setEntry(table: u64, descriptor: u64, file: *mut Fs::OpenFile): void {
+    *entryPointer(table, descriptor) = @integerFromPointer(file);
+  }
+
+  /// The address of the entry of `descriptor` in `table`.
+  function entryPointer(table: u64, descriptor: u64): *mut u64 {
+    return @pointerFromInteger<*mut u64>(@integerFromPointer(&mut FilesState::tables as *mut u64) + (table * MAX_DESCRIPTORS + descriptor) * 8);
+  }
+}

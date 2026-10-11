@@ -8,26 +8,88 @@
 //!
 //! A Linux system call returns its result in RAX. A value from -4095 to -1 is
 //! a negated errno, so `failure` negates the number and reinterprets it as an
-//! unsigned word. The numbers come from `include/uapi/asm-generic/errno-base.h`.
+//! unsigned word. The numbers come from `include/uapi/asm-generic/errno-base.h`
+//! and `errno.h`.
+//!
+//! The file code reports its own status codes (`Fs::Vfs`, `Fs::Files`), the
+//! same for every ABI. `errorFor` is where the Linux ABI turns them into
+//! errno values; the table is in the header of `fs/vfs.ign` and
+//! `fs/files.ign`.
+
+import Fs from "@fs";
 
 /// The errno values the implemented calls use.
 namespace Syscall::Linux {
-  /// errno values, from include/uapi/asm-generic/errno-base.h.
+  /// No such file or directory (2).
+  const ENOENT: i64 = 2;
+
+  /// Bad file descriptor (9): the descriptor is not open, or not for this.
   const EBADF: i64 = 9;
+
+  /// Out of memory (12).
+  const ENOMEM: i64 = 12;
 
   /// Bad address (14): a user pointer failed validation.
   const EFAULT: i64 = 14;
 
+  /// File exists (17).
+  const EEXIST: i64 = 17;
+
+  /// Not a directory (20).
+  const ENOTDIR: i64 = 20;
+
+  /// Is a directory (21).
+  const EISDIR: i64 = 21;
+
   /// Invalid argument (22).
   const EINVAL: i64 = 22;
 
+  /// Too many open files in the process (24).
+  const EMFILE: i64 = 24;
+
+  /// Illegal seek (29): the descriptor is the console.
+  const ESPIPE: i64 = 29;
+
+  /// File name too long (36).
+  const ENAMETOOLONG: i64 = 36;
+
   /// Function not implemented (38).
   const ENOSYS: i64 = 38;
+
+  /// Directory not empty (39).
+  const ENOTEMPTY: i64 = 39;
+
+  /// A status of the system call layer itself, next to the `Fs` codes: a user
+  /// pointer failed validation. `errorFor` turns it into `EFAULT`.
+  const BAD_ADDRESS: u64 = 100;
 
   /// The value a failing call returns in RAX: the errno, negated.
   function failure(errno: i64): u64 {
     let value: i64 = 0 - errno;
 
     return value as u64;
+  }
+
+  /// The Linux errno of an `Fs::Vfs` or `Fs::Files` status code.
+  function errorFor(status: u64): i64 {
+    return match (status) {
+      Fs::Vfs::NOT_FOUND -> ENOENT,
+      Fs::Vfs::NOT_DIRECTORY -> ENOTDIR,
+      Fs::Vfs::IS_DIRECTORY -> EISDIR,
+      Fs::Vfs::EXISTS -> EEXIST,
+      Fs::Vfs::NAME_TOO_LONG -> ENAMETOOLONG,
+      Fs::Vfs::NO_MEMORY -> ENOMEM,
+      Fs::Vfs::NOT_EMPTY -> ENOTEMPTY,
+      Fs::Files::BAD_DESCRIPTOR -> EBADF,
+      Fs::Files::TOO_MANY_OPEN -> EMFILE,
+      Fs::Files::NOT_SEEKABLE -> ESPIPE,
+      BAD_ADDRESS -> EFAULT,
+      _ -> EINVAL,
+    };
+  }
+
+  /// `failure` of the errno of `status`.
+  function failureFor(status: u64): u64 {
+    return failure(errorFor(status));
   }
 }

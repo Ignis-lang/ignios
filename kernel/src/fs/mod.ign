@@ -11,6 +11,7 @@
 //! | `Fs::Tar`       | `tar.ign`       | reads the members of a ustar archive, checked   |
 //! | `Fs::Initramfs` | `initramfs.ign` | finds the initramfs module and validates it     |
 //! | `Fs::Vfs`       | `vfs.ign`       | the file tree: lookup, create, read, write      |
+//! | `Fs::Files`     | `files.ign`     | descriptor tables and open files, the console   |
 //!
 //! ## Dependencies
 //!
@@ -23,6 +24,7 @@
 //! `Fs` sits above `Mm` and below `Proc`: a process opens files, and the
 //! files need memory.
 
+import _ from "./files";
 import _ from "./initramfs";
 import _ from "./tar";
 import _ from "./vfs";

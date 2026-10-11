@@ -23,7 +23,7 @@ namespace Syscall::Operation {
   /// End the process.
   const EXIT: u8 = 1;
 
-  /// Write bytes to the console.
+  /// Write bytes to a descriptor.
   const WRITE: u8 = 2;
 
   /// Return the process id.
@@ -34,4 +34,28 @@ namespace Syscall::Operation {
 
   /// Sleep for a time.
   const SLEEP: u8 = 5;
+
+  /// Read bytes from a descriptor.
+  const READ: u8 = 6;
+
+  /// Open a path relative to a directory.
+  const OPEN: u8 = 7;
+
+  /// Close a descriptor.
+  const CLOSE: u8 = 8;
+
+  /// Move the offset of a descriptor.
+  const SEEK: u8 = 9;
+
+  /// Describe the file of a descriptor.
+  const STAT: u8 = 10;
+
+  /// Describe the file of a path relative to a directory.
+  const STAT_AT: u8 = 11;
+
+  /// Read the entries of a directory.
+  const READ_DIRECTORY: u8 = 12;
+
+  /// Create a directory at a path relative to a directory.
+  const MAKE_DIRECTORY: u8 = 13;
 }

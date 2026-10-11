@@ -1,0 +1,328 @@
+//!
+//! # fstest
+//!
+//! Ring 3 checks of the file system calls: every call, its flags and its
+//! errors, the way a Linux program sees them.
+//!
+//! ## What It Checks
+//!
+//! | Status | Check                                                               |
+//! |--------|---------------------------------------------------------------------|
+//! | 10-15  | `openat` of `/etc/motd` gives descriptor 3; `read` in pieces, then 0 at the end |
+//! | 20-24  | `lseek` from the start, the current offset and the end; -1 is `-EINVAL`; the console is `-ESPIPE` |
+//! | 30-32  | `fstat`: size 19, mode `S_IFREG` 0644, an inode number              |
+//! | 40-43  | `write` to a read-only descriptor is `-EBADF`; `close` twice, `read` after `close` |
+//! | 50-56  | `openat` errors: `-ENOENT`, `-ENOTDIR` (twice), `-EISDIR`, `-EFAULT`, access mode 3 `-EINVAL`, a 4096-byte path `-ENAMETOOLONG` |
+//! | 60-62  | `mkdirat` of `/fstest`, again `-EEXIST`, under a missing directory `-ENOENT` |
+//! | 70-76  | `O_CREAT`, `O_EXCL`, `write`, `O_APPEND`, `O_TRUNC`, reading back what was written |
+//! | 80-85  | relative paths from a directory descriptor, `newfstatat`, `AT_EMPTY_PATH`, an empty path `-ENOENT` |
+//! | 90-95  | `getdents64` lists `.`, `..`, `a` and `b` with their types, then 0; a small buffer is `-EINVAL`; a file is `-ENOTDIR` |
+//! | 100    | 16 descriptors per process, then `-EMFILE`                          |
+//! | 110-112 | descriptors 0 to 2: `fstat` says character device `0x501`; `read(0)` is 0 |
+//!
+//! The exit status is the number of the first check that failed, 0 when all
+//! passed. `Tests::User::runFiles` runs it at boot and then removes the
+//! directory `/fstest` it created.
+
+import Args from "std::args";
+import Io from "std::io";
+import Sys from "std::sys";
+
+/// The text of `initramfs/etc/motd`.
+const MOTD: str = "Welcome to IgniOS.\n";
+
+/// Length of `MOTD`.
+const MOTD_LENGTH: u64 = 19;
+
+/// `st_mode` of a regular file with mode 0644: `S_IFREG` (`0x8000`) | `0x1A4`.
+const MODE_REGULAR_644: u32 = 0x81A4;
+
+/// The file type bits of `st_mode`.
+const MODE_TYPE_MASK: u32 = 0xF000;
+
+/// `S_IFDIR`.
+const MODE_DIRECTORY: u32 = 0x4000;
+
+/// `S_IFCHR`.
+const MODE_CHARACTER: u32 = 0x2000;
+
+/// `st_rdev` of the console, `makedev(5, 1)`.
+const CONSOLE_RDEV: u64 = 0x501;
+
+/// `d_type` of a directory.
+const DT_DIR: u8 = 4;
+
+/// `d_type` of a regular file.
+const DT_REG: u8 = 8;
+
+/// Descriptors a process can hold.
+const MAX_DESCRIPTORS: u64 = 16;
+
+/// What the checks share.
+record State {
+  /// A `struct stat`.
+  static mut stat: u8[144];
+
+  /// Bytes read back and directory records.
+  static mut buffer: u8[512];
+
+  /// A path longer than `PATH_MAX`.
+  static mut longPath: u8[4097];
+}
+
+/// Exits with `status` unless `got` equals `wanted`, after printing both.
+function expect(got: i64, wanted: i64, status: u64): void {
+  if (got != wanted) {
+    Io::print("fstest: check ");
+    Io::printNumber(status as i64);
+    Io::print(" got ");
+    Io::printNumber(got);
+    Io::print(", expected ");
+    Io::printNumber(wanted);
+    Io::print("\n");
+    Sys::exit(status);
+  }
+}
+
+/// Exits with `status` unless `condition` holds.
+function require(condition: boolean, status: u64): void {
+  if (!condition) {
+    Io::print("fstest: check ");
+    Io::printNumber(status as i64);
+    Io::print(" failed\n");
+    Sys::exit(status);
+  }
+}
+
+/// The first byte of `State::buffer`.
+function buffer(): *mut u8 {
+  return &mut State::buffer as *mut u8;
+}
+
+/// The first byte of `State::stat`.
+function stat(): *mut u8 {
+  return &mut State::stat as *mut u8;
+}
+
+/// The 8-byte field at `offset` of the bytes at `bytes`.
+function word(bytes: *mut u8, offset: u64): u64 {
+  return *@pointerFromInteger<*u64>(@integerFromPointer(bytes) + offset);
+}
+
+/// The 4-byte field at `offset` of the bytes at `bytes`.
+function half(bytes: *mut u8, offset: u64): u32 {
+  return *@pointerFromInteger<*u32>(@integerFromPointer(bytes) + offset);
+}
+
+/// True when the `length` bytes at `bytes` are the text `text`.
+function same(bytes: *u8, text: str, length: u64): boolean {
+  let mut index: u64 = 0;
+
+  while (index < length) {
+    if (*(bytes + index) != *(text as *u8 + index)) {
+      return false;
+    }
+
+    index += 1;
+  }
+
+  return *(text as *u8 + length) == 0;
+}
+
+/// Opening, reading, seeking and describing `/etc/motd`, and closing it.
+function checkReading(): void {
+  let fd: i64 = Sys::open("/etc/motd" as *u8, Sys::O_RDONLY, 0);
+
+  expect(fd, 3, 10);
+  expect(Sys::read(fd as u64, buffer(), 7), 7, 11);
+  require(same(buffer() as *u8, "Welcome", 7), 12);
+  expect(Sys::read(fd as u64, buffer(), 100), (MOTD_LENGTH - 7) as i64, 13);
+  require(same(buffer() as *u8, " to IgniOS.\n", 12), 14);
+  expect(Sys::read(fd as u64, buffer(), 100), 0, 15);
+
+  expect(Sys::seek(fd as u64, 3, Sys::SEEK_SET), 3, 20);
+  expect(Sys::seek(fd as u64, 2, Sys::SEEK_CUR), 5, 21);
+  expect(Sys::seek(fd as u64, -1, Sys::SEEK_END), (MOTD_LENGTH - 1) as i64, 22);
+  expect(Sys::seek(fd as u64, -1, Sys::SEEK_SET), 0 - Sys::EINVAL, 23);
+  expect(Sys::seek(Sys::STDOUT, 0, Sys::SEEK_SET), 0 - Sys::ESPIPE, 24);
+
+  expect(Sys::fstat(fd as u64, stat()), 0, 30);
+  require(word(stat(), 48) == MOTD_LENGTH && half(stat(), 24) == MODE_REGULAR_644, 31);
+  require(word(stat(), 8) != 0, 32);
+
+  expect(Sys::write(fd as u64, "x" as *u8, 1), 0 - Sys::EBADF, 40);
+  expect(Sys::close(fd as u64), 0, 41);
+  expect(Sys::close(fd as u64), 0 - Sys::EBADF, 42);
+  expect(Sys::read(fd as u64, buffer(), 1), 0 - Sys::EBADF, 43);
+}
+
+/// The errors of `openat`.
+function checkOpenErrors(): void {
+  expect(Sys::open("/nope" as *u8, Sys::O_RDONLY, 0), 0 - Sys::ENOENT, 50);
+  expect(Sys::open("/etc/motd/x" as *u8, Sys::O_RDONLY, 0), 0 - Sys::ENOTDIR, 51);
+  expect(Sys::open("/etc" as *u8, Sys::O_WRONLY, 0), 0 - Sys::EISDIR, 52);
+  expect(Sys::open("/etc/motd" as *u8, Sys::O_DIRECTORY, 0), 0 - Sys::ENOTDIR, 53);
+  expect(Sys::open(@pointerFromInteger<*u8>(1), Sys::O_RDONLY, 0), 0 - Sys::EFAULT, 54);
+  expect(Sys::open("/etc/motd" as *u8, 3, 0), 0 - Sys::EINVAL, 55);
+
+  let path: *mut u8 = &mut State::longPath as *mut u8;
+  let mut index: u64 = 0;
+
+  while (index < 4096) {
+    *(path + index) = 0x2F;
+    index += 1;
+  }
+
+  *(path + 4096) = 0;
+  expect(Sys::open(path as *u8, Sys::O_RDONLY, 0), 0 - Sys::ENAMETOOLONG, 56);
+}
+
+/// `mkdirat`, then creating, writing, appending and truncating a file in
+/// the new directory.
+function checkWriting(): void {
+  expect(Sys::makeDirectory("/fstest" as *u8, 0x1ED), 0, 60);
+  expect(Sys::makeDirectory("/fstest" as *u8, 0x1ED), 0 - Sys::EEXIST, 61);
+  expect(Sys::makeDirectory("/nope/x" as *u8, 0x1ED), 0 - Sys::ENOENT, 62);
+
+  let created: i64 = Sys::open("/fstest/a" as *u8, Sys::O_CREAT | Sys::O_WRONLY | Sys::O_EXCL, 0x1A4);
+
+  require(created >= 0, 70);
+  expect(Sys::write(created as u64, "hello" as *u8, 5), 5, 71);
+  expect(Sys::close(created as u64), 0, 71);
+  expect(Sys::open("/fstest/a" as *u8, Sys::O_CREAT | Sys::O_WRONLY | Sys::O_EXCL, 0x1A4), 0 - Sys::EEXIST, 72);
+
+  let appender: i64 = Sys::open("/fstest/a" as *u8, Sys::O_WRONLY | Sys::O_APPEND, 0);
+
+  expect(Sys::write(appender as u64, " world" as *u8, 6), 6, 73);
+  expect(Sys::close(appender as u64), 0, 73);
+
+  let reader: i64 = Sys::open("/fstest/a" as *u8, Sys::O_RDONLY, 0);
+
+  expect(Sys::read(reader as u64, buffer(), 100), 11, 74);
+  require(same(buffer() as *u8, "hello world", 11), 74);
+  expect(Sys::close(reader as u64), 0, 74);
+
+  let truncated: i64 = Sys::open("/fstest/a" as *u8, Sys::O_WRONLY | Sys::O_TRUNC, 0);
+
+  expect(Sys::fstat(truncated as u64, stat()), 0, 75);
+  expect(word(stat(), 48) as i64, 0, 76);
+  expect(Sys::write(truncated as u64, "abc" as *u8, 3), 3, 76);
+  expect(Sys::close(truncated as u64), 0, 76);
+}
+
+/// Paths relative to a directory descriptor, `newfstatat` and
+/// `getdents64`.
+function checkDirectories(): void {
+  let directory: i64 = Sys::open("/fstest" as *u8, Sys::O_RDONLY | Sys::O_DIRECTORY, 0);
+
+  require(directory >= 0, 80);
+
+  let made: i64 = Sys::openAt(directory as u64, "b" as *u8, Sys::O_CREAT | Sys::O_WRONLY, 0x1A4);
+
+  require(made >= 0, 81);
+  expect(Sys::close(made as u64), 0, 81);
+
+  expect(Sys::statAt(directory as u64, "a" as *u8, stat(), 0), 0, 82);
+  require(word(stat(), 48) == 3 && half(stat(), 24) == MODE_REGULAR_644, 82);
+  expect(Sys::statAt(Sys::AT_FDCWD, "/fstest" as *u8, stat(), 0), 0, 83);
+  require((half(stat(), 24) & MODE_TYPE_MASK) == MODE_DIRECTORY, 83);
+  expect(Sys::statAt(directory as u64, "" as *u8, stat(), Sys::AT_EMPTY_PATH), 0, 84);
+  require((half(stat(), 24) & MODE_TYPE_MASK) == MODE_DIRECTORY, 84);
+  expect(Sys::statAt(Sys::AT_FDCWD, "" as *u8, stat(), 0), 0 - Sys::ENOENT, 85);
+
+  let bytes: i64 = Sys::readDirectory(directory as u64, buffer(), 512);
+
+  require(bytes > 0, 90);
+  checkEntries(bytes as u64);
+  expect(Sys::readDirectory(directory as u64, buffer(), 512), 0, 92);
+  expect(Sys::seek(directory as u64, 0, Sys::SEEK_SET), 0, 93);
+  expect(Sys::readDirectory(directory as u64, buffer(), 8), 0 - Sys::EINVAL, 93);
+
+  let file: i64 = Sys::open("/etc/motd" as *u8, Sys::O_RDONLY, 0);
+
+  expect(Sys::readDirectory(file as u64, buffer(), 512), 0 - Sys::ENOTDIR, 94);
+  expect(Sys::close(file as u64), 0, 95);
+  expect(Sys::close(directory as u64), 0, 95);
+}
+
+/// The records `getdents64` wrote: `.`, `..`, `a`, `b`, in that order and
+/// with their types, each record length a multiple of 8.
+function checkEntries(total: u64): void {
+  let mut offset: u64 = 0;
+  let mut count: u64 = 0;
+
+  while (offset < total) {
+    let entry: *mut u8 = buffer() + offset;
+    let length: u64 = (*(entry + 16) as u64) | ((*(entry + 17) as u64) << 8);
+    let kind: u8 = *(entry + 18);
+    let name: *u8 = (entry + 19) as *u8;
+
+    require(length % 8 == 0 && length > 19, 91);
+
+    if (count == 0) {
+      require(same(name, ".", Args::length(name)) && kind == DT_DIR, 91);
+    } else if (count == 1) {
+      require(same(name, "..", Args::length(name)) && kind == DT_DIR, 91);
+    } else if (count == 2) {
+      require(same(name, "a", Args::length(name)) && kind == DT_REG, 91);
+    } else if (count == 3) {
+      require(same(name, "b", Args::length(name)) && kind == DT_REG, 91);
+    }
+
+    require(word(entry, 8) == count + 1, 91);
+
+    offset += length;
+    count += 1;
+  }
+
+  expect(count as i64, 4, 91);
+}
+
+/// The descriptor limit: 13 more open files fill the table, the next one is
+/// `-EMFILE`.
+function checkLimit(): void {
+  let mut opened: u64 = 3;
+
+  while (opened < MAX_DESCRIPTORS) {
+    expect(Sys::open("/etc/motd" as *u8, Sys::O_RDONLY, 0), opened as i64, 100);
+    opened += 1;
+  }
+
+  expect(Sys::open("/etc/motd" as *u8, Sys::O_RDONLY, 0), 0 - Sys::EMFILE, 100);
+
+  while (opened > 3) {
+    opened -= 1;
+    expect(Sys::close(opened), 0, 100);
+  }
+}
+
+/// The standard descriptors are the console.
+function checkConsole(): void {
+  expect(Sys::fstat(Sys::STDOUT, stat()), 0, 110);
+  require((half(stat(), 24) & MODE_TYPE_MASK) == MODE_CHARACTER && word(stat(), 40) == CONSOLE_RDEV, 111);
+  expect(Sys::read(Sys::STDIN, buffer(), 10), 0, 112);
+}
+
+/// Runs every check and prints one line when all passed.
+@externName("ignis_main")
+function main(count: u64, values: *u64): u64 {
+  checkReading();
+  checkOpenErrors();
+  checkWriting();
+  checkDirectories();
+  checkLimit();
+  checkConsole();
+
+  Io::print("fstest: openat, read, write, lseek, close, fstat, newfstatat, getdents64 and mkdirat behave as on Linux\n");
+
+  return 0;
+}
+
+/// Prints the message and exits with status 101.
+@panicHandler
+function onPanic(message: str, file: str, line: u32): never {
+  Io::print("panic: ");
+  Io::print(message);
+  Io::print("\n");
+  Sys::exit(101);
+}

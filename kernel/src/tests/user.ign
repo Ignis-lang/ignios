@@ -18,6 +18,7 @@
 //! | syscalls          | `write`, `getpid`, `sched_yield`, `nanosleep` and their errors |
 //! | isolation (9 programs) | a fault or a forbidden instruction kills only that process, no frame leaks |
 //! | hello             | a real static ELF64 from the initramfs, argc and argv  |
+//! | files             | `/bin/fstest` checks every file system call and error from ring 3; nothing leaks |
 //! | refused           | a missing program, a directory, a file that is not ELF, an empty line and 33 arguments start nothing and leak nothing |
 //!
 //! `main.ign` calls `Tests::User::run` once, after the scheduler tests and before
@@ -25,6 +26,7 @@
 
 import Arch from "@arch";
 import Drivers from "@drivers";
+import Fs from "@fs";
 import Mm from "@mm";
 import Proc from "@proc";
 import Sched from "@sched";
@@ -153,6 +155,7 @@ namespace Tests::User {
     runIsolation();
     runHello();
     runRefused();
+    runFiles();
   }
 
   /// Runs `ALIGNMENT_SPIN` and checks, through the counters of
@@ -194,6 +197,44 @@ namespace Tests::User {
     Drivers::Console::write("user: ");
     Drivers::Console::writeDecimal(entries);
     Drivers::Console::writeLine(" interrupts from ring 3 with RFLAGS.AC set ran their handlers with AC clear");
+  }
+
+  /// Runs `/bin/fstest`, which checks the file system calls from ring 3 and
+  /// exits with the number of the first failed check. It leaves the
+  /// directory `/fstest` with two files; the test removes them and checks
+  /// that the heap and the PMM are back where they were, so no open file,
+  /// descriptor or node leaked.
+  function runFiles(): void {
+    let freeBefore: u64 = Mm::Pmm::freeFrameCount();
+    let heapBefore: u64 = Mm::Heap::allocatedBytes();
+    let status: u64 = Proc::Programs::runNamed("fstest");
+
+    if (status != 0) {
+      Drivers::Console::write("user test: fstest failed check ");
+      Drivers::Console::writeDecimal(status);
+      Drivers::Console::writeLine("");
+      @panic("user test: a file system call misbehaved");
+    }
+
+    let saved: u64 = Arch::Cpu::saveAndDisableInterrupts();
+    let mut directory: *mut Fs::Node = null;
+
+    if (Fs::Vfs::lookup(Fs::Vfs::root(), "/fstest" as *u8, 7, &mut directory as *mut *mut Fs::Node) != Fs::Vfs::OK) {
+      @panic("user test: fstest left no /fstest");
+    }
+
+    while ((*directory).firstChild != null) {
+      Fs::Vfs::remove((*directory).firstChild);
+    }
+
+    Fs::Vfs::remove(directory);
+    Arch::Cpu::restoreInterrupts(saved);
+
+    if (Mm::Pmm::freeFrameCount() != freeBefore || Mm::Heap::allocatedBytes() != heapBefore) {
+      @panic("user test: fstest leaked frames or heap memory");
+    }
+
+    Drivers::Console::writeLine("user: fstest passed, and removing /fstest gave back every byte it used");
   }
 
   /// Asks `Proc::Programs::run` for things it must refuse and checks that

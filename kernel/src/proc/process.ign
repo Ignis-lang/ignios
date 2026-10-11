@@ -61,6 +61,7 @@
 import Arch from "@arch";
 import Boot from "@boot";
 import Drivers from "@drivers";
+import Fs from "@fs";
 import Lib from "@lib";
 import Mm from "@mm";
 import Sched from "@sched";
@@ -236,9 +237,9 @@ namespace Proc::Process {
 
     Drivers::Console::write(", stack pointer ");
     Drivers::Console::writeHex(stackPointer);
-    Drivers::Console::write(", ");
+    Drivers::Console::write(", argc ");
     Drivers::Console::writeDecimal(count);
-    Drivers::Console::writeLine(" arguments");
+    Drivers::Console::writeLine("");
 
     return launch(root, loaded.entry, stackPointer);
   }
@@ -353,9 +354,17 @@ namespace Proc::Process {
     (*process).status = 0;
     (*process).abi = ABI_LINUX;
 
+    if (Fs::Files::openStandard(slot) != Fs::Vfs::OK) {
+      (*process).state = FREE;
+      Mm::AddressSpace::destroy(root);
+      Arch::Cpu::restoreInterrupts(saved);
+      return NO_PROCESS;
+    }
+
     let thread: u64 = Sched::Scheduler::spawnIn(Arch::ContextAsm::ignis_function_address(userMain), slot, root);
 
     if (thread == Sched::Thread::NO_THREAD) {
+      Fs::Files::closeAll(slot);
       (*process).state = FREE;
       Arch::Cpu::restoreInterrupts(saved);
       return NO_PROCESS;
@@ -463,6 +472,7 @@ namespace Proc::Process {
 
     (*process).status = status;
     (*process).state = EXITED;
+    Fs::Files::closeAll(slot);
 
     Drivers::Console::write("process ");
     Drivers::Console::writeDecimal((*process).id);

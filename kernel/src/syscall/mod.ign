@@ -12,7 +12,7 @@
 //! numbers to the same operations.
 //!
 //! Every pointer a process passes is checked before the kernel touches it
-//! (see `linux/write.ign`). A refused range is `-EFAULT`.
+//! (see `linux/files.ign`). A refused range is `-EFAULT`.
 //!
 //! ## Public API
 //!
@@ -24,7 +24,8 @@
 //! | `Syscall::Linux`      | `linux/*.ign`   | numbers, errno values, the table and the handlers |
 //!
 //! The Linux files: `table.ign` (numbers and the table), `errno.ign` (errno
-//! values and `failure`), `write.ign` and `nanosleep.ign` (the handlers).
+//! values, `failure` and `errorFor`), `files.ign` (the file calls) and
+//! `nanosleep.ign`.
 //!
 //! ## Dependencies
 //!
@@ -35,7 +36,9 @@
 //! | `Mm`      | checked copies to and from user memory                 |
 //! | `Time`    | the tick rate that `nanosleep` rounds to               |
 //! | `Arch`    | the `Arch::InterruptFrame` the entry stub builds       |
-//! | `Drivers` | `write` prints on the console                          |
+//! | `Drivers` | `badReturn` prints on the console                      |
+//! | `Fs`      | descriptors, open files and the file tree              |
+//! | `Lib`     | `memset` and `memcpy` for `struct stat` and dirents    |
 //!
 //! `main` calls `Syscall::initialize`. The assembly entry stub in
 //! `arch/x86_64/usermode_asm.S` calls `dispatch` and `badReturn` by their
@@ -44,9 +47,9 @@
 
 import _ from "./dispatch";
 import _ from "./linux/errno";
+import _ from "./linux/files";
 import _ from "./linux/nanosleep";
 import _ from "./linux/table";
-import _ from "./linux/write";
 import _ from "./operation";
 
 /// Aggregate namespace of the system call code. `dispatch.ign` adds the

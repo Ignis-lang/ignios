@@ -18,7 +18,8 @@
 //!                         data ─► archive         data ─► archive
 //! ```
 //!
-//! `initialize` builds the tree from the initramfs. A seeded file does not
+//! `initialize` builds the tree from the initramfs and adds `/dev/console`, a
+//! `DEVICE` node that `Fs::Files` opens as the console. A seeded file does not
 //! copy its data: `data` points into the archive, which Limine loaded and
 //! the kernel mapped read only. The first write to such a file copies the
 //! data to the heap and the file owns it from then on (copy on write), so
@@ -71,7 +72,7 @@ namespace Fs {
   /// A file or a directory of the tree.
   @cLayout
   record Node {
-    /// `Fs::Vfs::FILE` or `Fs::Vfs::DIRECTORY`.
+    /// `Fs::Vfs::FILE`, `Fs::Vfs::DIRECTORY` or `Fs::Vfs::DEVICE`.
     public kind: u64;
 
     /// A number unique to this node, reported as the inode number.
@@ -129,6 +130,13 @@ namespace Fs::Vfs {
 
   /// A directory.
   const DIRECTORY: u64 = 2;
+
+  /// A device. Its node only names it; `Fs::Files` opens it as the device
+  /// it is. The only one is `/dev/console`.
+  const DEVICE: u64 = 3;
+
+  /// Mode of `/dev/console`: rw--w----, as on Linux.
+  const CONSOLE_MODE: u64 = 0x190;
 
   /// The operation succeeded.
   const OK: u64 = 0;
@@ -193,6 +201,21 @@ namespace Fs::Vfs {
     VfsState::root = root;
 
     seed();
+    addConsole();
+  }
+
+  /// Creates `/dev` when the initramfs did not, and `/dev/console` in it.
+  function addConsole(): void {
+    let mut dev: *mut Fs::Node = findChild(VfsState::root, "dev" as *u8, 3);
+    let mut console: *mut Fs::Node = null;
+
+    if (dev == null && create(VfsState::root, "dev" as *u8, 3, DIRECTORY, DIRECTORY_MODE, &mut dev as *mut *mut Fs::Node) != OK) {
+      @panic("vfs: cannot create /dev");
+    }
+
+    if (create(dev, "console" as *u8, 7, DEVICE, CONSOLE_MODE, &mut console as *mut *mut Fs::Node) != OK) {
+      @panic("vfs: cannot create /dev/console");
+    }
   }
 
   /// A short text for a status code, as `strerror` would print it.
@@ -455,7 +478,7 @@ namespace Fs::Vfs {
 
   /// Copies up to `count` bytes of file `node` from `offset` to `buffer` and
   /// writes the number copied to `copied`: 0 at or past the end of the file.
-  /// Returns `IS_DIRECTORY` for a directory.
+  /// Returns `IS_DIRECTORY` for a directory and `INVALID` for a device.
   function read(
     node: *mut Fs::Node,
     offset: u64,
@@ -464,7 +487,7 @@ namespace Fs::Vfs {
     copied: *mut u64
   ): u64 {
     if ((*node).kind != FILE) {
-      return IS_DIRECTORY;
+      return notFileStatus(node);
     }
 
     if (offset >= (*node).size) {
@@ -487,11 +510,12 @@ namespace Fs::Vfs {
   /// Writes the `count` bytes at `source` to file `node` at `offset`. The
   /// file grows as needed, and a gap between the old end and `offset` reads
   /// as zeros. The first write to a file whose data is in the archive copies
-  /// it to the heap. Returns `IS_DIRECTORY`, `NO_MEMORY`, or `INVALID` when
+  /// it to the heap. Returns `IS_DIRECTORY`, `INVALID` for a device, `NO_MEMORY`,
+  /// or `INVALID` when
   /// `offset + count` overflows.
   function write(node: *mut Fs::Node, offset: u64, source: *u8, count: u64): u64 {
     if ((*node).kind != FILE) {
-      return IS_DIRECTORY;
+      return notFileStatus(node);
     }
 
     let end: u64 = offset + count;
@@ -521,10 +545,10 @@ namespace Fs::Vfs {
   }
 
   /// Cuts file `node` to `length` bytes, or extends it with zeros. Returns
-  /// `IS_DIRECTORY` or `NO_MEMORY`.
+  /// `IS_DIRECTORY`, `INVALID` for a device, or `NO_MEMORY`.
   function truncate(node: *mut Fs::Node, length: u64): u64 {
     if ((*node).kind != FILE) {
-      return IS_DIRECTORY;
+      return notFileStatus(node);
     }
 
     if (length > (*node).size) {
@@ -731,6 +755,13 @@ namespace Fs::Vfs {
       count(child, nodes, bytes);
       child = (*child).nextSibling;
     }
+  }
+
+  /// The status of a file operation on a node that is not a file:
+  /// `IS_DIRECTORY` for a directory, `INVALID` for a device, which only
+  /// `Fs::Files` can read and write.
+  function notFileStatus(node: *mut Fs::Node): u64 {
+    return (*node).kind == DIRECTORY ? IS_DIRECTORY : INVALID;
   }
 
   /// True when the `length` bytes at `name` are `.`.
