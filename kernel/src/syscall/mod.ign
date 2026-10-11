@@ -5,8 +5,8 @@
 //!
 //! ## Overview
 //!
-//! The only ABI so far is Linux x86_64, so a static ELF program built for
-//! Linux can run. Dispatch is two steps: the ABI of the calling process turns
+//! Two ABIs: Linux x86_64, so a static ELF program built for Linux can run,
+//! and the native IgniOS ABI, chosen by an ELF note. Dispatch is two steps: the ABI of the calling process turns
 //! the call number into a kernel operation, and the kernel runs the operation.
 //! Adding another ABI means adding a table next to `linux/` that maps its
 //! numbers to the same operations.
@@ -22,6 +22,8 @@
 //! | `Syscall::dispatch`   | `dispatch.ign`  | called by `usermode_asm.S` for every `SYSCALL`    |
 //! | `Syscall::Operation`  | `operation.ign` | the ABI independent operations and the table size |
 //! | `Syscall::Linux`      | `linux/*.ign`   | numbers, errno values, the table and the handlers |
+//! | `Syscall::Native`     | `native/*.ign`  | the native IgniOS numbers, status codes and handlers |
+//! | `Syscall::Core`       | `core.ign`      | ABI-independent transfers with checked user pointers |
 //!
 //! The Linux files: `table.ign` (numbers and the table), `errno.ign` (errno
 //! values, `failure` and `errorFor`), `files.ign` (the file calls),
@@ -45,12 +47,16 @@
 //! `@externName` symbols, so this facade has to be imported or they are never
 //! compiled.
 
+import _ from "./core";
 import _ from "./dispatch";
 import _ from "./linux/errno";
 import _ from "./linux/files";
 import _ from "./linux/memory";
 import _ from "./linux/nanosleep";
 import _ from "./linux/table";
+import _ from "./native/calls";
+import _ from "./native/status";
+import _ from "./native/table";
 import _ from "./operation";
 
 /// Aggregate namespace of the system call code. `dispatch.ign` adds the

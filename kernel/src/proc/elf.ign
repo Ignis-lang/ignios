@@ -166,6 +166,10 @@ namespace Proc {
 
     /// Pages mapped across all segments.
     public pages: u64;
+
+    /// The system call ABI the program asks for: `Proc::Elf::ABI_LINUX`, or
+    /// `Proc::Elf::ABI_NATIVE` when it carries the IgniOS note.
+    public abi: u64;
   }
 }
 
@@ -244,6 +248,32 @@ namespace Proc::Elf {
   /// The entry point is not in an executable user page.
   const ERR_ENTRY: u64 = 11;
 
+  /// The IgniOS note names an ABI version this kernel does not know.
+  const ERR_ABI: u64 = 12;
+
+  /// A note segment, or a note in it, runs past the end of the file.
+  const ERR_NOTE: u64 = 13;
+
+  /// Segment type of a note segment (`PT_NOTE`).
+  const SEGMENT_NOTE: u32 = 4;
+
+  /// The program speaks the Linux x86_64 system call ABI. Equals
+  /// `Proc::Process::ABI_LINUX`.
+  const ABI_LINUX: u64 = 0;
+
+  /// The program speaks the native IgniOS ABI. Equals
+  /// `Proc::Process::ABI_NATIVE`.
+  const ABI_NATIVE: u64 = 1;
+
+  /// The note type of the IgniOS ABI note.
+  const NOTE_ABI: u32 = 1;
+
+  /// The only native ABI version.
+  const NATIVE_VERSION: u32 = 1;
+
+  /// The fixed part of a note: `namesz`, `descsz`, `type`, 4 bytes each.
+  const NOTE_HEADER: u64 = 12;
+
   /// Loads the executable in the `size` bytes at `image` into the address
   /// space `root` and fills `result`. On failure the pages mapped so far
   /// stay in the space, which the caller destroys.
@@ -261,6 +291,13 @@ namespace Proc::Elf {
     (*result).entry = (*header).entry;
     (*result).segments = 0;
     (*result).pages = 0;
+    (*result).abi = ABI_LINUX;
+
+    let abiProblem: u64 = findAbi(image, size, &mut (*result).abi as *mut u64);
+
+    if (abiProblem != OK) {
+      return abiProblem;
+    }
 
     let mut index: u64 = 0;
 
@@ -300,6 +337,8 @@ namespace Proc::Elf {
       9 -> "two segments share a page",
       10 -> "out of memory",
       11 -> "the entry point is not in an executable user page",
+      12 -> "the IgniOS ABI note names an unknown version",
+      13 -> "a note runs past the end of the file",
       _ -> "unknown error",
     };
   }
@@ -336,6 +375,93 @@ namespace Proc::Elf {
     }
 
     return OK;
+  }
+
+  /// Looks for the IgniOS ABI note in the `PT_NOTE` segments of the
+  /// executable in the `size` bytes at `image`, whose header `checkHeader`
+  /// accepted. Writes `ABI_NATIVE` to `abi` when a note named `IgniOS` of
+  /// type `NOTE_ABI` says version `NATIVE_VERSION`, and leaves it alone
+  /// otherwise (a Linux program). Notes of other names, such as `GNU`, are
+  /// skipped. Returns `ERR_NOTE` for a segment or note that runs past the
+  /// file and `ERR_ABI` for an IgniOS note of another version.
+  ///
+  /// ```text
+  ///   offset 0   namesz = 7          4 bytes
+  ///          4   descsz = 4          4 bytes
+  ///          8   type   = 1          4 bytes
+  ///         12   "IgniOS\0" + 1 pad   name, padded to 4
+  ///         20   version = 1         desc, padded to 4
+  /// ```
+  function findAbi(image: *u8, size: u64, abi: *mut u64): u64 {
+    let header: *ElfHeader = image as *ElfHeader;
+    let first: u64 = (*header).programHeaderOffset;
+    let count: u64 = (*header).programHeaderCount as u64;
+    let mut index: u64 = 0;
+
+    while (index < count) {
+      let segment: *ProgramHeader = (image + first + index * PROGRAM_HEADER_SIZE) as *ProgramHeader;
+
+      if ((*segment).kind == SEGMENT_NOTE) {
+        let offset: u64 = (*segment).offset;
+        let length: u64 = (*segment).fileSize;
+
+        if (offset > size || length > size - offset) {
+          return ERR_NOTE;
+        }
+
+        let problem: u64 = scanNotes(image + offset, length, abi);
+
+        if (problem != OK) {
+          return problem;
+        }
+      }
+
+      index += 1;
+    }
+
+    return OK;
+  }
+
+  /// Walks the notes in the `length` bytes at `notes`. See `findAbi`.
+  function scanNotes(notes: *u8, length: u64, abi: *mut u64): u64 {
+    let mut position: u64 = 0;
+
+    while (length - position >= NOTE_HEADER) {
+      let nameSize: u64 = readU32(notes + position) as u64;
+      let descriptionSize: u64 = readU32(notes + position + 4) as u64;
+      let noteType: u32 = readU32(notes + position + 8);
+      let nameRoom: u64 = (nameSize + 3) / 4 * 4;
+      let descriptionRoom: u64 = (descriptionSize + 3) / 4 * 4;
+
+      if (nameRoom > length - position - NOTE_HEADER || descriptionRoom > length - position - NOTE_HEADER - nameRoom) {
+        return ERR_NOTE;
+      }
+
+      let name: *u8 = notes + position + NOTE_HEADER;
+
+      if (nameSize == 7 && noteType == NOTE_ABI && isIgniOs(name)) {
+        if (descriptionSize < 4 || readU32(name + nameRoom) != NATIVE_VERSION) {
+          return ERR_ABI;
+        }
+
+        *abi = ABI_NATIVE;
+      }
+
+      position += NOTE_HEADER + nameRoom + descriptionRoom;
+    }
+
+    return OK;
+  }
+
+  /// True when the 7 bytes at `name` are `IgniOS` and a NUL.
+  function isIgniOs(name: *u8): boolean {
+    return *name == ('I' as u8) && *(name + 1) == ('g' as u8) && *(name + 2) == ('n' as u8) && *(name + 3) == ('i' as u8) && *(name + 4) == ('O' as u8) && *(name + 5) == ('S' as u8) && *(name + 6) == 0;
+  }
+
+  /// The little-endian 32-bit value at `bytes`, read a byte at a time so the
+  /// address need not be aligned.
+  function readU32(bytes: *u8): u32 {
+    return (*bytes as u32) | ((*(bytes + 1) as u32) << 8) | ((*(bytes + 2) as u32) << 16) | ((*(bytes + 3) as u32) << 24);
   }
 
   /// Maps and fills the pages of one `PT_LOAD` header, and prints a line

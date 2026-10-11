@@ -1,0 +1,114 @@
+//!
+//! # Native Status Codes
+//!
+//! The error codes of the native IgniOS ABI, and how kernel status codes
+//! become them.
+//!
+//! ## Overview
+//!
+//! A native call returns its status in RAX and its value in RDX. RAX is
+//! `OK` (0) or one of the codes below; on an error RDX is 0. The numbers are
+//! part of the ABI: a program compiled against them keeps working, so a code
+//! is never renumbered or reused, only added.
+//!
+//! | Code | Name             | Meaning                                              |
+//! |------|------------------|------------------------------------------------------|
+//! | 0    | `OK`             | success; RDX holds the value                         |
+//! | 1    | `NOT_FOUND`      | a path component does not exist                      |
+//! | 2    | `NOT_DIRECTORY`  | a component that must be a directory is not          |
+//! | 3    | `IS_DIRECTORY`   | a file operation on a directory                      |
+//! | 4    | `EXISTS`         | the name is already taken                            |
+//! | 5    | `NAME_TOO_LONG`  | a component or the path is too long                  |
+//! | 6    | `NO_MEMORY`      | no frame, heap block, region or address left         |
+//! | 7    | `NOT_EMPTY`      | the directory has entries                            |
+//! | 8    | `INVALID`        | a malformed argument                                 |
+//! | 9    | `TOO_LARGE`      | a file would grow past its limit                     |
+//! | 10   | `BAD_DESCRIPTOR` | the descriptor is not open, or not for this          |
+//! | 11   | `TOO_MANY_OPEN`  | the descriptor table is full                         |
+//! | 12   | `NOT_SEEKABLE`   | the descriptor cannot seek                           |
+//! | 13   | `BAD_ADDRESS`    | a user pointer is not valid for the access           |
+//! | 14   | `NOT_SUPPORTED`  | the call number is not part of the ABI               |
+//! | 15   | `NO_DEVICE`      | mapping something that is not a regular file         |
+//! | 16   | `ACCESS`         | the descriptor lacks the access the call needs       |
+//!
+//! `statusFor` maps the kernel's own codes (`Fs::Vfs`, `Fs::Files`,
+//! `Syscall::Core`) one by one. The kernel's numbering may change; this table
+//! does not.
+
+import Fs from "@fs";
+import _ from "../core";
+
+/// The status codes.
+namespace Syscall::Native {
+  /// Success.
+  const OK: u64 = 0;
+
+  /// See the module header.
+  const NOT_FOUND: u64 = 1;
+
+  /// A component that must be a directory is not one.
+  const NOT_DIRECTORY: u64 = 2;
+
+  /// A file operation on a directory.
+  const IS_DIRECTORY: u64 = 3;
+
+  /// The name is already taken.
+  const EXISTS: u64 = 4;
+
+  /// A component or the path is too long.
+  const NAME_TOO_LONG: u64 = 5;
+
+  /// Out of memory.
+  const NO_MEMORY: u64 = 6;
+
+  /// The directory has entries.
+  const NOT_EMPTY: u64 = 7;
+
+  /// A malformed argument.
+  const INVALID: u64 = 8;
+
+  /// A file would grow past its limit.
+  const TOO_LARGE: u64 = 9;
+
+  /// The descriptor is not open, or not for this.
+  const BAD_DESCRIPTOR: u64 = 10;
+
+  /// The descriptor table is full.
+  const TOO_MANY_OPEN: u64 = 11;
+
+  /// The descriptor cannot seek.
+  const NOT_SEEKABLE: u64 = 12;
+
+  /// A user pointer is not valid for the access.
+  const BAD_ADDRESS: u64 = 13;
+
+  /// The call number is not part of the ABI.
+  const NOT_SUPPORTED: u64 = 14;
+
+  /// Mapping something that is not a regular file.
+  const NO_DEVICE: u64 = 15;
+
+  /// The descriptor lacks the access the call needs.
+  const ACCESS: u64 = 16;
+
+  /// The native code of a kernel status code. Anything the table does not
+  /// name is `INVALID`.
+  function statusFor(status: u64): u64 {
+    return match (status) {
+      Fs::Vfs::OK -> OK,
+      Fs::Vfs::NOT_FOUND -> NOT_FOUND,
+      Fs::Vfs::NOT_DIRECTORY -> NOT_DIRECTORY,
+      Fs::Vfs::IS_DIRECTORY -> IS_DIRECTORY,
+      Fs::Vfs::EXISTS -> EXISTS,
+      Fs::Vfs::NAME_TOO_LONG -> NAME_TOO_LONG,
+      Fs::Vfs::NO_MEMORY -> NO_MEMORY,
+      Fs::Vfs::NOT_EMPTY -> NOT_EMPTY,
+      Fs::Vfs::TOO_LARGE -> TOO_LARGE,
+      Fs::Files::BAD_DESCRIPTOR -> BAD_DESCRIPTOR,
+      Fs::Files::TOO_MANY_OPEN -> TOO_MANY_OPEN,
+      Fs::Files::NOT_SEEKABLE -> NOT_SEEKABLE,
+      Syscall::Core::BAD_ADDRESS -> BAD_ADDRESS,
+      _ -> INVALID,
+    };
+  }
+}

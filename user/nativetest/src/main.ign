@@ -1,0 +1,79 @@
+//!
+//! # nativetest
+//!
+//! Ring 3 checks of the native IgniOS system call ABI.
+//!
+//! ## Checks
+//!
+//! | Status | Check                                                                |
+//! |--------|----------------------------------------------------------------------|
+//! | 10     | `WRITE` to the console: status 0 in RAX, the byte count in RDX       |
+//! | 11     | `WRITE` from address 1: `BAD_ADDRESS`, RDX 0                         |
+//! | 12     | `WRITE` to descriptor 7: `BAD_DESCRIPTOR`, RDX 0                     |
+//! | 13     | call 9999: `NOT_SUPPORTED`, RDX 0 even when RDX went in as `0x1234` |
+//! | 14     | call 39 (Linux `getpid`): `NOT_SUPPORTED`; the Linux table is not used |
+//! | 15     | `PROCESS_ID`: status 0, a positive id                                |
+//! | 16     | the portable `Sys::write` returns the count, or the negated status   |
+//!
+//! The exit status is the number of the first check that failed, 0 when all
+//! passed. `Tests::User::runNative` runs it at boot.
+
+import Io from "std::io";
+import Sys from "std::sys";
+
+/// The line the first check writes.
+const LINE: str = "nativetest: hello through the native ABI\n";
+
+/// Length of `LINE`.
+const LINE_LENGTH: u64 = 41;
+
+/// Exits with `status` unless `result` has `wantedStatus` and `wantedValue`,
+/// after printing what came back.
+function expect(result: Sys::Result, wantedStatus: u64, wantedValue: u64, status: u64): void {
+  if (result.status != wantedStatus || result.value != wantedValue) {
+    Io::print("nativetest: check ");
+    Io::printNumber(status as i64);
+    Io::print(" got status ");
+    Io::printNumber(result.status as i64);
+    Io::print(", value ");
+    Io::printNumber(result.value as i64);
+    Io::print("\n");
+    Sys::exit(status);
+  }
+}
+
+/// Called by `_start` with argc and argv.
+@externName("ignis_main")
+function main(count: u64, values: *u64): u64 {
+  expect(Sys::call3(Sys::WRITE, Sys::STDOUT, @integerFromPointer(LINE as *u8), LINE_LENGTH), Sys::OK, LINE_LENGTH, 10);
+  expect(Sys::call3(Sys::WRITE, Sys::STDOUT, 1, 5), Sys::BAD_ADDRESS, 0, 11);
+  expect(Sys::call3(Sys::WRITE, 7, @integerFromPointer(LINE as *u8), 1), Sys::BAD_DESCRIPTOR, 0, 12);
+  expect(Sys::call0(9999), Sys::NOT_SUPPORTED, 0, 13);
+  expect(Sys::call3(9999, 1, 2, 0x1234), Sys::NOT_SUPPORTED, 0, 13);
+  expect(Sys::call0(39), Sys::NOT_SUPPORTED, 0, 14);
+
+  let id: Sys::Result = Sys::call0(Sys::PROCESS_ID);
+
+  if (id.status != Sys::OK || id.value == 0) {
+    Io::print("nativetest: check 15 failed\n");
+    return 15;
+  }
+
+  if (Sys::write(Sys::STDOUT, "" as *u8, 0) != 0 || Sys::write(9, "x" as *u8, 1) != 0 - (Sys::BAD_DESCRIPTOR as i64)) {
+    Io::print("nativetest: check 16 failed\n");
+    return 16;
+  }
+
+  Io::print("nativetest: status in rax, value in rdx, unknown and Linux numbers refused\n");
+
+  return 0;
+}
+
+/// Prints the message and exits with status 101.
+@panicHandler
+function onPanic(message: str, file: str, line: u32): never {
+  Io::print("panic: ");
+  Io::print(message);
+  Io::print("\n");
+  Sys::exit(101);
+}

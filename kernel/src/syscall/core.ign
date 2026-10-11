@@ -1,0 +1,141 @@
+//!
+//! # System Call Core
+//!
+//! The parts of a system call that do not depend on the ABI: moving bytes
+//! between a descriptor and user memory, with every user pointer checked.
+//!
+//! ## Overview
+//!
+//! Each ABI (`Syscall::Linux`, `Syscall::Native`) reads its arguments from its
+//! own registers and reports its own error numbers, but both move bytes the
+//! same way. The functions here return a status code, `Fs::Vfs::OK` or one of
+//! the `Fs` codes, or `BAD_ADDRESS` for a user pointer that failed
+//! validation, and write the byte count through a pointer. Each ABI turns
+//! the status into its own result (`Linux::errorFor`, `Native::statusFor`).
+//!
+//! | Rule                                   | Effect                                        |
+//! |----------------------------------------|-----------------------------------------------|
+//! | at most `MAX_TRANSFER` bytes per call  | a longer request is a short transfer           |
+//! | the whole user range checked first     | a bad buffer moves nothing                     |
+//! | an error after some bytes moved        | `OK` with the bytes moved so far              |
+//!
+//! System calls run with interrupts off on the only processor, so one
+//! staging buffer is enough.
+
+import Fs from "@fs";
+import Mm from "@mm";
+import Proc from "@proc";
+
+/// The staging buffer of the transfers.
+record CoreState {
+  /// User bytes pass through here. The size must equal
+  /// `Syscall::Core::COPY_BUFFER_SIZE`.
+  static mut copyBuffer: u8[512];
+}
+
+/// The ABI-independent transfers.
+namespace Syscall::Core {
+  /// A user pointer failed validation. Next to the `Fs` codes, which stay
+  /// below 100.
+  const BAD_ADDRESS: u64 = 100;
+
+  /// The most one `read` or `write` moves.
+  const MAX_TRANSFER: u64 = 65536;
+
+  /// Bytes of `CoreState::copyBuffer`.
+  const COPY_BUFFER_SIZE: u64 = 512;
+
+  /// Reads up to `count` bytes from `descriptor` of the running process into
+  /// the user buffer at `buffer` and writes the number read to `done`: 0 at
+  /// the end of a file. Returns `Fs::Files::BAD_DESCRIPTOR`, `BAD_ADDRESS`
+  /// for a buffer that is not writable user memory, or the `Fs::Files::read`
+  /// codes.
+  function read(descriptor: u64, buffer: u64, count: u64, done: *mut u64): u64 {
+    let total: u64 = count < MAX_TRANSFER ? count : MAX_TRANSFER;
+    let root: u64 = Proc::Process::currentRoot();
+    let table: u64 = Proc::Process::currentSlot();
+    let chunk: *mut u8 = &mut CoreState::copyBuffer as *mut u8;
+
+    *done = 0;
+
+    if (Fs::Files::get(table, descriptor) == null) {
+      return Fs::Files::BAD_DESCRIPTOR;
+    }
+
+    if (!Mm::AddressSpace::isAccessible(root, buffer, total, true)) {
+      return BAD_ADDRESS;
+    }
+
+    let mut moved: u64 = 0;
+
+    while (moved < total) {
+      let wanted: u64 = total - moved < COPY_BUFFER_SIZE ? total - moved : COPY_BUFFER_SIZE;
+      let mut got: u64 = 0;
+      let status: u64 = Fs::Files::read(table, descriptor, chunk, wanted, &mut got as *mut u64);
+
+      if (status != Fs::Vfs::OK) {
+        *done = moved;
+        return moved > 0 ? Fs::Vfs::OK : status;
+      }
+
+      if (got > 0 && !Mm::AddressSpace::copyToUser(root, buffer + moved, chunk as *u8, got)) {
+        return BAD_ADDRESS;
+      }
+
+      moved += got;
+
+      if (got < wanted) {
+        break;
+      }
+    }
+
+    *done = moved;
+
+    return Fs::Vfs::OK;
+  }
+
+  /// Writes up to `count` bytes from the user buffer at `buffer` to
+  /// `descriptor` of the running process and writes the number written to
+  /// `done`. Returns `Fs::Files::BAD_DESCRIPTOR`, `BAD_ADDRESS` for a buffer
+  /// that is not readable user memory, or the `Fs::Files::write` codes.
+  function write(descriptor: u64, buffer: u64, count: u64, done: *mut u64): u64 {
+    let total: u64 = count < MAX_TRANSFER ? count : MAX_TRANSFER;
+    let root: u64 = Proc::Process::currentRoot();
+    let table: u64 = Proc::Process::currentSlot();
+    let chunk: *mut u8 = &mut CoreState::copyBuffer as *mut u8;
+
+    *done = 0;
+
+    if (Fs::Files::get(table, descriptor) == null) {
+      return Fs::Files::BAD_DESCRIPTOR;
+    }
+
+    if (!Mm::AddressSpace::isAccessible(root, buffer, total, false)) {
+      return BAD_ADDRESS;
+    }
+
+    let mut moved: u64 = 0;
+
+    while (moved < total) {
+      let piece: u64 = total - moved < COPY_BUFFER_SIZE ? total - moved : COPY_BUFFER_SIZE;
+      let mut written: u64 = 0;
+
+      if (!Mm::AddressSpace::copyFromUser(root, chunk, buffer + moved, piece)) {
+        return BAD_ADDRESS;
+      }
+
+      let status: u64 = Fs::Files::write(table, descriptor, chunk as *u8, piece, &mut written as *mut u64);
+
+      if (status != Fs::Vfs::OK) {
+        *done = moved;
+        return moved > 0 ? Fs::Vfs::OK : status;
+      }
+
+      moved += written;
+    }
+
+    *done = moved;
+
+    return Fs::Vfs::OK;
+  }
+}

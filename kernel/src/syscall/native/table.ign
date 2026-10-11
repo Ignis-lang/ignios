@@ -1,0 +1,60 @@
+//!
+//! # Native Call Numbers
+//!
+//! The call numbers of the native IgniOS ABI and the table that turns them
+//! into kernel operations.
+//!
+//! ## Overview
+//!
+//! A program that carries the IgniOS ELF note (`Proc::Elf::findAbi`) runs with
+//! this table instead of the Linux one. The convention:
+//!
+//! ```text
+//!   in:   RAX = call number, arguments in RDI, RSI, RDX, R10, R8, R9
+//!   out:  RAX = status (0 or a Syscall::Native code), RDX = value (0 on error)
+//!   lost: RCX and R11 (the SYSCALL instruction itself); every other register kept
+//! ```
+//!
+//! | Number | Call             | Arguments                                   | Value          |
+//! |--------|------------------|---------------------------------------------|----------------|
+//! | 0      | `EXIT`           | status                                      | (no return)    |
+//! | 1      | `WRITE`          | descriptor, buffer, count                   | bytes written  |
+//! | 12     | `PROCESS_ID`     |                                             | the process id |
+//!
+//! The other numbers up to 14 are reserved for the file and memory calls.
+//! Like the status codes, a number is never renumbered or reused.
+
+import _ from "../operation";
+
+/// The number-to-operation table of the native ABI.
+record NativeTableState {
+  /// One byte per call number, the `Syscall::Operation` it maps to. The size
+  /// must equal `Syscall::Operation::TABLE_SIZE`.
+  static mut native: u8[512];
+}
+
+/// The native numbers and the table.
+namespace Syscall::Native {
+  /// End the process with the status in RDI.
+  const NUMBER_EXIT: u64 = 0;
+
+  /// Write to a descriptor.
+  const NUMBER_WRITE: u64 = 1;
+
+  /// The id of the calling process.
+  const NUMBER_PROCESS_ID: u64 = 12;
+
+  /// Fills the table.
+  function initialize(): void {
+    let table: *mut u8 = tableBase();
+
+    *(table + NUMBER_EXIT) = Operation::EXIT;
+    *(table + NUMBER_WRITE) = Operation::WRITE;
+    *(table + NUMBER_PROCESS_ID) = Operation::GET_PID;
+  }
+
+  /// The first byte of the table.
+  function tableBase(): *mut u8 {
+    return &mut NativeTableState::native as *mut u8;
+  }
+}

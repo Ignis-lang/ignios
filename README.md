@@ -24,7 +24,8 @@ Early, and only tested in QEMU with OVMF.
 | Files | A ustar initramfs loaded by Limine and checked at boot; an in-memory file tree seeded from it with copy on write, `/dev/console`, path rules as on Linux; per-process descriptor tables (16 descriptors, 0 to 2 on the console); nothing is saved across reboots |
 | Commands | `cat`, `ls`, `touch` and `mkdir` in `/bin`, written in Ignis on the Linux system calls; any line at the prompt that is not a built-in runs as a program |
 | Memory mappings | `mmap` of anonymous memory and private copies of files, `munmap` that trims and splits regions, `PROT_READ`/`PROT_WRITE`/`PROT_EXEC`/`PROT_NONE` enforced by the page tables, write with execute refused; up to 32 regions per process; `std::alloc`, a user heap on `mmap` behind the compiler's allocation hooks; `cat` reads files through `mmap` |
-| Next | a native IgniOS system call ABI |
+| Native ABI | A second system call ABI next to Linux, chosen per program by an `IgniOS` ELF note: own call numbers, the status in RAX and the value in RDX, a published table of status codes; both ABIs share descriptors and the checked transfers of `Syscall::Core` |
+| Next | the native file and memory calls, and the commands on the native ABI |
 
 ## Quick start
 
@@ -95,6 +96,7 @@ user/hello/                    the first user program
 user/cat, ls, touch, mkdir/    the commands
 user/fstest/                   ring 3 checks of the file system calls
 user/mmtest/                   ring 3 checks of mmap, munmap and std::alloc
+user/nativetest/               ring 3 checks of the native ABI
 user/user.ld                   user program layout
 initramfs/                     files packed into the initramfs next to the programs in /bin
 boot/limine.conf               boot entry and the initramfs module

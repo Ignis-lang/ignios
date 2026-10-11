@@ -20,6 +20,7 @@
 //! | hello             | a real static ELF64 from the initramfs, argc and argv  |
 //! | files             | `/bin/fstest` checks every file system call and error from ring 3; nothing leaks |
 //! | memory            | `/bin/mmtest` checks `mmap`, `munmap` and `std::alloc`; four forbidden accesses to mappings are killed; a double free panics; nothing leaks |
+//! | native            | `/bin/nativetest` checks the native ABI; the loader refuses an IgniOS note of another version and one that runs past the file |
 //! | refused           | a missing program, a directory, a file that is not ELF, an empty line and 33 arguments start nothing and leak nothing |
 //!
 //! `main.ign` calls `Tests::User::run` once, after the scheduler tests and before
@@ -28,6 +29,7 @@
 import Arch from "@arch";
 import Drivers from "@drivers";
 import Fs from "@fs";
+import Lib from "@lib";
 import Mm from "@mm";
 import Proc from "@proc";
 import Sched from "@sched";
@@ -161,6 +163,7 @@ namespace Tests::User {
     runRefused();
     runFiles();
     runMemory();
+    runNative();
   }
 
   /// Runs `ALIGNMENT_SPIN` and checks, through the counters of
@@ -277,6 +280,82 @@ namespace Tests::User {
     }
 
     Drivers::Console::writeLine("user: mmtest passed, writing read-only, using unmapped, executing non-exec and touching PROT_NONE memory were killed, a double free was caught, no frame leaked");
+  }
+
+  /// Runs `/bin/nativetest`, which carries the IgniOS note and checks the
+  /// native ABI from ring 3. Then gives `Proc::Process::startElf` two broken
+  /// copies of the same file: one whose note names version 2, one whose note
+  /// claims a description larger than the file. Both must start nothing, and
+  /// no frame or heap byte may leak.
+  function runNative(): void {
+    let status: u64 = Proc::Programs::runNamed("nativetest");
+
+    if (status != 0) {
+      Drivers::Console::write("user test: nativetest failed check ");
+      Drivers::Console::writeDecimal(status);
+      Drivers::Console::writeLine("");
+      @panic("user test: the native ABI misbehaved");
+    }
+
+    let freeBefore: u64 = Mm::Pmm::freeFrameCount();
+    let heapBefore: u64 = Mm::Heap::allocatedBytes();
+    let saved: u64 = Arch::Cpu::saveAndDisableInterrupts();
+    let mut node: *mut Fs::Node = null;
+
+    if (Fs::Vfs::lookup(Fs::Vfs::root(), "/bin/nativetest" as *u8, 15, &mut node as *mut *mut Fs::Node) != Fs::Vfs::OK) {
+      @panic("user test: no /bin/nativetest");
+    }
+
+    let size: u64 = (*node).size;
+    let copy: *mut u8 = Mm::Heap::allocate(size, 16);
+    let name: u64 = findNoteName((*node).data as *u8, size);
+
+    if (copy == null || name == 0) {
+      @panic("user test: /bin/nativetest has no IgniOS note");
+    }
+
+    Lib::Mem::copy(copy, (*node).data as *u8, size);
+    *(copy + name + 8) = 2;
+    expectElfRefused(copy, size);
+
+    Lib::Mem::copy(copy, (*node).data as *u8, size);
+    *(copy + name - 5) = 0x7F;
+    expectElfRefused(copy, size);
+
+    Mm::Heap::free(copy);
+    Arch::Cpu::restoreInterrupts(saved);
+
+    if (Mm::Pmm::freeFrameCount() != freeBefore || Mm::Heap::allocatedBytes() != heapBefore) {
+      @panic("user test: a refused native program leaked memory");
+    }
+
+    Drivers::Console::writeLine("user: nativetest passed, a note of version 2 and a note past the end of the file were refused");
+  }
+
+  /// The offset of the name `IgniOS` of the IgniOS note in the `size` bytes
+  /// at `image`: the bytes `IgniOS\0` preceded by the note header
+  /// (namesz 7, descsz 4, type 1). 0 when there is none.
+  function findNoteName(image: *u8, size: u64): u64 {
+    let mut offset: u64 = 12;
+
+    while (offset + 12 <= size) {
+      let at: *u8 = image + offset;
+
+      if (*at == ('I' as u8) && *(at + 1) == ('g' as u8) && *(at + 2) == ('n' as u8) && *(at + 3) == ('i' as u8) && *(at + 4) == ('O' as u8) && *(at + 5) == ('S' as u8) && *(at + 6) == 0 && *(at - 12) == 7 && *(at - 8) == 4 && *(at - 4) == 1) {
+        return offset;
+      }
+
+      offset += 4;
+    }
+
+    return 0;
+  }
+
+  /// Panics unless `startElf` refuses the `size` bytes at `image`.
+  function expectElfRefused(image: *mut u8, size: u64): void {
+    if (Proc::Process::startElf(image as *u8, size, "nativetest" as *u8, 11, 1) != Proc::Process::NO_PROCESS) {
+      @panic("user test: the loader started a program with a broken IgniOS note");
+    }
   }
 
   /// Removes the regular file at the absolute `path` that a test program

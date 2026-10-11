@@ -29,10 +29,13 @@
 //! Each process has an ABI, its personality. The ABI owns a table that turns a
 //! system call number into an operation of the kernel, a small number that does
 //! not depend on any convention (`Syscall::Operation`), and the kernel runs
-//! that operation. The only ABI so far is Linux x86_64 (`Syscall::Linux`): the
-//! call number in RAX, the arguments in RDI, RSI, RDX, R10, R8 and R9, Linux's
-//! numbers and Linux's errno values. A number the table does not know turns
-//! into `Operation::NONE` and fails with `-ENOSYS`.
+//! that operation. Two ABIs exist. Linux x86_64 (`Syscall::Linux`): the call
+//! number in RAX, the arguments in RDI, RSI, RDX, R10, R8 and R9, Linux's
+//! numbers and Linux's errno values; a number the table does not know fails
+//! with `-ENOSYS`. Native IgniOS (`Syscall::Native`), for a program with the
+//! IgniOS ELF note: the same argument registers, its own numbers, the status
+//! in RAX and the value in RDX; an unknown number is `NOT_SUPPORTED`.
+//! ABI-independent work, such as moving bytes, is in `Syscall::Core`.
 //!
 //! The handlers run with interrupts off, which is how `SYSCALL` leaves them:
 //! the kernel has one CPU, so nothing else can touch the state in the
@@ -50,20 +53,30 @@ import _ from "./linux/files";
 import _ from "./linux/memory";
 import _ from "./linux/nanosleep";
 import _ from "./linux/table";
+import _ from "./native/calls";
+import _ from "./native/status";
+import _ from "./native/table";
 import _ from "./operation";
 
 /// The dispatcher.
 namespace Syscall {
-  /// Fills the table of the Linux ABI.
+  /// Fills the tables of the Linux and the native ABI.
   function initialize(): void {
     Linux::initialize();
+    Native::initialize();
   }
 
   /// Called by the entry stub with interrupts off, on the kernel stack of
   /// the calling thread.
   @externName("ignis_syscall_dispatch")
   function dispatch(frame: *mut Arch::InterruptFrame): void {
-    let operation: u8 = lookup(Proc::Process::currentAbi(), (*frame).rax);
+    let abi: u64 = Proc::Process::currentAbi();
+    let operation: u8 = lookup(abi, (*frame).rax);
+
+    if (abi == Proc::Process::ABI_NATIVE) {
+      Native::run(operation, frame);
+      return;
+    }
 
     let first: u64 = (*frame).rdi;
     let second: u64 = (*frame).rsi;
@@ -119,9 +132,9 @@ namespace Syscall {
     return *(tableFor(abi) + number);
   }
 
-  /// The number-to-operation table of an ABI. Linux is the only one.
+  /// The number-to-operation table of an ABI.
   function tableFor(abi: u64): *mut u8 {
-    return Linux::tableBase();
+    return abi == Proc::Process::ABI_NATIVE ? Native::tableBase() : Linux::tableBase();
   }
 
   /// Called by the entry stub when the return address of a system call is

@@ -67,6 +67,7 @@ hello
 ls
 mkdir
 mmtest
+nativetest
 touch
 S0
 > mkdir /tmp

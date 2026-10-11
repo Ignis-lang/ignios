@@ -17,6 +17,7 @@
 //! `fs/files.ign`.
 
 import Fs from "@fs";
+import _ from "../core";
 
 /// The errno values the implemented calls use.
 namespace Syscall::Linux {
@@ -68,10 +69,6 @@ namespace Syscall::Linux {
   /// Directory not empty (39).
   const ENOTEMPTY: i64 = 39;
 
-  /// A status of the system call layer itself, next to the `Fs` codes: a user
-  /// pointer failed validation. `errorFor` turns it into `EFAULT`.
-  const BAD_ADDRESS: u64 = 100;
-
   /// The value a failing call returns in RAX: the errno, negated.
   function failure(errno: i64): u64 {
     let value: i64 = 0 - errno;
@@ -93,7 +90,7 @@ namespace Syscall::Linux {
       Fs::Files::BAD_DESCRIPTOR -> EBADF,
       Fs::Files::TOO_MANY_OPEN -> EMFILE,
       Fs::Files::NOT_SEEKABLE -> ESPIPE,
-      BAD_ADDRESS -> EFAULT,
+      Syscall::Core::BAD_ADDRESS -> EFAULT,
       _ -> EINVAL,
     };
   }

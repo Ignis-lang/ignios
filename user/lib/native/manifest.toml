@@ -1,0 +1,16 @@
+# The native flavour of the IgniOS user standard library. A program that
+# names it with `std_path = "../lib/native"` speaks the native IgniOS system
+# call ABI: it is linked after this directory's `start.S`, which carries the
+# IgniOS ELF note, and its `std::sys` returns the status of each call in RAX
+# and the value in RDX.
+#
+# `io` and `args` are shared with the Linux flavour (../linux) and reach the
+# kernel only through `std::sys`.
+
+[modules]
+sys = "sys.ign"
+io = "../common/io.ign"
+args = "../common/args.ign"
+
+[auto_load]
+modules = []

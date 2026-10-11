@@ -6,7 +6,7 @@
  *   virtual address   segment   flags   contents
  *   ---------------   -------   -----   ----------------------------------
  *   0x400000          text      R X     code (.text), the entry point
- *   next page         rodata    R       constants (.rodata)
+ *   next page         rodata    R       the IgniOS note (.ignios.note), constants (.rodata)
  *   next page         data      R W     .data, then .bss (zero-filled)
  *
  * The kernel (kernel/src/elf.ign) loads each PT_LOAD at its p_vaddr and
@@ -28,6 +28,9 @@ PHDRS
     text    PT_LOAD FLAGS(0x5); /* R + X */
     rodata  PT_LOAD FLAGS(0x4); /* R */
     data    PT_LOAD FLAGS(0x6); /* R + W */
+    /* The IgniOS ABI note of a native program (user/lib/native/start.S). A
+     * Linux program has no such section, and the segment is empty. */
+    note    PT_NOTE FLAGS(0x4);
 }
 
 SECTIONS
@@ -41,6 +44,13 @@ SECTIONS
     } :text
 
     . = ALIGN(CONSTANT(MAXPAGESIZE));
+
+    /* First in the rodata segment and also its own PT_NOTE segment. The name
+     * does not start with `.note` because those sections are discarded
+     * below. */
+    .ignios.note : {
+        KEEP(*(.ignios.note))
+    } :rodata :note
 
     .rodata : {
         *(.rodata .rodata.*)

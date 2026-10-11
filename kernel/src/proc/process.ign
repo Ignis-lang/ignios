@@ -89,7 +89,7 @@ record ProcessEntry {
   /// The exit status, valid once the state is `EXITED`.
   public status: u64;
 
-  /// The system call convention of the process, `ABI_LINUX`.
+  /// The system call convention of the process, `ABI_LINUX` or `ABI_NATIVE`.
   public abi: u64;
 }
 
@@ -122,6 +122,10 @@ namespace Proc::Process {
   /// The system call convention the process speaks: Linux x86_64 numbers and
   /// errno values.
   const ABI_LINUX: u64 = 0;
+
+  /// The native IgniOS system call ABI (`Syscall::Native`): own numbers,
+  /// status in RAX and value in RDX. Chosen by the IgniOS note of the ELF.
+  const ABI_NATIVE: u64 = 1;
 
   /// 4 KiB.
   const PAGE_SIZE: u64 = 4096;
@@ -186,7 +190,7 @@ namespace Proc::Process {
 
     Lib::Mem::copy(Boot::Hhdm::toVirtual(frame), code, length);
 
-    return launch(root, CODE_BASE, STACK_TOP - 8);
+    return launch(root, CODE_BASE, STACK_TOP - 8, ABI_LINUX);
   }
 
   /// Starts a process from the ELF executable in the `size` bytes at `image`
@@ -206,7 +210,7 @@ namespace Proc::Process {
       return NO_PROCESS;
     }
 
-    let mut loaded: Proc::LoadedImage = Proc::LoadedImage { entry: 0, segments: 0, pages: 0 };
+    let mut loaded: Proc::LoadedImage = Proc::LoadedImage { entry: 0, segments: 0, pages: 0, abi: 0 };
     let error: u64 = Proc::Elf::load(image, size, root, &mut loaded as *mut Proc::LoadedImage);
 
     if (error != Proc::Elf::OK) {
@@ -240,9 +244,10 @@ namespace Proc::Process {
     Drivers::Console::writeHex(stackPointer);
     Drivers::Console::write(", argc ");
     Drivers::Console::writeDecimal(count);
+    Drivers::Console::write(loaded.abi == ABI_NATIVE ? ", abi native" : ", abi linux");
     Drivers::Console::writeLine("");
 
-    return launch(root, loaded.entry, stackPointer);
+    return launch(root, loaded.entry, stackPointer, loaded.abi);
   }
 
   /// Writes the initial stack of a program to the stack pages of `root`, the
@@ -334,9 +339,10 @@ namespace Proc::Process {
 
   /// Makes a process of the address space `root`, which the process now owns
   /// and which must already hold the program and its stack, and queues its
-  /// thread. The program starts at `entry` with `stackPointer`. Returns the
-  /// process id, or `NO_PROCESS`; the space is destroyed on failure.
-  function launch(root: u64, entry: u64, stackPointer: u64): u64 {
+  /// thread. The program starts at `entry` with `stackPointer` and speaks the
+  /// system call ABI `abi`. Returns the process id, or `NO_PROCESS`; the
+  /// space is destroyed on failure.
+  function launch(root: u64, entry: u64, stackPointer: u64, abi: u64): u64 {
     let saved: u64 = Arch::Cpu::saveAndDisableInterrupts();
     let slot: u64 = findFreeSlot();
 
@@ -353,7 +359,7 @@ namespace Proc::Process {
     (*process).entry = entry;
     (*process).stackPointer = stackPointer;
     (*process).status = 0;
-    (*process).abi = ABI_LINUX;
+    (*process).abi = abi;
 
     Proc::Memory::reset(slot);
 

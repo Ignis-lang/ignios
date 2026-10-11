@@ -1,0 +1,62 @@
+//!
+//! # Native Call Handlers
+//!
+//! Runs an operation for a process that speaks the native ABI and writes
+//! its status to RAX and its value to RDX.
+//!
+//! ## Overview
+//!
+//! `Syscall::dispatch` looks the number up in the native table and hands the
+//! operation here. Each handler returns a kernel status and a value;
+//! `finish` converts the status with `statusFor` and stores both in the
+//! saved frame, so `SYSRET` hands them to the program:
+//!
+//! ```text
+//!   operation ─► handler ─► (kernel status, value)
+//!                               │ statusFor
+//!                               ▼
+//!                frame.rax := native status, frame.rdx := value or 0
+//! ```
+//!
+//! A value is never folded into the status: an error leaves RDX at 0, and a
+//! success may return any 64-bit value, including ones a Linux call would
+//! read as `-errno`.
+
+import Arch from "@arch";
+import Proc from "@proc";
+import _ from "../core";
+import _ from "../operation";
+import _ from "./status";
+
+/// The native handlers.
+namespace Syscall::Native {
+  /// Runs `operation` with the arguments of `frame`, which a native process
+  /// saved, and writes the result back to it. `EXIT` does not return.
+  function run(operation: u8, frame: *mut Arch::InterruptFrame): void {
+    let first: u64 = (*frame).rdi;
+    let second: u64 = (*frame).rsi;
+    let third: u64 = (*frame).rdx;
+
+    if (operation == Operation::EXIT) {
+      Proc::Process::exitCurrent(first & 0xFF);
+    }
+
+    if (operation == Operation::WRITE) {
+      let mut done: u64 = 0;
+      let status: u64 = Syscall::Core::write(first, second, third, &mut done as *mut u64);
+
+      finish(frame, Native::statusFor(status), done);
+    } else if (operation == Operation::GET_PID) {
+      finish(frame, Native::OK, Proc::Process::currentId());
+    } else {
+      finish(frame, Native::NOT_SUPPORTED, 0);
+    }
+  }
+
+  /// Stores a native status and its value in the frame. The value is
+  /// dropped on an error.
+  function finish(frame: *mut Arch::InterruptFrame, status: u64, value: u64): void {
+    (*frame).rax = status;
+    (*frame).rdx = status == Native::OK ? value : 0;
+  }
+}

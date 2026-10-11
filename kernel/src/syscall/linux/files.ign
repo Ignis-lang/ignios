@@ -77,15 +77,12 @@ import Fs from "@fs";
 import Lib from "@lib";
 import Mm from "@mm";
 import Proc from "@proc";
+import _ from "../core";
 import _ from "./errno";
 
 /// The kernel buffers of the file calls. One is enough: system calls run
 /// with interrupts off on the only processor.
 record LinuxFilesState {
-  /// Staging buffer for the bytes of `read` and `write`. The size must equal
-  /// `Syscall::Linux::COPY_BUFFER_SIZE`.
-  static mut copyBuffer: u8[512];
-
   /// A path copied from the user. The size must equal `Fs::Vfs::PATH_MAX`.
   static mut path: u8[4096];
 
@@ -98,13 +95,6 @@ record LinuxFilesState {
 
 /// The file system call handlers.
 namespace Syscall::Linux {
-  /// The most one `read` or `write` moves. A longer request is a short
-  /// transfer, which the caller already has to handle.
-  const MAX_TRANSFER: u64 = 65536;
-
-  /// Bytes of `LinuxFilesState::copyBuffer`.
-  const COPY_BUFFER_SIZE: u64 = 512;
-
   /// `dirfd` of the `*at` calls meaning the current directory: -100.
   const AT_FDCWD: u64 = 0xFFFFFFFFFFFFFF9C;
 
@@ -166,85 +156,24 @@ namespace Syscall::Linux {
   /// up to 8.
   const DIRENT_CAPACITY: u64 = 280;
 
-  /// `read(fd, buf, count)`. The whole range must be writable before any
-  /// byte moves, so a bad buffer is `-EFAULT` and reads nothing.
+  /// `read(fd, buf, count)`: the bytes read, 0 at the end. The whole range
+  /// must be writable before any byte moves, so a bad buffer is `-EFAULT`
+  /// and reads nothing (`Syscall::Core::read`).
   function read(descriptor: u64, buffer: u64, count: u64): u64 {
-    let total: u64 = count < MAX_TRANSFER ? count : MAX_TRANSFER;
-    let root: u64 = Proc::Process::currentRoot();
-    let table: u64 = Proc::Process::currentSlot();
-    let chunk: *mut u8 = &mut LinuxFilesState::copyBuffer as *mut u8;
-
-    if (Fs::Files::get(table, descriptor) == null) {
-      return Linux::failure(Linux::EBADF);
-    }
-
-    if (!Mm::AddressSpace::isAccessible(root, buffer, total, true)) {
-      return Linux::failure(Linux::EFAULT);
-    }
-
     let mut done: u64 = 0;
+    let status: u64 = Syscall::Core::read(descriptor, buffer, count, &mut done as *mut u64);
 
-    while (done < total) {
-      let wanted: u64 = total - done < COPY_BUFFER_SIZE ? total - done : COPY_BUFFER_SIZE;
-      let mut got: u64 = 0;
-      let status: u64 = Fs::Files::read(table, descriptor, chunk, wanted, &mut got as *mut u64);
-
-      if (status != Fs::Vfs::OK) {
-        return done > 0 ? done : Linux::failureFor(status);
-      }
-
-      if (got > 0 && !Mm::AddressSpace::copyToUser(root, buffer + done, chunk as *u8, got)) {
-        return Linux::failure(Linux::EFAULT);
-      }
-
-      done += got;
-
-      if (got < wanted) {
-        break;
-      }
-    }
-
-    return done;
+    return status == Fs::Vfs::OK ? done : Linux::failureFor(status);
   }
 
-  /// `write(fd, buf, count)`. The whole range must be readable before the
-  /// first byte is written, so a bad pointer is `-EFAULT` and writes
-  /// nothing. The bytes pass through a small kernel buffer, so a long
-  /// request is copied and written piece by piece.
+  /// `write(fd, buf, count)`: the bytes written. The whole range must be
+  /// readable before the first byte is written, so a bad pointer is
+  /// `-EFAULT` and writes nothing (`Syscall::Core::write`).
   function write(descriptor: u64, buffer: u64, count: u64): u64 {
-    let total: u64 = count < MAX_TRANSFER ? count : MAX_TRANSFER;
-    let root: u64 = Proc::Process::currentRoot();
-    let table: u64 = Proc::Process::currentSlot();
-    let chunk: *mut u8 = &mut LinuxFilesState::copyBuffer as *mut u8;
-
-    if (Fs::Files::get(table, descriptor) == null) {
-      return Linux::failure(Linux::EBADF);
-    }
-
-    if (!Mm::AddressSpace::isAccessible(root, buffer, total, false)) {
-      return Linux::failure(Linux::EFAULT);
-    }
-
     let mut done: u64 = 0;
+    let status: u64 = Syscall::Core::write(descriptor, buffer, count, &mut done as *mut u64);
 
-    while (done < total) {
-      let piece: u64 = total - done < COPY_BUFFER_SIZE ? total - done : COPY_BUFFER_SIZE;
-      let mut written: u64 = 0;
-
-      if (!Mm::AddressSpace::copyFromUser(root, chunk, buffer + done, piece)) {
-        return Linux::failure(Linux::EFAULT);
-      }
-
-      let status: u64 = Fs::Files::write(table, descriptor, chunk as *u8, piece, &mut written as *mut u64);
-
-      if (status != Fs::Vfs::OK) {
-        return done > 0 ? done : Linux::failureFor(status);
-      }
-
-      done += written;
-    }
-
-    return done;
+    return status == Fs::Vfs::OK ? done : Linux::failureFor(status);
   }
 
   /// `openat(dirfd, path, flags, mode)`. Returns the new descriptor.
@@ -467,7 +396,7 @@ namespace Syscall::Linux {
     let copied: u64 = Mm::AddressSpace::copyStringFromUser(Proc::Process::currentRoot(), pathBuffer(), path, Fs::Vfs::PATH_MAX);
 
     if (copied == Mm::AddressSpace::NOT_MAPPED) {
-      return Linux::BAD_ADDRESS;
+      return Syscall::Core::BAD_ADDRESS;
     }
 
     if (copied == Fs::Vfs::PATH_MAX) {
