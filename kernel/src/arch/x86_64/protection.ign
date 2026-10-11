@@ -74,15 +74,13 @@ namespace Arch::Protection {
     let features: u32 = Arch::Cpu::cpuidEbx(FEATURES_LEAF, 0);
     let mut cr4: u64 = Arch::Cpu::readCr4();
 
-    // Written as `cr4 = cr4 | ...`: the current Ignis compiler emits `|=` as a
-    // logical or, which would load CR4 with 1.
     if ((features & CPUID_SMEP) != 0) {
-      cr4 = cr4 | CR4_SMEP;
+      cr4 |= CR4_SMEP;
       ProtectionState::smep = true;
     }
 
     if ((features & CPUID_SMAP) != 0) {
-      cr4 = cr4 | CR4_SMAP;
+      cr4 |= CR4_SMAP;
       ProtectionState::smap = true;
     }
 
