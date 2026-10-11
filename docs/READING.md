@@ -41,7 +41,7 @@ Each subsystem is a directory under `kernel/src/` with a `mod.ign` facade. The f
 | `drivers/` | `Drivers` | `@drivers` | Arch, Boot, Lib | `Serial`, `Console`, `Color`, `Font`, `Ps2`, `Keyboard` |
 | `acpi/` | `Acpi` | `@acpi` | Boot, Drivers | `Rsdp`, `Xsdt`, `Madt`, `Table` |
 | `mm/` | `Mm` | `@mm` | Arch, Boot, Drivers, Lib | `Pmm`, `Vmm`, `AddressSpace`, `Heap`, `Modules` |
-| `fs/` | `Fs` | `@fs` | Drivers, Lib, Mm | `Tar`, `Initramfs` |
+| `fs/` | `Fs` | `@fs` | Drivers, Lib, Mm | `Tar`, `Initramfs`, `Vfs` |
 | `apic/` | `Apic` | `@apic` | Acpi, Arch, Drivers, Mm | `Lapic`, `Ioapic` |
 | `time/` | `Time` | `@time` | Apic, Arch, Drivers | `Timer` |
 | `sched/` | `Sched` | `@sched` | Arch, Mm, Time | `Thread`, `Scheduler` |
@@ -71,7 +71,7 @@ Each subsystem is a directory under `kernel/src/` with a `mod.ign` facade. The f
 | 7 | Keyboard | `drivers/ps2.ign`, `lib/scancode_queue.ign`, `drivers/keyboard.ign` |
 | 8 | Threads, scheduling and the shell | `arch/x86_64/context.ign`, `context_asm.S`, `sched/thread.ign`, `sched/scheduler.ign`, `shell/*.ign` |
 | 9 | User mode | `arch/x86_64/usermode.ign`, `usermode_asm.S`, `proc/process.ign`, `syscall/*.ign`, `proc/elf.ign`, `mm/modules.ign`, `proc/programs.ign`, `user/` |
-| 10 | Files | `initramfs/`, `fs/tar.ign`, `fs/initramfs.ign` |
+| 10 | Files | `initramfs/`, `fs/tar.ign`, `fs/initramfs.ign`, `fs/vfs.ign` |
 | 11 | Boot self-tests | `tests/*.ign`, `arch/x86_64/user_test_asm.S` |
 | 12 | Scripts | `scripts/` |
 
@@ -215,9 +215,11 @@ Docs 14 and 15.
 
 **`fs/initramfs.ign`.** Finds the module, walks every member once and refuses to boot if one is malformed. Later readers can then trust the archive. The data is never copied: it stays where Limine loaded it.
 
+**`fs/vfs.ign`.** The file tree. Every file and directory is a `Fs::Node` on the heap, and a directory keeps its children in a linked list in creation order. The header has the path rules (`.`, `..`, repeated and trailing slashes, the `NAME_MAX` and `PATH_MAX` limits) and the table of status codes with the Linux error each one becomes. Look at `seedEntry`, which builds the tree from the archive without copying file data, and at `reserve`, which copies a seeded file to the heap the first time it is written (copy on write), so the read-only archive is never touched. The VFS has no locks: its callers run with interrupts off on the only processor.
+
 ## Part 11. Boot self-tests
 
-**`tests/`.** One file per check, run by `kmain` where the subsystem is ready. Each prints one line and panics on the first violation, so a boot that continues has passed it. The tests use only the public functions of the subsystems. `pmm.ign`, `vmm.ign`, `heap.ign`, `address_space.ign`, `timer.ign` and `context.ign` check the primitives, `initramfs.ign` feeds the ustar reader one malformed header per error code, `address_space.ign` including a 2 MiB user page. `protection.ign` checks that SMAP and SMEP fault. `scheduler.ign` runs round-robin order, sleeping, a full table, one address space per thread and preemption of threads that never yield. `user.ign` and `arch/x86_64/user_test_asm.S` hold sixteen throwaway ring 3 programs. Seven behave (exit, registers, spin, a spin with RFLAGS.AC set, system calls, the x87 and SSE check that runs as two processes, and a 200 ms nap that `wait` must block on) and nine do something forbidden. The kernel must kill each of the nine with the right status. `cpu_local.ign` runs last and checks that every way in and out of ring 3 left the GS bases balanced.
+**`tests/`.** One file per check, run by `kmain` where the subsystem is ready. Each prints one line and panics on the first violation, so a boot that continues has passed it. The tests use only the public functions of the subsystems. `pmm.ign`, `vmm.ign`, `heap.ign`, `address_space.ign`, `timer.ign` and `context.ign` check the primitives, `initramfs.ign` feeds the ustar reader one malformed header per error code, `vfs.ign` walks the path rules and every status code of the file tree, `address_space.ign` including a 2 MiB user page. `protection.ign` checks that SMAP and SMEP fault. `scheduler.ign` runs round-robin order, sleeping, a full table, one address space per thread and preemption of threads that never yield. `user.ign` and `arch/x86_64/user_test_asm.S` hold sixteen throwaway ring 3 programs. Seven behave (exit, registers, spin, a spin with RFLAGS.AC set, system calls, the x87 and SSE check that runs as two processes, and a 200 ms nap that `wait` must block on) and nine do something forbidden. The kernel must kill each of the nine with the right status. `cpu_local.ign` runs last and checks that every way in and out of ring 3 left the GS bases balanced.
 
 ## Part 12. Scripts
 
@@ -362,6 +364,12 @@ initramfs: 20480 bytes, 2 files with 13171 bytes of data, 3 directories
 initramfs: self-test ok, 6 malformed headers refused, 2 valid ones read, etc/motd read back
 ```
 `Fs::Initramfs::initialize` walked the archive: `etc/motd` and `bin/hello` are the files, and `.`, `bin` and `etc` the directories. The size is a multiple of 10240 bytes because tar pads the archive to whole records. `Tests::Initramfs::run` then fed the reader one broken header per error code (checksum, magic, a non-octal number, a `..` path, a symbolic link, data past the end), a file and a directory with a prefix, and compared `etc/motd` with the text it should hold.
+
+```text
+vfs: 5 nodes, 13171 bytes in files, seeded from the initramfs
+vfs: self-test ok, lookup, create, read, write, truncate, remove and copy on write
+```
+`Fs::Vfs::initialize` built the tree: the root, `bin`, `bin/hello`, `etc` and `etc/motd`. The file bytes are the same 13171 as in the archive, because nothing was copied. `Tests::Vfs::run` checked every path rule, created, wrote, read, truncated and removed a test directory `/t` and checked that the heap returned to where it was, then wrote to `/etc/motd` to check that the write copied the file and left the archive alone.
 
 ```text
 address space: self-test ok, private user half, shared kernel half, frames returned

@@ -1,0 +1,744 @@
+//!
+//! # The File Tree
+//!
+//! One tree of directories and regular files in kernel memory: the VFS.
+//!
+//! ## Overview
+//!
+//! Every file and directory is a `Fs::Node` on the kernel heap. A directory
+//! keeps its children in a singly linked list in the order they were added,
+//! which is the order `child` (and so `getdents64`) returns them.
+//!
+//! ```text
+//!   root "/" ──firstChild──► "bin" ──nextSibling──► "etc"
+//!                              │                      │
+//!                         firstChild             firstChild
+//!                              ▼                      ▼
+//!                           "hello"                 "motd"
+//!                         data ─► archive         data ─► archive
+//! ```
+//!
+//! `initialize` builds the tree from the initramfs. A seeded file does not
+//! copy its data: `data` points into the archive, which Limine loaded and
+//! the kernel mapped read only. The first write to such a file copies the
+//! data to the heap and the file owns it from then on (copy on write), so
+//! the archive is never modified. Nothing here is saved anywhere: files and
+//! directories created at run time are gone after a reboot.
+//!
+//! ## Paths
+//!
+//! `lookup` walks a path one component at a time:
+//!
+//! | Path part      | Meaning                                                |
+//! |----------------|--------------------------------------------------------|
+//! | leading `/`    | start at the root instead of the given directory       |
+//! | empty, `//`    | ignored                                                |
+//! | `.`            | the same directory                                     |
+//! | `..`           | the parent; the parent of the root is the root         |
+//! | trailing `/`   | the result must be a directory, otherwise `NOT_DIRECTORY` |
+//!
+//! A component longer than `NAME_MAX` bytes or a path longer than
+//! `PATH_MAX` bytes is `NAME_TOO_LONG`. Every intermediate component must be
+//! a directory (`NOT_DIRECTORY` otherwise) and must exist (`NOT_FOUND`).
+//!
+//! ## Status codes
+//!
+//! The functions return `Fs::Vfs::OK` or one of the codes below. They are the
+//! VFS's own codes; each system call ABI turns them into its error numbers
+//! (`Syscall::Linux` turns `NOT_FOUND` into `-ENOENT`, and so on).
+//!
+//! | Code            | Meaning                                    | Linux     |
+//! |-----------------|--------------------------------------------|-----------|
+//! | `NOT_FOUND`     | a component does not exist                 | `ENOENT`  |
+//! | `NOT_DIRECTORY` | a component that must be a directory is not| `ENOTDIR` |
+//! | `IS_DIRECTORY`  | a file operation on a directory            | `EISDIR`  |
+//! | `EXISTS`        | creating a name that is already taken      | `EEXIST`  |
+//! | `NAME_TOO_LONG` | a component or the path is too long        | `ENAMETOOLONG` |
+//! | `NO_MEMORY`     | the heap is exhausted                      | `ENOMEM`  |
+//! | `NOT_EMPTY`     | removing a directory that has children     | `ENOTEMPTY` |
+//! | `INVALID`       | a malformed request (an empty name, `..`)  | `EINVAL`  |
+//!
+//! The VFS has no locks. Every caller runs with interrupts off on the only
+//! processor (the system call handlers do), so no two operations overlap.
+
+import Drivers from "@drivers";
+import Lib from "@lib";
+import Mm from "@mm";
+import _ from "./initramfs";
+import _ from "./tar";
+
+namespace Fs {
+  /// A file or a directory of the tree.
+  @cLayout
+  record Node {
+    /// `Fs::Vfs::FILE` or `Fs::Vfs::DIRECTORY`.
+    public kind: u64;
+
+    /// A number unique to this node, reported as the inode number.
+    public id: u64;
+
+    /// The permission bits, reported, not enforced.
+    public mode: u64;
+
+    /// The name, a heap copy without a NUL. Empty for the root.
+    public name: *mut u8;
+
+    /// The name length in bytes.
+    public nameLength: u64;
+
+    /// The directory that holds this node. The root is its own parent.
+    public parent: *mut Node;
+
+    /// The first child of a directory, null when it is empty.
+    public firstChild: *mut Node;
+
+    /// The next child of the same parent, null for the last one.
+    public nextSibling: *mut Node;
+
+    /// The number of children of a directory.
+    public childCount: u64;
+
+    /// The contents of a file: in the archive or on the heap.
+    public data: *mut u8;
+
+    /// The file length in bytes.
+    public size: u64;
+
+    /// The bytes the heap block at `data` can hold. 0 while `data` points
+    /// into the archive, which marks the data as not owned.
+    public capacity: u64;
+  }
+}
+
+/// The root of the tree and the node counter.
+record VfsState {
+  /// The root directory, null before `initialize`.
+  static mut root: *mut Fs::Node = null;
+
+  /// The id the next node gets.
+  static mut nextId: u64 = 1;
+
+  /// Path buffer of `seed`.
+  static mut path: u8[256];
+}
+
+/// The file tree API.
+namespace Fs::Vfs {
+  /// A regular file.
+  const FILE: u64 = 1;
+
+  /// A directory.
+  const DIRECTORY: u64 = 2;
+
+  /// The operation succeeded.
+  const OK: u64 = 0;
+
+  /// See the module header for the codes.
+  const NOT_FOUND: u64 = 1;
+
+  /// A component that must be a directory is not one.
+  const NOT_DIRECTORY: u64 = 2;
+
+  /// A file operation was asked of a directory.
+  const IS_DIRECTORY: u64 = 3;
+
+  /// The name is already taken.
+  const EXISTS: u64 = 4;
+
+  /// A component is longer than `NAME_MAX` or the path longer than `PATH_MAX`.
+  const NAME_TOO_LONG: u64 = 5;
+
+  /// The heap is exhausted.
+  const NO_MEMORY: u64 = 6;
+
+  /// The directory to remove has children.
+  const NOT_EMPTY: u64 = 7;
+
+  /// A malformed request.
+  const INVALID: u64 = 8;
+
+  /// The longest name of one component, as on Linux.
+  const NAME_MAX: u64 = 255;
+
+  /// The longest path, its terminating NUL included, as on Linux.
+  const PATH_MAX: u64 = 4096;
+
+  /// Default mode of a directory created at run time: rwxr-xr-x.
+  const DIRECTORY_MODE: u64 = 0x1ED;
+
+  /// Default mode of a file created at run time: rw-r--r--.
+  const FILE_MODE: u64 = 0x1A4;
+
+  /// The smallest heap block a file's data gets, so small appends do not
+  /// copy the file each time.
+  const MIN_CAPACITY: u64 = 64;
+
+  /// ASCII `/`.
+  const SLASH: u8 = 0x2F;
+
+  /// ASCII `.`.
+  const DOT: u8 = 0x2E;
+
+  /// Creates the root and adds every member of the initramfs. Panics when the
+  /// heap runs out or the archive names a path twice with different kinds:
+  /// the kernel cannot run without its files.
+  function initialize(): void {
+    let root: *mut Fs::Node = newNode(DIRECTORY, "" as *u8, 0, DIRECTORY_MODE);
+
+    if (root == null) {
+      @panic("vfs: no memory for the root");
+    }
+
+    (*root).parent = root;
+    VfsState::root = root;
+
+    seed();
+  }
+
+  /// The root directory.
+  function root(): *mut Fs::Node {
+    return VfsState::root;
+  }
+
+  /// Prints one line with the number of nodes and file bytes under the root.
+  function report(): void {
+    let mut nodes: u64 = 0;
+    let mut bytes: u64 = 0;
+
+    count(VfsState::root, &mut nodes as *mut u64, &mut bytes as *mut u64);
+
+    Drivers::Console::write("vfs: ");
+    Drivers::Console::writeDecimal(nodes);
+    Drivers::Console::write(" nodes, ");
+    Drivers::Console::writeDecimal(bytes);
+    Drivers::Console::writeLine(" bytes in files, seeded from the initramfs");
+  }
+
+  /// Finds the node the `length` bytes of `path` name, starting at `base`
+  /// for a relative path and at the root for an absolute one. On `OK`
+  /// writes the node to `result`. See the module header for the rules.
+  function lookup(base: *mut Fs::Node, path: *u8, length: u64, result: *mut *mut Fs::Node): u64 {
+    if (length >= PATH_MAX) {
+      return NAME_TOO_LONG;
+    }
+
+    let mut node: *mut Fs::Node = base;
+
+    if (length > 0 && *path == SLASH) {
+      node = VfsState::root;
+    }
+
+    let mut position: u64 = 0;
+
+    while (position < length) {
+      while (position < length && *(path + position) == SLASH) {
+        position += 1;
+      }
+
+      let start: u64 = position;
+
+      while (position < length && *(path + position) != SLASH) {
+        position += 1;
+      }
+
+      let componentLength: u64 = position - start;
+
+      if (componentLength == 0) {
+        continue;
+      }
+
+      if (componentLength > NAME_MAX) {
+        return NAME_TOO_LONG;
+      }
+
+      if ((*node).kind != DIRECTORY) {
+        return NOT_DIRECTORY;
+      }
+
+      let component: *u8 = path + start;
+
+      if (isDot(component, componentLength)) {
+        continue;
+      }
+
+      if (isDotDot(component, componentLength)) {
+        node = (*node).parent;
+        continue;
+      }
+
+      let next: *mut Fs::Node = findChild(node, component, componentLength);
+
+      if (next == null) {
+        return NOT_FOUND;
+      }
+
+      node = next;
+    }
+
+    if (length > 0 && *(path + length - 1) == SLASH && (*node).kind != DIRECTORY) {
+      return NOT_DIRECTORY;
+    }
+
+    *result = node;
+
+    return OK;
+  }
+
+  /// Splits the `length` bytes of `path` into the directory that holds its
+  /// last component and that component. On `OK` writes the directory to
+  /// `parent`, and the offset and length of the last component in `path` to
+  /// `nameOffset` and `nameLength`. A path with no last component (`/`, `.`,
+  /// `..`, empty) is `INVALID`, since nothing can be created under such a
+  /// name. Trailing slashes are dropped: `mkdir a/` creates `a`.
+  function lookupParent(
+    base: *mut Fs::Node,
+    path: *u8,
+    length: u64,
+    parent: *mut *mut Fs::Node,
+    nameOffset: *mut u64,
+    nameLength: *mut u64
+  ): u64 {
+    if (length >= PATH_MAX) {
+      return NAME_TOO_LONG;
+    }
+
+    let mut end: u64 = length;
+
+    while (end > 0 && *(path + end - 1) == SLASH) {
+      end -= 1;
+    }
+
+    let mut start: u64 = end;
+
+    while (start > 0 && *(path + start - 1) != SLASH) {
+      start -= 1;
+    }
+
+    let componentLength: u64 = end - start;
+
+    if (componentLength == 0 || isDot(path + start, componentLength) || isDotDot(path + start, componentLength)) {
+      return INVALID;
+    }
+
+    if (componentLength > NAME_MAX) {
+      return NAME_TOO_LONG;
+    }
+
+    let mut directory: *mut Fs::Node = null;
+    let mut status: u64 = OK;
+
+    if (start == 0) {
+      directory = base;
+    } else {
+      status = lookup(base, path, start, &mut directory as *mut *mut Fs::Node);
+    }
+
+    if (status != OK) {
+      return status;
+    }
+
+    if ((*directory).kind != DIRECTORY) {
+      return NOT_DIRECTORY;
+    }
+
+    *parent = directory;
+    *nameOffset = start;
+    *nameLength = componentLength;
+
+    return OK;
+  }
+
+  /// The child of `directory` called by the `length` bytes at `name`, or
+  /// null.
+  function findChild(directory: *mut Fs::Node, name: *u8, length: u64): *mut Fs::Node {
+    let mut child: *mut Fs::Node = (*directory).firstChild;
+
+    while (child != null) {
+      if ((*child).nameLength == length && Lib::Mem::compare((*child).name as *u8, name, length) == 0) {
+        return child;
+      }
+
+      child = (*child).nextSibling;
+    }
+
+    return null;
+  }
+
+  /// Creates a node of `kind` called by the `length` bytes at `name` in
+  /// `directory`, with `mode`. On `OK` writes it to `result`. Returns
+  /// `EXISTS` when the name is taken, whatever its kind, `NOT_DIRECTORY`
+  /// when `directory` is a file, `INVALID` for an empty name, `.`, `..` or a
+  /// name with a slash, `NAME_TOO_LONG` and `NO_MEMORY`.
+  function create(
+    directory: *mut Fs::Node,
+    name: *u8,
+    length: u64,
+    kind: u64,
+    mode: u64,
+    result: *mut *mut Fs::Node
+  ): u64 {
+    if ((*directory).kind != DIRECTORY) {
+      return NOT_DIRECTORY;
+    }
+
+    if (length == 0 || isDot(name, length) || isDotDot(name, length) || hasSlash(name, length)) {
+      return INVALID;
+    }
+
+    if (length > NAME_MAX) {
+      return NAME_TOO_LONG;
+    }
+
+    if (findChild(directory, name, length) != null) {
+      return EXISTS;
+    }
+
+    let node: *mut Fs::Node = newNode(kind, name, length, mode);
+
+    if (node == null) {
+      return NO_MEMORY;
+    }
+
+    attach(directory, node);
+    *result = node;
+
+    return OK;
+  }
+
+  /// Removes `node`, a file or an empty directory, from its parent and frees
+  /// it with its name and owned data. Returns `NOT_EMPTY` for a directory
+  /// with children and `INVALID` for the root.
+  function remove(node: *mut Fs::Node): u64 {
+    if (node == VfsState::root) {
+      return INVALID;
+    }
+
+    if ((*node).kind == DIRECTORY && (*node).firstChild != null) {
+      return NOT_EMPTY;
+    }
+
+    let parent: *mut Fs::Node = (*node).parent;
+
+    if ((*parent).firstChild == node) {
+      (*parent).firstChild = (*node).nextSibling;
+    } else {
+      let mut previous: *mut Fs::Node = (*parent).firstChild;
+
+      while ((*previous).nextSibling != node) {
+        previous = (*previous).nextSibling;
+      }
+
+      (*previous).nextSibling = (*node).nextSibling;
+    }
+
+    (*parent).childCount -= 1;
+    freeNode(node);
+
+    return OK;
+  }
+
+  /// Copies up to `count` bytes of file `node` from `offset` to `buffer` and
+  /// writes the number copied to `copied`: 0 at or past the end of the file.
+  /// Returns `IS_DIRECTORY` for a directory.
+  function read(
+    node: *mut Fs::Node,
+    offset: u64,
+    buffer: *mut u8,
+    count: u64,
+    copied: *mut u64
+  ): u64 {
+    if ((*node).kind != FILE) {
+      return IS_DIRECTORY;
+    }
+
+    if (offset >= (*node).size) {
+      *copied = 0;
+      return OK;
+    }
+
+    let mut length: u64 = (*node).size - offset;
+
+    if (count < length) {
+      length = count;
+    }
+
+    Lib::Mem::copy(buffer, ((*node).data + offset) as *u8, length);
+    *copied = length;
+
+    return OK;
+  }
+
+  /// Writes the `count` bytes at `source` to file `node` at `offset`. The
+  /// file grows as needed, and a gap between the old end and `offset` reads
+  /// as zeros. The first write to a file whose data is in the archive copies
+  /// it to the heap. Returns `IS_DIRECTORY`, `NO_MEMORY`, or `INVALID` when
+  /// `offset + count` overflows.
+  function write(node: *mut Fs::Node, offset: u64, source: *u8, count: u64): u64 {
+    if ((*node).kind != FILE) {
+      return IS_DIRECTORY;
+    }
+
+    let end: u64 = offset + count;
+
+    if (end < offset) {
+      return INVALID;
+    }
+
+    let mut newSize: u64 = (*node).size;
+
+    if (end > newSize) {
+      newSize = end;
+    }
+
+    if (!reserve(node, newSize)) {
+      return NO_MEMORY;
+    }
+
+    if (offset > (*node).size) {
+      Lib::Mem::fill((*node).data + (*node).size, 0, offset - (*node).size);
+    }
+
+    Lib::Mem::copy((*node).data + offset, source, count);
+    (*node).size = newSize;
+
+    return OK;
+  }
+
+  /// Cuts file `node` to `length` bytes, or extends it with zeros. Returns
+  /// `IS_DIRECTORY` or `NO_MEMORY`.
+  function truncate(node: *mut Fs::Node, length: u64): u64 {
+    if ((*node).kind != FILE) {
+      return IS_DIRECTORY;
+    }
+
+    if (length > (*node).size) {
+      if (!reserve(node, length)) {
+        return NO_MEMORY;
+      }
+
+      Lib::Mem::fill((*node).data + (*node).size, 0, length - (*node).size);
+    }
+
+    (*node).size = length;
+
+    return OK;
+  }
+
+  /// The child of `directory` at `index` in the order they were added, or
+  /// null past the last one.
+  function child(directory: *mut Fs::Node, index: u64): *mut Fs::Node {
+    let mut node: *mut Fs::Node = (*directory).firstChild;
+    let mut position: u64 = 0;
+
+    while (node != null && position < index) {
+      node = (*node).nextSibling;
+      position += 1;
+    }
+
+    return node;
+  }
+
+  /// Makes sure file `node` owns a heap block of at least `size` bytes with
+  /// its current data in it. Returns false when the heap is exhausted; the
+  /// file is unchanged then.
+  function reserve(node: *mut Fs::Node, size: u64): boolean {
+    if ((*node).capacity >= size && (*node).capacity > 0) {
+      return true;
+    }
+
+    let mut capacity: u64 = MIN_CAPACITY;
+
+    while (capacity < size) {
+      capacity = capacity * 2;
+    }
+
+    let block: *mut u8 = Mm::Heap::allocate(capacity, 16);
+
+    if (block == null) {
+      return false;
+    }
+
+    if ((*node).size > 0) {
+      Lib::Mem::copy(block, (*node).data as *u8, (*node).size);
+    }
+
+    if ((*node).capacity > 0) {
+      Mm::Heap::free((*node).data);
+    }
+
+    (*node).data = block;
+    (*node).capacity = capacity;
+
+    return true;
+  }
+
+  /// Adds every member of the initramfs. Missing parent directories are
+  /// created, so the result does not depend on the member order. Panics on
+  /// a name used twice with different kinds or when the heap runs out.
+  function seed(): void {
+    let mut entry: Fs::TarEntry = Fs::TarEntry { kind: 0, mode: 0, data: null, size: 0, pathLength: 0, next: 0 };
+    let mut offset: u64 = 0;
+    let path: *mut u8 = &mut VfsState::path as *mut u8;
+
+    while (Fs::Tar::next(Fs::Initramfs::archive(), Fs::Initramfs::size(), offset, &mut entry as *mut Fs::TarEntry, path) == Fs::Tar::OK) {
+      if (entry.pathLength > 0) {
+        seedEntry(path as *u8, entry.pathLength, &mut entry as *mut Fs::TarEntry);
+      }
+
+      offset = entry.next;
+    }
+  }
+
+  /// Adds the member described by `entry` at the normalized `path`,
+  /// creating each missing directory on the way.
+  function seedEntry(path: *u8, length: u64, entry: *mut Fs::TarEntry): void {
+    let mut directory: *mut Fs::Node = VfsState::root;
+    let mut start: u64 = 0;
+
+    while (start < length) {
+      let mut end: u64 = start;
+
+      while (end < length && *(path + end) != SLASH) {
+        end += 1;
+      }
+
+      let isLast: boolean = end == length;
+      let mut kind: u64 = DIRECTORY;
+      let mut mode: u64 = DIRECTORY_MODE;
+
+      if (isLast) {
+        kind = (*entry).kind == Fs::Tar::FILE ? FILE : DIRECTORY;
+        mode = (*entry).mode;
+      }
+
+      let mut node: *mut Fs::Node = findChild(directory, path + start, end - start);
+
+      if (node == null) {
+        if (create(directory, path + start, end - start, kind, mode, &mut node as *mut *mut Fs::Node) != OK) {
+          @panic("vfs: cannot add an initramfs member");
+        }
+
+        if (isLast && kind == FILE) {
+          (*node).data = (*entry).data as *mut u8;
+          (*node).size = (*entry).size;
+        }
+      } else if ((*node).kind != kind) {
+        @panic("vfs: the initramfs names a path as a file and a directory");
+      }
+
+      directory = node;
+      start = end + 1;
+    }
+  }
+
+  /// Allocates a node with a heap copy of the name. Returns null when the
+  /// heap is exhausted.
+  function newNode(kind: u64, name: *u8, length: u64, mode: u64): *mut Fs::Node {
+    let node: *mut Fs::Node = Mm::Heap::allocate(@sizeOf<Fs::Node>(), 16) as *mut Fs::Node;
+
+    if (node == null) {
+      return null;
+    }
+
+    let mut copy: *mut u8 = null;
+
+    if (length > 0) {
+      copy = Mm::Heap::allocate(length, 1);
+
+      if (copy == null) {
+        Mm::Heap::free(node as *mut u8);
+        return null;
+      }
+
+      Lib::Mem::copy(copy, name, length);
+    }
+
+    (*node).kind = kind;
+    (*node).id = VfsState::nextId;
+    (*node).mode = mode;
+    (*node).name = copy;
+    (*node).nameLength = length;
+    (*node).parent = null;
+    (*node).firstChild = null;
+    (*node).nextSibling = null;
+    (*node).childCount = 0;
+    (*node).data = null;
+    (*node).size = 0;
+    (*node).capacity = 0;
+
+    VfsState::nextId += 1;
+
+    return node;
+  }
+
+  /// Frees a detached node, its name and the data it owns.
+  function freeNode(node: *mut Fs::Node): void {
+    if ((*node).capacity > 0) {
+      Mm::Heap::free((*node).data);
+    }
+
+    if ((*node).nameLength > 0) {
+      Mm::Heap::free((*node).name);
+    }
+
+    Mm::Heap::free(node as *mut u8);
+  }
+
+  /// Appends `node` to the children of `directory`.
+  function attach(directory: *mut Fs::Node, node: *mut Fs::Node): void {
+    (*node).parent = directory;
+
+    if ((*directory).firstChild == null) {
+      (*directory).firstChild = node;
+    } else {
+      let mut last: *mut Fs::Node = (*directory).firstChild;
+
+      while ((*last).nextSibling != null) {
+        last = (*last).nextSibling;
+      }
+
+      (*last).nextSibling = node;
+    }
+
+    (*directory).childCount += 1;
+  }
+
+  /// Adds to `nodes` and `bytes` the nodes and file bytes of the subtree at
+  /// `node`.
+  function count(node: *mut Fs::Node, nodes: *mut u64, bytes: *mut u64): void {
+    *nodes = *nodes + 1;
+    *bytes = *bytes + (*node).size;
+
+    let mut child: *mut Fs::Node = (*node).firstChild;
+
+    while (child != null) {
+      count(child, nodes, bytes);
+      child = (*child).nextSibling;
+    }
+  }
+
+  /// True when the `length` bytes at `name` are `.`.
+  function isDot(name: *u8, length: u64): boolean {
+    return length == 1 && *name == DOT;
+  }
+
+  /// True when the `length` bytes at `name` are `..`.
+  function isDotDot(name: *u8, length: u64): boolean {
+    return length == 2 && *name == DOT && *(name + 1) == DOT;
+  }
+
+  /// True when the `length` bytes at `name` contain a `/`.
+  function hasSlash(name: *u8, length: u64): boolean {
+    let mut index: u64 = 0;
+
+    while (index < length) {
+      if (*(name + index) == SLASH) {
+        return true;
+      }
+
+      index += 1;
+    }
+
+    return false;
+  }
+}

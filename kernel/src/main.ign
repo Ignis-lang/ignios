@@ -38,6 +38,7 @@
 //!   ├─ Mm::Heap::initialize + Tests::Heap . kernel heap                   mm/        doc 10
 //!   ├─ Fs::Initramfs::initialize + Tests::Initramfs
 //!   │  .................................... check the initramfs archive   fs/
+//!   ├─ Fs::Vfs::initialize + Tests::Vfs ... the file tree in memory      fs/
 //!   ├─ Tests::AddressSpace ................ private user halves           mm/        doc 14
 //!   ├─ Trap::Setup::initializeProtection +
 //!   │  Tests::Protection .................. SMEP and SMAP on, probed      trap/      doc 17
@@ -138,6 +139,9 @@ function kmain(): void {
   Fs::Initramfs::initialize();
   Fs::Initramfs::report();
   Tests::Initramfs::run();
+  Fs::Vfs::initialize();
+  Fs::Vfs::report();
+  Tests::Vfs::run();
 
   Tests::AddressSpace::run();
 

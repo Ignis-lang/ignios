@@ -1,0 +1,249 @@
+//!
+//! # File Tree Self-Test
+//!
+//! Checks the VFS seeded from the initramfs: path lookup, creation, reading
+//! and writing, removal and copy on write.
+//!
+//! ## Overview
+//!
+//! | Case                                  | Expected                                 |
+//! |---------------------------------------|------------------------------------------|
+//! | `/etc/motd`, `etc/motd` from the root | the seeded file and its text             |
+//! | `/etc/../etc//./motd`, `/..`          | the same file, the root                  |
+//! | `/etc/motd/`, `/etc/motd/x`           | `NOT_DIRECTORY`                          |
+//! | `/nope`                               | `NOT_FOUND`                              |
+//! | a 256-byte name, a 4096-byte path     | `NAME_TOO_LONG`                          |
+//! | `lookupParent` of `/t/new/`, `/`      | `t` and `new`, `INVALID`                 |
+//! | create a name twice                   | `EXISTS`, for a file and a directory     |
+//! | write at 0, then past the end         | the gap reads as zeros                   |
+//! | read in the middle, at and past the end | the bytes left, then 0 bytes           |
+//! | `truncate` down and up                | the size, zeros past the old end         |
+//! | children in order, a directory read   | creation order, `IS_DIRECTORY`           |
+//! | remove a non-empty directory          | `NOT_EMPTY`, then `OK` once emptied      |
+//! | the heap after removal                | back to where it started                 |
+//! | write to `/etc/motd`                  | the file changes, the archive does not   |
+
+import Drivers from "@drivers";
+import Fs from "@fs";
+import Lib from "@lib";
+import Mm from "@mm";
+
+namespace Tests::Vfs {
+  /// What `initramfs/etc/motd` holds.
+  const MOTD: str = "Welcome to IgniOS.\n";
+
+  /// Runs every case and prints one line. Panics on the first mismatch.
+  function run(): void {
+    checkLookup();
+
+    let heapBefore: u64 = Mm::Heap::allocatedBytes();
+
+    checkFiles();
+
+    if (Mm::Heap::allocatedBytes() != heapBefore) {
+      @panic("vfs self-test: removing the test tree did not free its memory");
+    }
+
+    checkCopyOnWrite();
+
+    Drivers::Console::writeLine("vfs: self-test ok, lookup, create, read, write, truncate, remove and copy on write");
+  }
+
+  /// Path rules on the seeded tree.
+  function checkLookup(): void {
+    let root: *mut Fs::Node = Fs::Vfs::root();
+    let motd: *mut Fs::Node = expectFound(root, "/etc/motd");
+
+    if ((*motd).kind != Fs::Vfs::FILE || (*motd).size != textLength(MOTD)) {
+      @panic("vfs self-test: /etc/motd is not the seeded file");
+    }
+
+    expectContents(motd, MOTD);
+
+    if (expectFound(root, "etc/motd") != motd || expectFound(root, "/etc/../etc//./motd") != motd) {
+      @panic("vfs self-test: equivalent paths found different nodes");
+    }
+
+    if (expectFound(root, "/..") != root || expectFound(root, "/") != root) {
+      @panic("vfs self-test: the root is not its own parent");
+    }
+
+    if ((*expectFound(root, "/bin/")).kind != Fs::Vfs::DIRECTORY) {
+      @panic("vfs self-test: /bin is not a directory");
+    }
+
+    expectFound(root, "/bin/hello");
+
+    expectLookup(root, "/etc/motd/", Fs::Vfs::NOT_DIRECTORY);
+    expectLookup(root, "/etc/motd/x", Fs::Vfs::NOT_DIRECTORY);
+    expectLookup(root, "/nope", Fs::Vfs::NOT_FOUND);
+    expectLookup(root, "/etc/nope/motd", Fs::Vfs::NOT_FOUND);
+
+    let long: *mut u8 = Mm::Heap::allocate(Fs::Vfs::PATH_MAX + 1, 16);
+    let mut found: *mut Fs::Node = null;
+
+    *long = 0x2F;
+    Lib::Mem::fill(long + 1, 'a' as i32, 256);
+
+    if (Fs::Vfs::lookup(root, long as *u8, 257, &mut found as *mut *mut Fs::Node) != Fs::Vfs::NAME_TOO_LONG) {
+      @panic("vfs self-test: a 256-byte name was accepted");
+    }
+
+    Lib::Mem::fill(long, 0x2F, Fs::Vfs::PATH_MAX);
+
+    if (Fs::Vfs::lookup(root, long as *u8, Fs::Vfs::PATH_MAX, &mut found as *mut *mut Fs::Node) != Fs::Vfs::NAME_TOO_LONG) {
+      @panic("vfs self-test: a 4096-byte path was accepted");
+    }
+
+    Mm::Heap::free(long);
+  }
+
+  /// Creation, reading, writing, truncation, children and removal in a
+  /// directory `/t` that the test removes again.
+  function checkFiles(): void {
+    let root: *mut Fs::Node = Fs::Vfs::root();
+    let mut directory: *mut Fs::Node = null;
+    let mut file: *mut Fs::Node = null;
+    let mut other: *mut Fs::Node = null;
+
+    expectStatus(Fs::Vfs::create(root, "t" as *u8, 1, Fs::Vfs::DIRECTORY, Fs::Vfs::DIRECTORY_MODE, &mut directory as *mut *mut Fs::Node), Fs::Vfs::OK, "create /t");
+    expectStatus(Fs::Vfs::create(directory, "a" as *u8, 1, Fs::Vfs::FILE, Fs::Vfs::FILE_MODE, &mut file as *mut *mut Fs::Node), Fs::Vfs::OK, "create /t/a");
+    expectStatus(Fs::Vfs::create(directory, "a" as *u8, 1, Fs::Vfs::FILE, Fs::Vfs::FILE_MODE, &mut other as *mut *mut Fs::Node), Fs::Vfs::EXISTS, "create /t/a twice");
+    expectStatus(Fs::Vfs::create(directory, "a" as *u8, 1, Fs::Vfs::DIRECTORY, Fs::Vfs::DIRECTORY_MODE, &mut other as *mut *mut Fs::Node), Fs::Vfs::EXISTS, "mkdir over /t/a");
+    expectStatus(Fs::Vfs::create(directory, ".." as *u8, 2, Fs::Vfs::FILE, Fs::Vfs::FILE_MODE, &mut other as *mut *mut Fs::Node), Fs::Vfs::INVALID, "create ..");
+    expectStatus(Fs::Vfs::create(file, "x" as *u8, 1, Fs::Vfs::FILE, Fs::Vfs::FILE_MODE, &mut other as *mut *mut Fs::Node), Fs::Vfs::NOT_DIRECTORY, "create inside a file");
+    expectStatus(Fs::Vfs::create(directory, "b" as *u8, 1, Fs::Vfs::DIRECTORY, Fs::Vfs::DIRECTORY_MODE, &mut other as *mut *mut Fs::Node), Fs::Vfs::OK, "create /t/b");
+
+    if (expectFound(root, "/t/a") != file) {
+      @panic("vfs self-test: /t/a is not the created file");
+    }
+
+    let mut parent: *mut Fs::Node = null;
+    let mut nameOffset: u64 = 0;
+    let mut nameLength: u64 = 0;
+
+    expectStatus(Fs::Vfs::lookupParent(root, "/t/new/" as *u8, 7, &mut parent as *mut *mut Fs::Node, &mut nameOffset as *mut u64, &mut nameLength as *mut u64), Fs::Vfs::OK, "lookupParent /t/new/");
+
+    if (parent != directory || nameOffset != 3 || nameLength != 3) {
+      @panic("vfs self-test: lookupParent split /t/new/ wrongly");
+    }
+
+    expectStatus(Fs::Vfs::lookupParent(root, "/" as *u8, 1, &mut parent as *mut *mut Fs::Node, &mut nameOffset as *mut u64, &mut nameLength as *mut u64), Fs::Vfs::INVALID, "lookupParent /");
+    expectStatus(Fs::Vfs::lookupParent(root, "/t/a/x" as *u8, 6, &mut parent as *mut *mut Fs::Node, &mut nameOffset as *mut u64, &mut nameLength as *mut u64), Fs::Vfs::NOT_DIRECTORY, "lookupParent /t/a/x");
+
+    expectStatus(Fs::Vfs::write(file, 0, "abc" as *u8, 3), Fs::Vfs::OK, "write abc");
+    expectStatus(Fs::Vfs::write(file, 5, "xy" as *u8, 2), Fs::Vfs::OK, "write xy at 5");
+
+    let data: *u8 = (*file).data as *u8;
+
+    if ((*file).size != 7 || Lib::Mem::compare(data, "abc" as *u8, 3) != 0 || *(data + 3) != 0 || *(data + 4) != 0 || Lib::Mem::compare(data + 5, "xy" as *u8, 2) != 0) {
+      @panic("vfs self-test: a write past the end left no zero gap");
+    }
+
+    let buffer: *mut u8 = Mm::Heap::allocate(16, 16);
+    let mut copied: u64 = 99;
+
+    expectStatus(Fs::Vfs::read(file, 6, buffer, 10, &mut copied as *mut u64), Fs::Vfs::OK, "read at 6");
+
+    if (copied != 1 || *buffer != ('y' as u8)) {
+      @panic("vfs self-test: a read near the end returned the wrong bytes");
+    }
+
+    expectStatus(Fs::Vfs::read(file, 7, buffer, 10, &mut copied as *mut u64), Fs::Vfs::OK, "read at the end");
+
+    if (copied != 0) {
+      @panic("vfs self-test: a read at the end returned bytes");
+    }
+
+    expectStatus(Fs::Vfs::read(directory, 0, buffer, 10, &mut copied as *mut u64), Fs::Vfs::IS_DIRECTORY, "read a directory");
+    Mm::Heap::free(buffer);
+
+    expectStatus(Fs::Vfs::truncate(file, 2), Fs::Vfs::OK, "truncate to 2");
+    expectStatus(Fs::Vfs::truncate(file, 4), Fs::Vfs::OK, "truncate to 4");
+
+    let cut: *u8 = (*file).data as *u8;
+
+    if ((*file).size != 4 || Lib::Mem::compare(cut, "ab" as *u8, 2) != 0 || *(cut + 2) != 0 || *(cut + 3) != 0) {
+      @panic("vfs self-test: truncate did not cut and zero-extend");
+    }
+
+    if (Fs::Vfs::child(directory, 0) != file || Fs::Vfs::child(directory, 1) != other || Fs::Vfs::child(directory, 2) != null || (*directory).childCount != 2) {
+      @panic("vfs self-test: children are not in creation order");
+    }
+
+    expectStatus(Fs::Vfs::remove(directory), Fs::Vfs::NOT_EMPTY, "remove a non-empty directory");
+    expectStatus(Fs::Vfs::remove(root), Fs::Vfs::INVALID, "remove the root");
+    expectStatus(Fs::Vfs::remove(file), Fs::Vfs::OK, "remove /t/a");
+    expectStatus(Fs::Vfs::remove(other), Fs::Vfs::OK, "remove /t/b");
+    expectStatus(Fs::Vfs::remove(directory), Fs::Vfs::OK, "remove /t");
+    expectLookup(root, "/t", Fs::Vfs::NOT_FOUND);
+  }
+
+  /// A write to a seeded file changes the file and leaves the archive
+  /// untouched. The file is restored afterwards.
+  function checkCopyOnWrite(): void {
+    let motd: *mut Fs::Node = expectFound(Fs::Vfs::root(), "/etc/motd");
+    let archived: *u8 = (*motd).data as *u8;
+
+    expectStatus(Fs::Vfs::write(motd, 0, "J" as *u8, 1), Fs::Vfs::OK, "write to /etc/motd");
+
+    if (*((*motd).data as *u8) != ('J' as u8) || *archived != ('W' as u8) || (*motd).capacity == 0) {
+      @panic("vfs self-test: a write to a seeded file reached the archive");
+    }
+
+    expectStatus(Fs::Vfs::write(motd, 0, "W" as *u8, 1), Fs::Vfs::OK, "restore /etc/motd");
+    expectContents(motd, MOTD);
+  }
+
+  /// Looks `path` up from `base` and panics unless it is found.
+  function expectFound(base: *mut Fs::Node, path: str): *mut Fs::Node {
+    let mut node: *mut Fs::Node = null;
+
+    if (Fs::Vfs::lookup(base, path as *u8, textLength(path), &mut node as *mut *mut Fs::Node) != Fs::Vfs::OK) {
+      Drivers::Console::writeLine(path);
+      @panic("vfs self-test: a path that exists was not found");
+    }
+
+    return node;
+  }
+
+  /// Looks `path` up from `base` and panics unless the status is `status`.
+  function expectLookup(base: *mut Fs::Node, path: str, status: u64): void {
+    let mut node: *mut Fs::Node = null;
+
+    if (Fs::Vfs::lookup(base, path as *u8, textLength(path), &mut node as *mut *mut Fs::Node) != status) {
+      Drivers::Console::writeLine(path);
+      @panic("vfs self-test: a lookup returned the wrong status");
+    }
+  }
+
+  /// Panics, naming `what`, unless `got` is `wanted`.
+  function expectStatus(got: u64, wanted: u64, what: str): void {
+    if (got != wanted) {
+      Drivers::Console::write("vfs self-test: ");
+      Drivers::Console::write(what);
+      Drivers::Console::write(" returned ");
+      Drivers::Console::writeDecimal(got);
+      Drivers::Console::writeLine("");
+      @panic("vfs self-test: unexpected status");
+    }
+  }
+
+  /// Panics unless file `node` holds exactly `text`.
+  function expectContents(node: *mut Fs::Node, text: str): void {
+    if ((*node).size != textLength(text) || Lib::Mem::compare((*node).data as *u8, text as *u8, (*node).size) != 0) {
+      @panic("vfs self-test: a file does not hold the expected text");
+    }
+  }
+
+  /// The length of `text` without its NUL.
+  function textLength(text: str): u64 {
+    let mut length: u64 = 0;
+
+    while (*(text as *u8 + length) != 0) {
+      length += 1;
+    }
+
+    return length;
+  }
+}

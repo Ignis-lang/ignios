@@ -1,7 +1,8 @@
 //!
 //! # Fs
 //!
-//! Files: the initramfs archive the kernel boots with.
+//! Files: the initramfs archive the kernel boots with and the tree of files
+//! built from it.
 //!
 //! ## Public API
 //!
@@ -9,6 +10,7 @@
 //! |-----------------|-----------------|-------------------------------------------------|
 //! | `Fs::Tar`       | `tar.ign`       | reads the members of a ustar archive, checked   |
 //! | `Fs::Initramfs` | `initramfs.ign` | finds the initramfs module and validates it     |
+//! | `Fs::Vfs`       | `vfs.ign`       | the file tree: lookup, create, read, write      |
 //!
 //! ## Dependencies
 //!
@@ -23,6 +25,7 @@
 
 import _ from "./initramfs";
 import _ from "./tar";
+import _ from "./vfs";
 
 /// Aggregate namespace of the file code. The files above contribute the
 /// sub-namespaces listed in the module header.
