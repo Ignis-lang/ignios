@@ -24,8 +24,8 @@
 //! | `Syscall::Linux`      | `linux/*.ign`   | numbers, errno values, the table and the handlers |
 //!
 //! The Linux files: `table.ign` (numbers and the table), `errno.ign` (errno
-//! values, `failure` and `errorFor`), `files.ign` (the file calls) and
-//! `nanosleep.ign`.
+//! values, `failure` and `errorFor`), `files.ign` (the file calls),
+//! `memory.ign` (`mmap` and `munmap`) and `nanosleep.ign`.
 //!
 //! ## Dependencies
 //!
@@ -48,6 +48,7 @@
 import _ from "./dispatch";
 import _ from "./linux/errno";
 import _ from "./linux/files";
+import _ from "./linux/memory";
 import _ from "./linux/nanosleep";
 import _ from "./linux/table";
 import _ from "./operation";

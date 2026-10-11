@@ -11,6 +11,7 @@
 //! | `Proc::Process`     | `process.ign`  | create, start, wait for, exit and kill processes          |
 //! | `Proc::Elf`         | `elf.ign`      | map the `PT_LOAD` segments of a static ELF64 into a space |
 //! | `Proc::Programs`    | `programs.ign` | run a program from the file tree with its arguments       |
+//! | `Proc::Memory`      | `memory.ign`   | the regions `mmap` adds and `munmap` removes             |
 //! | `Proc::LoadedImage` | `elf.ign`      | what the loader reports: entry point, segments, pages     |
 //!
 //! ## Dependencies
@@ -28,6 +29,7 @@
 //! process, and a fault in ring 3 kills it.
 
 import _ from "./elf";
+import _ from "./memory";
 import _ from "./process";
 import _ from "./programs";
 

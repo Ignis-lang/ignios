@@ -19,7 +19,7 @@
 //!                ▼
 //!            Syscall::dispatch(frame)
 //!                ├─ lookup(abi, frame.rax)     number -> operation (Operation::WRITE ...)
-//!                ├─ run the operation          arguments from rdi, rsi, rdx, r10
+//!                ├─ run the operation          arguments from rdi, rsi, rdx, r10, r8, r9
 //!                └─ frame.rax := result        value or -errno
 //!                │
 //!                ▼
@@ -47,6 +47,7 @@ import Proc from "@proc";
 import Sched from "@sched";
 import _ from "./linux/errno";
 import _ from "./linux/files";
+import _ from "./linux/memory";
 import _ from "./linux/nanosleep";
 import _ from "./linux/table";
 import _ from "./operation";
@@ -68,6 +69,8 @@ namespace Syscall {
     let second: u64 = (*frame).rsi;
     let third: u64 = (*frame).rdx;
     let fourth: u64 = (*frame).r10;
+    let fifth: u64 = (*frame).r8;
+    let sixth: u64 = (*frame).r9;
 
     if (operation == Operation::EXIT) {
       Proc::Process::exitCurrent(first & 0xFF);
@@ -91,6 +94,10 @@ namespace Syscall {
       (*frame).rax = Linux::readDirectory(first, second, third);
     } else if (operation == Operation::MAKE_DIRECTORY) {
       (*frame).rax = Linux::makeDirectoryAt(first, second, third);
+    } else if (operation == Operation::MAP) {
+      (*frame).rax = Linux::mmap(first, second, third, fourth, fifth, sixth);
+    } else if (operation == Operation::UNMAP) {
+      (*frame).rax = Linux::munmap(first, second);
     } else if (operation == Operation::GET_PID) {
       (*frame).rax = Proc::Process::currentId();
     } else if (operation == Operation::YIELD) {

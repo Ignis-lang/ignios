@@ -1,0 +1,284 @@
+//!
+//! # mmtest
+//!
+//! Ring 3 checks of `mmap` and `munmap`.
+//!
+//! ## Modes
+//!
+//! Without arguments the program runs every check and exits with the number
+//! of the first one that failed, 0 when all passed. With one argument it does
+//! one thing the kernel must stop, and the kernel kills it with SIGSEGV
+//! (status 139); exiting normally (status 1) means the kernel let it through.
+//!
+//! | Argument      | Does                                                   |
+//! |---------------|--------------------------------------------------------|
+//! | `write-read`  | writes to a `PROT_READ` mapping                        |
+//! | `use-unmapped`| reads a mapping after `munmap`                         |
+//! | `execute`     | jumps into a mapping without `PROT_EXEC`               |
+//! | `touch-none`  | reads a `PROT_NONE` mapping                            |
+//!
+//! ## Checks
+//!
+//! | Status | Check                                                                |
+//! |--------|----------------------------------------------------------------------|
+//! | 10-13  | an anonymous mapping: page aligned, in the mapping area, zeroed, writable |
+//! | 14     | a second mapping does not overlap the first                         |
+//! | 20-26  | `mmap` errors: length 0, unknown `prot` bit, write with execute, `MAP_SHARED`, no `MAP_PRIVATE`, `MAP_FIXED`, an unaligned offset |
+//! | 30-32  | `munmap` errors: unaligned address, length 0; a range with no mapping is 0 |
+//! | 40-42  | `munmap` of the middle page of three keeps the other two and their data |
+//! | 50-51  | a `PROT_READ` mapping reads as zeros; `read` into it is `-EFAULT`    |
+//! | 52     | `write` from a mapping works: the kernel sees it in the page tables |
+//! | 60     | the region table fills up: `-ENOMEM`, then every mapping is removed |
+
+import Args from "std::args";
+import Io from "std::io";
+import Sys from "std::sys";
+
+/// 4 KiB.
+const PAGE: u64 = 4096;
+
+/// The lowest address a mapping can start at.
+const MAP_BOTTOM: u64 = 0x0000100000000000;
+
+/// The end of the first mapping.
+const MAP_TOP: u64 = 0x00007F0000000000;
+
+/// The most mappings `checkLimit` asks for.
+const LIMIT_ATTEMPTS: u64 = 40;
+
+/// The mappings of `checkLimit`.
+record State {
+  /// Their addresses.
+  static mut addresses: u64[40];
+}
+
+/// Exits with `status` unless `got` equals `wanted`, after printing both.
+function expect(got: i64, wanted: i64, status: u64): void {
+  if (got != wanted) {
+    Io::print("mmtest: check ");
+    Io::printNumber(status as i64);
+    Io::print(" got ");
+    Io::printNumber(got);
+    Io::print(", expected ");
+    Io::printNumber(wanted);
+    Io::print("\n");
+    Sys::exit(status);
+  }
+}
+
+/// Exits with `status` unless `condition` holds.
+function require(condition: boolean, status: u64): void {
+  if (!condition) {
+    Io::print("mmtest: check ");
+    Io::printNumber(status as i64);
+    Io::print(" failed\n");
+    Sys::exit(status);
+  }
+}
+
+/// The byte at the user address `address`.
+function peek(address: u64): u8 {
+  return @readVolatile<u8>(@pointerFromInteger<*mut u8>(address));
+}
+
+/// Stores `value` at the user address `address`.
+function poke(address: u64, value: u8): void {
+  @writeVolatile<u8>(@pointerFromInteger<*mut u8>(address), value);
+}
+
+/// True when the `length` bytes at `address` are all zero.
+function isZero(address: u64, length: u64): boolean {
+  let mut offset: u64 = 0;
+
+  while (offset < length) {
+    if (peek(address + offset) != 0) {
+      return false;
+    }
+
+    offset += 1;
+  }
+
+  return true;
+}
+
+/// An anonymous mapping, read and written.
+function checkAnonymous(): void {
+  let first: i64 = Sys::mapAnonymous(2 * PAGE);
+
+  require(first > 0 && (first as u64) % PAGE == 0, 10);
+  require((first as u64) >= MAP_BOTTOM && (first as u64) + 2 * PAGE <= MAP_TOP, 11);
+  require(isZero(first as u64, 2 * PAGE), 12);
+
+  poke(first as u64, 0x5A);
+  poke(first as u64 + 2 * PAGE - 1, 0xA5);
+  require(peek(first as u64) == 0x5A && peek(first as u64 + 2 * PAGE - 1) == 0xA5, 13);
+
+  let second: i64 = Sys::mapAnonymous(100);
+
+  require(second > 0 && ((second as u64) + PAGE <= (first as u64) || (second as u64) >= (first as u64) + 2 * PAGE), 14);
+
+  expect(Sys::munmap(first as u64, 2 * PAGE), 0, 14);
+  expect(Sys::munmap(second as u64, 100), 0, 14);
+}
+
+/// The errors of `mmap` and `munmap`.
+function checkErrors(): void {
+  let anonymous: u64 = Sys::MAP_PRIVATE | Sys::MAP_ANONYMOUS;
+  let none: u64 = 0xFFFFFFFFFFFFFFFF;
+
+  expect(Sys::mmap(0, Sys::PROT_READ, anonymous, none, 0), 0 - Sys::EINVAL, 20);
+  expect(Sys::mmap(PAGE, 8, anonymous, none, 0), 0 - Sys::EINVAL, 21);
+  expect(Sys::mmap(PAGE, Sys::PROT_WRITE | Sys::PROT_EXEC, anonymous, none, 0), 0 - Sys::EINVAL, 22);
+  expect(Sys::mmap(PAGE, Sys::PROT_READ, Sys::MAP_SHARED | Sys::MAP_ANONYMOUS, none, 0), 0 - Sys::EINVAL, 23);
+  expect(Sys::mmap(PAGE, Sys::PROT_READ, Sys::MAP_ANONYMOUS, none, 0), 0 - Sys::EINVAL, 24);
+  expect(Sys::mmap(PAGE, Sys::PROT_READ, anonymous | Sys::MAP_FIXED, none, 0), 0 - Sys::EINVAL, 25);
+  expect(Sys::mmap(PAGE, Sys::PROT_READ, anonymous, none, 1), 0 - Sys::EINVAL, 26);
+
+  expect(Sys::munmap(MAP_BOTTOM + 1, PAGE), 0 - Sys::EINVAL, 30);
+  expect(Sys::munmap(MAP_BOTTOM, 0), 0 - Sys::EINVAL, 31);
+  expect(Sys::munmap(MAP_BOTTOM, PAGE), 0, 32);
+}
+
+/// `munmap` of the middle page of three splits the mapping.
+function checkSplit(): void {
+  let start: i64 = Sys::mapAnonymous(3 * PAGE);
+
+  require(start > 0, 40);
+
+  let base: u64 = start as u64;
+
+  poke(base, 1);
+  poke(base + PAGE, 2);
+  poke(base + 2 * PAGE, 3);
+
+  expect(Sys::munmap(base + PAGE, PAGE), 0, 41);
+  require(peek(base) == 1 && peek(base + 2 * PAGE) == 3, 42);
+
+  poke(base, 4);
+  poke(base + 2 * PAGE, 5);
+  require(peek(base) == 4 && peek(base + 2 * PAGE) == 5, 42);
+
+  expect(Sys::munmap(base, 3 * PAGE), 0, 42);
+}
+
+/// Protection as the kernel sees it: system calls validate user buffers
+/// through the page tables, so a mapping works as a buffer, and a read-only
+/// one cannot be a target.
+function checkProtection(): void {
+  let readOnly: i64 = Sys::mmap(PAGE, Sys::PROT_READ, Sys::MAP_PRIVATE | Sys::MAP_ANONYMOUS, 0xFFFFFFFFFFFFFFFF, 0);
+
+  require(readOnly > 0 && isZero(readOnly as u64, PAGE), 50);
+
+  let motd: i64 = Sys::open("/etc/motd" as *u8, Sys::O_RDONLY, 0);
+
+  expect(Sys::read(motd as u64, @pointerFromInteger<*mut u8>(readOnly as u64), 4), 0 - Sys::EFAULT, 51);
+
+  let writable: i64 = Sys::mapAnonymous(PAGE);
+
+  expect(Sys::read(motd as u64, @pointerFromInteger<*mut u8>(writable as u64), 19), 19, 52);
+  expect(Sys::write(Sys::STDOUT, @pointerFromInteger<*u8>(writable as u64), 19), 19, 52);
+
+  Sys::close(motd as u64);
+  expect(Sys::munmap(readOnly as u64, PAGE), 0, 52);
+  expect(Sys::munmap(writable as u64, PAGE), 0, 52);
+}
+
+/// The region table holds 32 regions: asking for more ends in `-ENOMEM`.
+function checkLimit(): void {
+  let addresses: *mut u64 = &mut State::addresses as *mut u64;
+  let mut count: u64 = 0;
+  let mut last: i64 = 0;
+
+  while (count < LIMIT_ATTEMPTS) {
+    last = Sys::mapAnonymous(PAGE);
+
+    if (last < 0) {
+      break;
+    }
+
+    *@pointerFromInteger<*mut u64>(@integerFromPointer(addresses) + count * 8) = last as u64;
+    count += 1;
+  }
+
+  expect(last, 0 - Sys::ENOMEM, 60);
+  expect(count as i64, 32, 60);
+
+  while (count > 0) {
+    count -= 1;
+    expect(Sys::munmap(*@pointerFromInteger<*u64>(@integerFromPointer(addresses) + count * 8), PAGE), 0, 60);
+  }
+}
+
+/// True when the NUL-terminated `text` is `word`.
+function modeIs(text: *u8, word: str): boolean {
+  let length: u64 = Args::length(text);
+  let mut index: u64 = 0;
+
+  while (index < length) {
+    if (*(text + index) != *(word as *u8 + index)) {
+      return false;
+    }
+
+    index += 1;
+  }
+
+  return *(word as *u8 + length) == 0;
+}
+
+/// Does the forbidden thing `mode` names. Returns only when the kernel let
+/// it happen.
+function misbehave(mode: *u8): u64 {
+  if (modeIs(mode, "write-read")) {
+    let address: i64 = Sys::mmap(PAGE, Sys::PROT_READ, Sys::MAP_PRIVATE | Sys::MAP_ANONYMOUS, 0xFFFFFFFFFFFFFFFF, 0);
+
+    poke(address as u64, 1);
+  } else if (modeIs(mode, "use-unmapped")) {
+    let address: i64 = Sys::mapAnonymous(PAGE);
+
+    Sys::munmap(address as u64, PAGE);
+    peek(address as u64);
+  } else if (modeIs(mode, "execute")) {
+    let address: i64 = Sys::mapAnonymous(PAGE);
+
+    poke(address as u64, 0xC3);
+    asm (address in rax) clobber(memory) { call rax }
+  } else if (modeIs(mode, "touch-none")) {
+    let address: i64 = Sys::mmap(PAGE, Sys::PROT_NONE, Sys::MAP_PRIVATE | Sys::MAP_ANONYMOUS, 0xFFFFFFFFFFFFFFFF, 0);
+
+    peek(address as u64);
+  } else {
+    Io::print("mmtest: unknown mode\n");
+    return 2;
+  }
+
+  Io::print("mmtest: the kernel allowed it\n");
+
+  return 1;
+}
+
+/// Called by `_start` with argc and argv.
+@externName("ignis_main")
+function main(count: u64, values: *u64): u64 {
+  if (count > 1) {
+    return misbehave(Args::get(values, 1));
+  }
+
+  checkAnonymous();
+  checkErrors();
+  checkSplit();
+  checkProtection();
+  checkLimit();
+
+  Io::print("mmtest: anonymous mappings, protection, munmap and their errors behave as on Linux\n");
+
+  return 0;
+}
+
+/// Prints the message and exits with status 101.
+@panicHandler
+function onPanic(message: str, file: str, line: u32): never {
+  Io::print("panic: ");
+  Io::print(message);
+  Io::print("\n");
+  Sys::exit(101);
+}

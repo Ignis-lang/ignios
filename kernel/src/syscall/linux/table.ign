@@ -46,6 +46,12 @@ namespace Syscall::Linux {
   /// `lseek`, number 8.
   const NUMBER_LSEEK: u64 = 8;
 
+  /// `mmap`, number 9.
+  const NUMBER_MMAP: u64 = 9;
+
+  /// `munmap`, number 11.
+  const NUMBER_MUNMAP: u64 = 11;
+
   /// `sched_yield`, number 24.
   const NUMBER_SCHED_YIELD: u64 = 24;
 
@@ -82,6 +88,8 @@ namespace Syscall::Linux {
     *(table + NUMBER_CLOSE) = Operation::CLOSE;
     *(table + NUMBER_FSTAT) = Operation::STAT;
     *(table + NUMBER_LSEEK) = Operation::SEEK;
+    *(table + NUMBER_MMAP) = Operation::MAP;
+    *(table + NUMBER_MUNMAP) = Operation::UNMAP;
     *(table + NUMBER_GETDENTS64) = Operation::READ_DIRECTORY;
     *(table + NUMBER_OPENAT) = Operation::OPEN;
     *(table + NUMBER_MKDIRAT) = Operation::MAKE_DIRECTORY;

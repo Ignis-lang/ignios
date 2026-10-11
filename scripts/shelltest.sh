@@ -66,6 +66,7 @@ fstest
 hello
 ls
 mkdir
+mmtest
 touch
 S0
 > mkdir /tmp

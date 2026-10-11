@@ -171,6 +171,30 @@ namespace Mm::AddressSpace {
     return frame;
   }
 
+  /// Unmaps the 4 KiB user page at `virtualAddress` and frees its frame.
+  /// Returns false and changes nothing when no 4 KiB user page is mapped
+  /// there. The address must be in the running space or a space that is not
+  /// running: the TLB entry is dropped only for the current one.
+  function freePage(root: u64, virtualAddress: u64): boolean {
+    if (virtualAddress >= USER_LIMIT) {
+      return false;
+    }
+
+    let entry: u64 = Mm::Vmm::leafEntryIn(root, virtualAddress);
+
+    if ((entry & Mm::Vmm::PRESENT) == 0 || (entry & Mm::Vmm::USER) == 0) {
+      return false;
+    }
+
+    if (!Mm::Vmm::unmapIn(root, virtualAddress)) {
+      return false;
+    }
+
+    Mm::Pmm::freeFrame(entry & Mm::Vmm::ADDRESS_MASK);
+
+    return true;
+  }
+
   /// True when the byte range lies entirely below `USER_LIMIT`.
   function isUserRange(address: u64, length: u64): boolean {
     if (address >= USER_LIMIT || length > USER_LIMIT - address) {

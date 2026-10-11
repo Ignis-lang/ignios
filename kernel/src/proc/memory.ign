@@ -1,0 +1,329 @@
+//!
+//! # Process Memory Mappings
+//!
+//! The regions a process adds to its address space at run time with `mmap`,
+//! and their removal with `munmap`.
+//!
+//! ## Overview
+//!
+//! Each process slot has a table of up to `MAX_REGIONS` regions: a start, a
+//! length and a protection. A region is a run of pages that `map` allocated
+//! and zeroed at once (no demand paging), and that `unmap` frees. The ELF
+//! image and the stack are not regions: `unmap` never touches them.
+//!
+//! ```text
+//!   0x00007FFFFFFFF000  STACK_TOP
+//!                       stack (8 pages)
+//!   0x00007F0000000000  MAP_TOP ── first region ends here
+//!                       region 1  ▲ regions are handed out downwards,
+//!                       region 2  │ one after the other, never reused
+//!                       ...
+//!   0x0000100000000000  MAP_BOTTOM: no region starts below this
+//!                       (free)
+//!   0x0000000000400000  ELF segments
+//! ```
+//!
+//! The next address only moves down: a freed range is not handed out again.
+//! The span holds about 110 TiB, so a process runs out of frames long before
+//! it runs out of addresses.
+//!
+//! ## Protection
+//!
+//! `READ`, `WRITE` and `EXECUTE` become page table bits: every region page is
+//! user accessible (x86_64 cannot map a present page that ring 3 cannot
+//! read), `WRITE` sets W, and no `EXECUTE` sets NX. A region without `READ`,
+//! `WRITE` and `EXECUTE` (`PROT_NONE`) maps no page at all, so any access
+//! faults. `WRITE` with `EXECUTE` is refused, the same rule as the ELF loader.
+//!
+//! ## Unmapping
+//!
+//! `unmap` frees every page of the range that lies in a region and trims the
+//! regions: a range that covers a whole region removes it, one at an end
+//! shortens it, one in the middle splits it in two (which needs a free table
+//! entry). Pages outside every region are left alone.
+//!
+//! The functions take the process slot, the address space and ABI-neutral
+//! arguments; `Syscall::Linux::mmap` translates the Linux flags.
+
+import Mm from "@mm";
+
+namespace Proc {
+  /// One mapped region of a process.
+  @cLayout
+  record Region {
+    /// The first byte, page aligned. 0 marks a free table entry.
+    public start: u64;
+
+    /// The length in bytes, a multiple of the page size.
+    public length: u64;
+
+    /// `Proc::Memory::READ`, `WRITE` and `EXECUTE` bits.
+    public protection: u64;
+  }
+}
+
+/// The region tables and the next address of every slot.
+record MemoryState {
+  /// `MAX_REGIONS` entries per slot, slot after slot. The size must be
+  /// `Proc::Process::MAX_PROCESSES * MAX_REGIONS`.
+  static mut regions: Proc::Region[256];
+
+  /// The end of the next region of each slot.
+  static mut nextEnd: u64[8];
+}
+
+/// The mapping API.
+namespace Proc::Memory {
+  /// Regions per process.
+  const MAX_REGIONS: u64 = 32;
+
+  /// The end of the first region.
+  const MAP_TOP: u64 = 0x00007F0000000000;
+
+  /// No region starts below this.
+  const MAP_BOTTOM: u64 = 0x0000100000000000;
+
+  /// 4 KiB.
+  const PAGE_SIZE: u64 = 4096;
+
+  /// The region can be read.
+  const READ: u64 = 1;
+
+  /// The region can be written.
+  const WRITE: u64 = 2;
+
+  /// The region can be executed.
+  const EXECUTE: u64 = 4;
+
+  /// The operation succeeded.
+  const OK: u64 = 0;
+
+  /// A malformed request: a length of 0 or one that overflows, a start that
+  /// is not page aligned, or `WRITE` with `EXECUTE`.
+  const INVALID: u64 = 1;
+
+  /// No frame or no address left.
+  const NO_MEMORY: u64 = 2;
+
+  /// The region table of the process is full.
+  const TOO_MANY: u64 = 3;
+
+  /// Gives `slot` an empty table and the first address. Called when a
+  /// process starts in the slot.
+  function reset(slot: u64): void {
+    let mut index: u64 = 0;
+
+    while (index < MAX_REGIONS) {
+      (*regionAt(slot, index)).start = 0;
+      index += 1;
+    }
+
+    *nextEndOf(slot) = MAP_TOP;
+  }
+
+  /// Maps a new region of `length` bytes, rounded up to whole pages, with
+  /// `protection` into `root`, the space of the process in `slot`, and
+  /// writes its start to `address`. The pages are zeroed, then the first
+  /// `sourceLength` bytes get a copy of the kernel bytes at `source` (a file
+  /// mapping; nothing is copied into a region without access). Returns `INVALID`, `NO_MEMORY` (nothing stays allocated) or
+  /// `TOO_MANY`.
+  function map(
+    slot: u64,
+    root: u64,
+    length: u64,
+    protection: u64,
+    source: *u8,
+    sourceLength: u64,
+    address: *mut u64
+  ): u64 {
+    if (length == 0 || length > MAP_TOP - MAP_BOTTOM || ((protection & WRITE) != 0 && (protection & EXECUTE) != 0)) {
+      return INVALID;
+    }
+
+    let rounded: u64 = (length + PAGE_SIZE - 1) / PAGE_SIZE * PAGE_SIZE;
+    let end: u64 = *nextEndOf(slot);
+
+    if (end - MAP_BOTTOM < rounded) {
+      return NO_MEMORY;
+    }
+
+    let entry: u64 = freeEntry(slot);
+
+    if (entry == MAX_REGIONS) {
+      return TOO_MANY;
+    }
+
+    let start: u64 = end - rounded;
+
+    if (protection != 0 && !populate(root, start, rounded, pageFlags(protection))) {
+      release(root, start, rounded);
+      return NO_MEMORY;
+    }
+
+    if (protection != 0 && sourceLength > 0 && !Mm::AddressSpace::loadBytes(root, start, source, sourceLength)) {
+      release(root, start, rounded);
+      return NO_MEMORY;
+    }
+
+    let region: *mut Proc::Region = regionAt(slot, entry);
+
+    (*region).start = start;
+    (*region).length = rounded;
+    (*region).protection = protection;
+    *nextEndOf(slot) = start;
+    *address = start;
+
+    return OK;
+  }
+
+  /// Removes `[address, address + length)`, `length` rounded up to whole
+  /// pages, from the regions of `slot` and frees their pages in `root`.
+  /// Returns `INVALID` for an unaligned address, a length of 0 or a range
+  /// that leaves the user half, and `TOO_MANY` when splitting a region needs
+  /// a table entry and none is free (nothing is changed then).
+  function unmap(slot: u64, root: u64, address: u64, length: u64): u64 {
+    if (length == 0 || address % PAGE_SIZE != 0 || !Mm::AddressSpace::isUserRange(address, length)) {
+      return INVALID;
+    }
+
+    let end: u64 = address + (length + PAGE_SIZE - 1) / PAGE_SIZE * PAGE_SIZE;
+
+    if (needsSplit(slot, address, end) && freeEntry(slot) == MAX_REGIONS) {
+      return TOO_MANY;
+    }
+
+    let mut index: u64 = 0;
+
+    while (index < MAX_REGIONS) {
+      let region: *mut Proc::Region = regionAt(slot, index);
+      let regionStart: u64 = (*region).start;
+      let regionEnd: u64 = regionStart + (*region).length;
+
+      if (regionStart != 0 && regionStart < end && address < regionEnd) {
+        let cutStart: u64 = address > regionStart ? address : regionStart;
+        let cutEnd: u64 = end < regionEnd ? end : regionEnd;
+
+        release(root, cutStart, cutEnd - cutStart);
+
+        if (cutStart == regionStart && cutEnd == regionEnd) {
+          (*region).start = 0;
+        } else if (cutStart == regionStart) {
+          (*region).start = cutEnd;
+          (*region).length = regionEnd - cutEnd;
+        } else if (cutEnd == regionEnd) {
+          (*region).length = cutStart - regionStart;
+        } else {
+          let tail: *mut Proc::Region = regionAt(slot, freeEntry(slot));
+
+          (*tail).start = cutEnd;
+          (*tail).length = regionEnd - cutEnd;
+          (*tail).protection = (*region).protection;
+          (*region).length = cutStart - regionStart;
+        }
+      }
+
+      index += 1;
+    }
+
+    return OK;
+  }
+
+  /// The number of regions `slot` has.
+  function regionCount(slot: u64): u64 {
+    let mut count: u64 = 0;
+    let mut index: u64 = 0;
+
+    while (index < MAX_REGIONS) {
+      if ((*regionAt(slot, index)).start != 0) {
+        count += 1;
+      }
+
+      index += 1;
+    }
+
+    return count;
+  }
+
+  /// True when `[start, end)` falls strictly inside one region, so removing
+  /// it leaves a piece on each side.
+  function needsSplit(slot: u64, start: u64, end: u64): boolean {
+    let mut index: u64 = 0;
+
+    while (index < MAX_REGIONS) {
+      let region: *mut Proc::Region = regionAt(slot, index);
+
+      if ((*region).start != 0 && (*region).start < start && end < (*region).start + (*region).length) {
+        return true;
+      }
+
+      index += 1;
+    }
+
+    return false;
+  }
+
+  /// Allocates a zeroed frame for every page of `[start, start + length)`.
+  /// Returns false at the first page that fails; the caller frees the rest.
+  function populate(root: u64, start: u64, length: u64, flags: u64): boolean {
+    let mut offset: u64 = 0;
+
+    while (offset < length) {
+      if (Mm::AddressSpace::allocatePage(root, start + offset, flags) == Mm::Pmm::NO_FRAME) {
+        return false;
+      }
+
+      offset += PAGE_SIZE;
+    }
+
+    return true;
+  }
+
+  /// Frees every mapped page of `[start, start + length)`.
+  function release(root: u64, start: u64, length: u64): void {
+    let mut offset: u64 = 0;
+
+    while (offset < length) {
+      Mm::AddressSpace::freePage(root, start + offset);
+      offset += PAGE_SIZE;
+    }
+  }
+
+  /// The page table flags of a protection: W for `WRITE`, NX unless
+  /// `EXECUTE`. The U/S bit is added by `Mm::AddressSpace`.
+  function pageFlags(protection: u64): u64 {
+    let mut flags: u64 = 0;
+
+    if ((protection & WRITE) != 0) {
+      flags = flags | Mm::Vmm::WRITABLE;
+    }
+
+    if ((protection & EXECUTE) == 0) {
+      flags = flags | Mm::Vmm::NO_EXECUTE;
+    }
+
+    return flags;
+  }
+
+  /// The first free table entry of `slot`, or `MAX_REGIONS`.
+  function freeEntry(slot: u64): u64 {
+    let mut index: u64 = 0;
+
+    while (index < MAX_REGIONS && (*regionAt(slot, index)).start != 0) {
+      index += 1;
+    }
+
+    return index;
+  }
+
+  /// Entry `index` of the table of `slot`.
+  function regionAt(slot: u64, index: u64): *mut Proc::Region {
+    let base: u64 = @integerFromPointer(&mut MemoryState::regions as *mut Proc::Region);
+
+    return @pointerFromInteger<*mut Proc::Region>(base + (slot * MAX_REGIONS + index) * @sizeOf<Proc::Region>());
+  }
+
+  /// The next end address of `slot`.
+  function nextEndOf(slot: u64): *mut u64 {
+    return @pointerFromInteger<*mut u64>(@integerFromPointer(&mut MemoryState::nextEnd as *mut u64) + slot * 8);
+  }
+}

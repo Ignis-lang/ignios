@@ -53,6 +53,12 @@ export namespace Sys {
   /// Linux system call number 8.
   const LSEEK: u64 = 8;
 
+  /// Linux system call number 9.
+  const MMAP: u64 = 9;
+
+  /// Linux system call number 11.
+  const MUNMAP: u64 = 11;
+
   /// Linux system call number 217.
   const GETDENTS64: u64 = 217;
 
@@ -126,11 +132,44 @@ export namespace Sys {
   /// `lseek` from the end.
   const SEEK_END: u64 = 2;
 
+  /// `mmap` protection: no access.
+  const PROT_NONE: u64 = 0;
+
+  /// `mmap` protection: read.
+  const PROT_READ: u64 = 1;
+
+  /// `mmap` protection: write.
+  const PROT_WRITE: u64 = 2;
+
+  /// `mmap` protection: execute.
+  const PROT_EXEC: u64 = 4;
+
+  /// `mmap` flag: shared (refused by IgniOS).
+  const MAP_SHARED: u64 = 0x01;
+
+  /// `mmap` flag: private.
+  const MAP_PRIVATE: u64 = 0x02;
+
+  /// `mmap` flag: at exactly this address (refused by IgniOS).
+  const MAP_FIXED: u64 = 0x10;
+
+  /// `mmap` flag: not backed by a file.
+  const MAP_ANONYMOUS: u64 = 0x20;
+
   /// No such file or directory.
   const ENOENT: i64 = 2;
 
+  /// Out of memory.
+  const ENOMEM: i64 = 12;
+
+  /// Permission denied.
+  const EACCES: i64 = 13;
+
   /// File exists.
   const EEXIST: i64 = 17;
+
+  /// No such device.
+  const ENODEV: i64 = 19;
 
   /// Not a directory.
   const ENOTDIR: i64 = 20;
@@ -183,6 +222,19 @@ export namespace Sys {
   /// because `syscall` overwrites RCX.
   function call4(number: u64, first: u64, second: u64, third: u64, fourth: u64): i64 {
     return asm (number in rax, first in rdi, second in rsi, third in rdx, fourth in r10) -> (result: i64 in rax) clobber(rcx, r11, memory) { syscall };
+  }
+
+  /// A system call with six arguments: R10, R8 and R9 carry the last three.
+  function call6(
+    number: u64,
+    first: u64,
+    second: u64,
+    third: u64,
+    fourth: u64,
+    fifth: u64,
+    sixth: u64
+  ): i64 {
+    return asm (number in rax, first in rdi, second in rsi, third in rdx, fourth in r10, fifth in r8, sixth in r9) -> (result: i64 in rax) clobber(rcx, r11, memory) { syscall };
   }
 
   /// Writes `count` bytes at `buffer` to descriptor `descriptor`. Returns the
@@ -271,10 +323,29 @@ export namespace Sys {
   }
 
   /// The text Linux's `strerror` gives for a negated errno `result`, for
+  /// `mmap(0, length, prot, flags, fd, offset)`: the address of the new
+  /// region, or -errno. The kernel picks the address.
+  function mmap(length: u64, protection: u64, flags: u64, descriptor: u64, offset: u64): i64 {
+    return call6(MMAP, 0, length, protection, flags, descriptor, offset);
+  }
+
+  /// `mmap` of `length` zeroed private bytes that can be read and written.
+  function mapAnonymous(length: u64): i64 {
+    return mmap(length, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, 0xFFFFFFFFFFFFFFFF, 0);
+  }
+
+  /// `munmap(addr, length)`: 0 or -errno.
+  function munmap(address: u64, length: u64): i64 {
+    return call2(MUNMAP, address, length);
+  }
+
   /// the errors the file calls return.
   function errorText(result: i64): str {
     return match (0 - result) {
       ENOENT -> "No such file or directory",
+      ENOMEM -> "Cannot allocate memory",
+      EACCES -> "Permission denied",
+      ENODEV -> "No such device",
       EBADF -> "Bad file descriptor",
       EFAULT -> "Bad address",
       EEXIST -> "File exists",

@@ -66,6 +66,7 @@ import Lib from "@lib";
 import Mm from "@mm";
 import Sched from "@sched";
 import _ from "./elf";
+import _ from "./memory";
 
 /// One entry of the process table.
 @cLayout
@@ -353,6 +354,8 @@ namespace Proc::Process {
     (*process).stackPointer = stackPointer;
     (*process).status = 0;
     (*process).abi = ABI_LINUX;
+
+    Proc::Memory::reset(slot);
 
     if (Fs::Files::openStandard(slot) != Fs::Vfs::OK) {
       (*process).state = FREE;

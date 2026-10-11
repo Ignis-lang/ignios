@@ -45,7 +45,7 @@ Each subsystem is a directory under `kernel/src/` with a `mod.ign` facade. The f
 | `apic/` | `Apic` | `@apic` | Acpi, Arch, Drivers, Mm | `Lapic`, `Ioapic` |
 | `time/` | `Time` | `@time` | Apic, Arch, Drivers | `Timer` |
 | `sched/` | `Sched` | `@sched` | Arch, Mm, Time | `Thread`, `Scheduler` |
-| `proc/` | `Proc` | `@proc` | Arch, Boot, Drivers, Fs, Lib, Mm, Sched | `Process`, `Elf`, `Programs` |
+| `proc/` | `Proc` | `@proc` | Arch, Boot, Drivers, Fs, Lib, Mm, Sched | `Process`, `Elf`, `Programs`, `Memory` |
 | `syscall/` | `Syscall` | `@syscall` | Arch, Drivers, Fs, Lib, Mm, Proc, Sched, Time | `Operation`, `Linux` |
 | `trap/` | `Trap` | `@trap` | Apic, Arch, Drivers, Proc, Sched, Time | `Exception`, `Setup`, the dispatcher |
 | `shell/` | `Shell` | `@shell` | Arch, Drivers, Lib, Proc, Sched, Time | `Terminal`, `Commands`, `ThreadCommands` |
@@ -205,6 +205,8 @@ Docs 14 and 15.
 
 **`mm/modules.ign` and `proc/programs.ign`.** `Mm::Modules` maps the Limine modules and finds one by its configuration string; the only one is the initramfs. `Proc::Programs::run` splits a command line into arguments, looks the program up in the file tree (`/bin/NAME` for a name without a slash) and starts it. `Proc::Process::buildStack` writes the Linux initial stack: argc, argv, an empty envp, the auxiliary vector and the strings, with the diagram in its comment.
 
+**`proc/memory.ign` and `syscall/linux/memory.ign`.** `mmap` and `munmap`. `Proc::Memory` keeps up to 32 regions per process, hands out addresses downwards from `0x7F0000000000`, allocates and zeroes every page at `mmap` time, and turns the protection into page table bits (W for write, NX unless execute, nothing mapped for `PROT_NONE`). `unmap` trims or splits regions and frees their pages; it never touches the ELF image or the stack. The Linux side checks the arguments (the header has the table), copies a file for a private file mapping, and refuses `MAP_SHARED`, `MAP_FIXED` and write with execute. `user/mmtest` checks all of it from ring 3. Doc 20.
+
 **`user/`.** The user side. `lib/start.S` is `_start`, the entry point of every program: it reads argc and argv from the initial stack and calls the program's `main`, because a compiled function cannot start on a stack that holds no return address. `lib/sys.ign` wraps the `syscall` instruction, `lib/io.ign` prints, `lib/args.ign` reads argv, and `hello/src/main.ign` is the first program. `user/user.ld` places programs at `0x400000`.
 
 ## Part 10. Files
@@ -229,7 +231,7 @@ Doc 19.
 
 ## Part 11. Boot self-tests
 
-**`tests/`.** One file per check, run by `kmain` where the subsystem is ready. Each prints one line and panics on the first violation, so a boot that continues has passed it. The tests use only the public functions of the subsystems. `pmm.ign`, `vmm.ign`, `heap.ign`, `address_space.ign`, `timer.ign` and `context.ign` check the primitives, `initramfs.ign` feeds the ustar reader one malformed header per error code, `vfs.ign` walks the path rules and every status code of the file tree, `user.ign` also runs `/bin/fstest` and the programs `run` must refuse, `address_space.ign` including a 2 MiB user page. `protection.ign` checks that SMAP and SMEP fault. `scheduler.ign` runs round-robin order, sleeping, a full table, one address space per thread and preemption of threads that never yield. `user.ign` and `arch/x86_64/user_test_asm.S` hold sixteen throwaway ring 3 programs. Seven behave (exit, registers, spin, a spin with RFLAGS.AC set, system calls, the x87 and SSE check that runs as two processes, and a 200 ms nap that `wait` must block on) and nine do something forbidden. The kernel must kill each of the nine with the right status. `cpu_local.ign` runs last and checks that every way in and out of ring 3 left the GS bases balanced.
+**`tests/`.** One file per check, run by `kmain` where the subsystem is ready. Each prints one line and panics on the first violation, so a boot that continues has passed it. The tests use only the public functions of the subsystems. `pmm.ign`, `vmm.ign`, `heap.ign`, `address_space.ign`, `timer.ign` and `context.ign` check the primitives, `initramfs.ign` feeds the ustar reader one malformed header per error code, `vfs.ign` walks the path rules and every status code of the file tree, `user.ign` also runs `/bin/fstest`, `/bin/mmtest` with its four forbidden accesses, and the programs `run` must refuse, `address_space.ign` including a 2 MiB user page. `protection.ign` checks that SMAP and SMEP fault. `scheduler.ign` runs round-robin order, sleeping, a full table, one address space per thread and preemption of threads that never yield. `user.ign` and `arch/x86_64/user_test_asm.S` hold sixteen throwaway ring 3 programs. Seven behave (exit, registers, spin, a spin with RFLAGS.AC set, system calls, the x87 and SSE check that runs as two processes, and a 200 ms nap that `wait` must block on) and nine do something forbidden. The kernel must kill each of the nine with the right status. `cpu_local.ign` runs last and checks that every way in and out of ring 3 left the GS bases balanced.
 
 ## Part 12. Scripts
 
@@ -247,7 +249,10 @@ Paging is set up in `mm/vmm.ign`. The kernel uses one PML4 entry per region so t
 0x0000000000400000  ├──────────────────────────────────────────┤
                     │ user program: text, rodata, data, bss    │  PML4 0..255
                     │ (from the ELF, one region per segment)   │  private to each
-0x00007FFFFFFF7000  ├──────────────────────────────────────────┤  process
+0x0000100000000000  ├──────────────────────────────────────────┤  process
+                    │ mmap regions, handed out downwards from  │
+                    │ 0x00007F0000000000 (Proc::Memory)        │
+0x00007FFFFFFF7000  ├──────────────────────────────────────────┤
                     │ user stack: 8 pages, grows down          │
 0x00007FFFFFFFF000  ├──────────────────────────────────────────┤
                     │ USER_LIMIT: this page is never mapped    │
@@ -359,9 +364,9 @@ vmm: self-test ok
 `Tests::Vmm::run` mapped a frame at a test address, wrote through it, read it through the direct map, and unmapped it.
 
 ```text
-modules: initramfs is /initramfs.tar, 92160 bytes at 0xffff80000a0ce000
+modules: initramfs is /initramfs.tar, 102400 bytes at 0xffff80000a0cb000
 ```
-The Limine module from `boot/limine.conf`. `initramfs` is the `module_string`, `/initramfs.tar` the path. `Mm::Modules::initialize` mapped its pages read only. The address is in the direct map, so the file sits at physical `0x0a0ce000`. Doc 15.
+The Limine module from `boot/limine.conf`. `initramfs` is the `module_string`, `/initramfs.tar` the path. `Mm::Modules::initialize` mapped its pages read only. The address is in the direct map, so the file sits at physical `0x0a0cb000`. Doc 15.
 
 ```text
 heap: self-test ok, 1092 KiB mapped, 0 bytes in use
@@ -369,16 +374,16 @@ heap: self-test ok, 1092 KiB mapped, 0 bytes in use
 `Tests::Heap::run` checked alignment, reuse, merging, growth (it allocates 1 MiB) and the compiler allocation handlers. 1092 KiB of heap pages stayed mapped and every block was freed. Doc 10.
 
 ```text
-initramfs: 92160 bytes, 7 files with 75315 bytes of data, 3 directories
+initramfs: 102400 bytes, 8 files with 88483 bytes of data, 3 directories
 initramfs: self-test ok, 6 malformed headers refused, 2 valid ones read, etc/motd read back
 ```
-`Fs::Initramfs::initialize` walked the archive: `etc/motd` and the six programs in `bin` (`cat`, `fstest`, `hello`, `ls`, `mkdir`, `touch`) are the files, and `.`, `bin` and `etc` the directories. The size is a multiple of 10240 bytes because tar pads the archive to whole records. `Tests::Initramfs::run` then fed the reader one broken header per error code (checksum, magic, a non-octal number, a `..` path, a symbolic link, data past the end), a file and a directory with a prefix, and compared `etc/motd` with the text it should hold.
+`Fs::Initramfs::initialize` walked the archive: `etc/motd` and the seven programs in `bin` (`cat`, `fstest`, `hello`, `ls`, `mkdir`, `mmtest`, `touch`) are the files, and `.`, `bin` and `etc` the directories. The size is a multiple of 10240 bytes because tar pads the archive to whole records. `Tests::Initramfs::run` then fed the reader one broken header per error code (checksum, magic, a non-octal number, a `..` path, a symbolic link, data past the end), a file and a directory with a prefix, and compared `etc/motd` with the text it should hold.
 
 ```text
-vfs: 12 nodes, 75315 bytes in files, seeded from the initramfs
+vfs: 13 nodes, 88483 bytes in files, seeded from the initramfs
 vfs: self-test ok, lookup, create, read, write, truncate, remove and copy on write
 ```
-`Fs::Vfs::initialize` built the tree: the root, `bin` with its six programs, `etc` and `etc/motd` from the archive, then `dev` and the device node `dev/console`. The file bytes are the same 75315 as in the archive, because nothing was copied. `Tests::Vfs::run` checked every path rule, created, wrote, read, truncated and removed a test directory `/t` and checked that the heap returned to where it was, then wrote to `/etc/motd` to check that the write copied the file and left the archive alone.
+`Fs::Vfs::initialize` built the tree: the root, `bin` with its seven programs, `etc` and `etc/motd` from the archive, then `dev` and the device node `dev/console`. The file bytes are the same 88483 as in the archive, because nothing was copied. `Tests::Vfs::run` checked every path rule, created, wrote, read, truncated and removed a test directory `/t` and checked that the heap returned to where it was, then wrote to `/etc/motd` to check that the write copied the file and left the archive alone.
 
 ```text
 address space: self-test ok, private user half, shared kernel half, frames returned
@@ -625,6 +630,22 @@ process 20 exited with status 0
 user: fstest passed, and removing /fstest gave back every byte it used
 ```
 `Tests::User::runFiles` ran `/bin/fstest` (`user/fstest/src/main.ign`). Its data segment has no file bytes and 4753 bytes of memory: it is all `.bss`, the buffers of the checks. The program went through every file system call from ring 3: `openat` of `/etc/motd` gave descriptor 3, the first one after the console's 0, 1 and 2; reads, seeks, `fstat`; every `openat` error; `mkdirat` of `/fstest`; creating, appending and truncating `/fstest/a`; a path relative to a directory descriptor; `getdents64` (`.`, `..`, `a`, `b`); the limit of 16 descriptors; and the console as a character device. Its exit status would have named the first check that failed. The test then removed `/fstest` with `Fs::Vfs::remove` and checked that the heap and the PMM were back where they were before the program started. Doc 15.
+
+```text
+Welcome to IgniOS.
+mmtest: anonymous mappings, protection, munmap and their errors behave as on Linux
+process 21 exited with status 0
+process 22 faulted: #PF Page Fault at rip 0x00000000004002d5, error 0x0000000000000007, address 0x00007efffffff000
+process 22 killed, status 139
+process 23 faulted: #PF Page Fault at rip 0x000000000040047f, error 0x0000000000000004, address 0x00007efffffff000
+process 23 killed, status 139
+process 24 faulted: #PF Page Fault at rip 0x00007efffffff000, error 0x0000000000000015, address 0x00007efffffff000
+process 24 killed, status 139
+process 25 faulted: #PF Page Fault at rip 0x00000000004004ce, error 0x0000000000000004, address 0x00007efffffff000
+process 25 killed, status 139
+user: mmtest passed, writing read-only, using unmapped, executing non-exec and touching PROT_NONE memory were killed, no frame leaked
+```
+`Tests::User::runMemory` ran `/bin/mmtest` (the loader's `elf:` lines left out). The first line is `/etc/motd`, which the program read into a mapping and wrote from it, to show that system calls take mapped memory as a buffer. Then the program ran four more times with an argument, each one doing something the page tables must stop, and each one was killed. Every first mapping of a process is the page below `0x7F0000000000`, `0x7EFFFFFFF000`. The error codes say why: `0x7` is a write to a present read-only user page, `0x4` a user read of a page that is not present (unmapped, or `PROT_NONE`, which maps nothing), `0x15` an instruction fetch from a no-execute page; `rip` equal to the address is the jump into the mapping. The PMM free count was the same afterwards. Doc 20.
 
 ```text
 cpu local: self-test ok, after ring 3 the kernel GS base is the per-CPU block and the user one is 0

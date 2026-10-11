@@ -1,0 +1,161 @@
+//!
+//! # Linux Memory System Calls
+//!
+//! `mmap` and `munmap` on top of `Proc::Memory`.
+//!
+//! ## Overview
+//!
+//! `mmap(addr, length, prot, flags, fd, offset)` maps a new region and
+//! returns its address. Two kinds are supported, both private:
+//!
+//! | Kind                        | Flags                         | Contents                                   |
+//! |-----------------------------|-------------------------------|--------------------------------------------|
+//! | anonymous                   | `MAP_PRIVATE \| MAP_ANONYMOUS` | zeros                                      |
+//! | private copy of a file      | `MAP_PRIVATE`, an open `fd`   | the file from `offset`, zeros past its end |
+//!
+//! A file mapping is a copy made at `mmap` time: writes to it never reach
+//! the file, and later writes to the file are not seen through it. Linux
+//! makes no promise about the second point for a private mapping either.
+//!
+//! ## Arguments
+//!
+//! | Argument | Rule                                                              | Error        |
+//! |----------|-------------------------------------------------------------------|--------------|
+//! | `addr`   | a hint, ignored; the kernel picks the address                     |              |
+//! | `length` | not 0; rounded up to whole pages                                  | `-EINVAL`    |
+//! | `prot`   | `PROT_READ` 1, `PROT_WRITE` 2, `PROT_EXEC` 4, or `PROT_NONE` 0; not write and execute together | `-EINVAL` |
+//! | `flags`  | `MAP_PRIVATE` 2; `MAP_ANONYMOUS` `0x20` optional; `MAP_SHARED` 1 and `MAP_FIXED` `0x10` are not supported | `-EINVAL` |
+//! | `fd`     | ignored with `MAP_ANONYMOUS`; otherwise open, a regular file, opened for reading | `-EBADF`, `-ENODEV`, `-EACCES` |
+//! | `offset` | a multiple of the page size                                       | `-EINVAL`    |
+//!
+//! Running out of frames or of region table entries is `-ENOMEM`.
+//!
+//! `munmap(addr, length)` removes the pages of `[addr, addr + length)` that
+//! belong to `mmap` regions. `addr` must be page aligned and `length` not 0
+//! (`-EINVAL`); a range with no region in it is not an error, as on Linux.
+//! Splitting a region in two when no table entry is free is `-ENOMEM`.
+
+import Fs from "@fs";
+import Proc from "@proc";
+import _ from "./errno";
+
+/// The memory system call handlers.
+namespace Syscall::Linux {
+  /// `PROT_READ`.
+  const PROT_READ: u64 = 1;
+
+  /// `PROT_WRITE`.
+  const PROT_WRITE: u64 = 2;
+
+  /// `PROT_EXEC`.
+  const PROT_EXEC: u64 = 4;
+
+  /// `MAP_SHARED`.
+  const MAP_SHARED: u64 = 0x01;
+
+  /// `MAP_PRIVATE`.
+  const MAP_PRIVATE: u64 = 0x02;
+
+  /// `MAP_FIXED`.
+  const MAP_FIXED: u64 = 0x10;
+
+  /// `MAP_ANONYMOUS`.
+  const MAP_ANONYMOUS: u64 = 0x20;
+
+  /// 4 KiB.
+  const MAP_PAGE_SIZE: u64 = 4096;
+
+  /// `mmap(addr, length, prot, flags, fd, offset)`. Returns the address of
+  /// the new region.
+  function mmap(
+    hint: u64,
+    length: u64,
+    protection: u64,
+    flags: u64,
+    descriptor: u64,
+    offset: u64
+  ): u64 {
+    if (length == 0 || (protection & ~(PROT_READ | PROT_WRITE | PROT_EXEC)) != 0 || offset % MAP_PAGE_SIZE != 0) {
+      return Linux::failure(Linux::EINVAL);
+    }
+
+    if ((flags & MAP_SHARED) != 0 || (flags & MAP_PRIVATE) == 0 || (flags & MAP_FIXED) != 0) {
+      return Linux::failure(Linux::EINVAL);
+    }
+
+    let slot: u64 = Proc::Process::currentSlot();
+    let mut source: *u8 = null;
+    let mut sourceLength: u64 = 0;
+
+    if ((flags & MAP_ANONYMOUS) == 0) {
+      let file: *mut Fs::OpenFile = Fs::Files::get(slot, descriptor);
+
+      if (file == null) {
+        return Linux::failure(Linux::EBADF);
+      }
+
+      if ((*file).kind != Fs::Files::NODE || (*(*file).node).kind != Fs::Vfs::FILE) {
+        return Linux::failure(Linux::ENODEV);
+      }
+
+      if (((*file).flags & Fs::Files::READ) == 0) {
+        return Linux::failure(Linux::EACCES);
+      }
+
+      let node: *mut Fs::Node = (*file).node;
+
+      if (offset < (*node).size) {
+        source = ((*node).data as *u8) + offset;
+        sourceLength = (*node).size - offset < length ? (*node).size - offset : length;
+      }
+    }
+
+    let neutral: u64 = translateProtection(protection);
+    let mut address: u64 = 0;
+    let status: u64 = Proc::Memory::map(slot, Proc::Process::currentRoot(), length, neutral, source, sourceLength, &mut address as *mut u64);
+
+    if (status == Proc::Memory::INVALID) {
+      return Linux::failure(Linux::EINVAL);
+    }
+
+    if (status != Proc::Memory::OK) {
+      return Linux::failure(Linux::ENOMEM);
+    }
+
+    return address;
+  }
+
+  /// `munmap(addr, length)`.
+  function munmap(address: u64, length: u64): u64 {
+    let status: u64 = Proc::Memory::unmap(Proc::Process::currentSlot(), Proc::Process::currentRoot(), address, length);
+
+    if (status == Proc::Memory::INVALID) {
+      return Linux::failure(Linux::EINVAL);
+    }
+
+    if (status != Proc::Memory::OK) {
+      return Linux::failure(Linux::ENOMEM);
+    }
+
+    return 0;
+  }
+
+  /// The `Proc::Memory` protection of Linux `prot` bits.
+  function translateProtection(protection: u64): u64 {
+    let mut neutral: u64 = 0;
+
+    if ((protection & PROT_READ) != 0) {
+      neutral = neutral | Proc::Memory::READ;
+    }
+
+    if ((protection & PROT_WRITE) != 0) {
+      neutral = neutral | Proc::Memory::WRITE;
+    }
+
+    if ((protection & PROT_EXEC) != 0) {
+      neutral = neutral | Proc::Memory::EXECUTE;
+    }
+
+    return neutral;
+  }
+}

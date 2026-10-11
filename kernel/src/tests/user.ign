@@ -19,6 +19,7 @@
 //! | isolation (9 programs) | a fault or a forbidden instruction kills only that process, no frame leaks |
 //! | hello             | a real static ELF64 from the initramfs, argc and argv  |
 //! | files             | `/bin/fstest` checks every file system call and error from ring 3; nothing leaks |
+//! | memory            | `/bin/mmtest` checks `mmap` and `munmap`; four forbidden accesses to mappings are killed; nothing leaks |
 //! | refused           | a missing program, a directory, a file that is not ELF, an empty line and 33 arguments start nothing and leak nothing |
 //!
 //! `main.ign` calls `Tests::User::run` once, after the scheduler tests and before
@@ -156,6 +157,7 @@ namespace Tests::User {
     runHello();
     runRefused();
     runFiles();
+    runMemory();
   }
 
   /// Runs `ALIGNMENT_SPIN` and checks, through the counters of
@@ -235,6 +237,43 @@ namespace Tests::User {
     }
 
     Drivers::Console::writeLine("user: fstest passed, and removing /fstest gave back every byte it used");
+  }
+
+  /// Runs `/bin/mmtest`, which checks `mmap` and `munmap` from ring 3, then
+  /// runs it four more times to do something with a mapping that the page
+  /// tables must stop: write to a read-only one, read one after `munmap`,
+  /// execute one without `PROT_EXEC`, read a `PROT_NONE` one. Each must be
+  /// killed with SIGSEGV. The PMM free count must be the same at the end:
+  /// mappings are freed by `munmap` or when the process ends.
+  function runMemory(): void {
+    let freeBefore: u64 = Mm::Pmm::freeFrameCount();
+    let status: u64 = Proc::Programs::runNamed("mmtest");
+
+    if (status != 0) {
+      Drivers::Console::write("user test: mmtest failed check ");
+      Drivers::Console::writeDecimal(status);
+      Drivers::Console::writeLine("");
+      @panic("user test: mmap or munmap misbehaved");
+    }
+
+    expectMemoryKilled("mmtest write-read");
+    expectMemoryKilled("mmtest use-unmapped");
+    expectMemoryKilled("mmtest execute");
+    expectMemoryKilled("mmtest touch-none");
+
+    if (Mm::Pmm::freeFrameCount() != freeBefore) {
+      @panic("user test: mappings leaked frames");
+    }
+
+    Drivers::Console::writeLine("user: mmtest passed, writing read-only, using unmapped, executing non-exec and touching PROT_NONE memory were killed, no frame leaked");
+  }
+
+  /// Panics unless running `line` ends with SIGSEGV.
+  function expectMemoryKilled(line: str): void {
+    if (Proc::Programs::runNamed(line) != KILLED_BY_SEGV) {
+      Drivers::Console::writeLine(line);
+      @panic("user test: a forbidden access to a mapping was not stopped");
+    }
   }
 
   /// Asks `Proc::Programs::run` for things it must refuse and checks that

@@ -58,4 +58,10 @@ namespace Syscall::Operation {
 
   /// Create a directory at a path relative to a directory.
   const MAKE_DIRECTORY: u8 = 13;
+
+  /// Map a new region of memory.
+  const MAP: u8 = 14;
+
+  /// Remove mapped memory.
+  const UNMAP: u8 = 15;
 }

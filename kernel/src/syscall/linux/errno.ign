@@ -29,11 +29,17 @@ namespace Syscall::Linux {
   /// Out of memory (12).
   const ENOMEM: i64 = 12;
 
+  /// Permission denied (13): mapping a file not opened for reading.
+  const EACCES: i64 = 13;
+
   /// Bad address (14): a user pointer failed validation.
   const EFAULT: i64 = 14;
 
   /// File exists (17).
   const EEXIST: i64 = 17;
+
+  /// No such device (19): mapping something that is not a regular file.
+  const ENODEV: i64 = 19;
 
   /// Not a directory (20).
   const ENOTDIR: i64 = 20;
