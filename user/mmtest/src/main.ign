@@ -16,6 +16,7 @@
 //! | `use-unmapped`| reads a mapping after `munmap`                         |
 //! | `execute`     | jumps into a mapping without `PROT_EXEC`               |
 //! | `touch-none`  | reads a `PROT_NONE` mapping                            |
+//! | `double-free` | frees a block twice; `std::alloc` panics (status 101)  |
 //!
 //! ## Checks
 //!
@@ -29,7 +30,14 @@
 //! | 50-51  | a `PROT_READ` mapping reads as zeros; `read` into it is `-EFAULT`    |
 //! | 52     | `write` from a mapping works: the kernel sees it in the page tables |
 //! | 60     | the region table fills up: `-ENOMEM`, then every mapping is removed |
+//! | 70-72  | a private mapping of `/etc/motd`: the file, then zeros to the page end; a write changes the mapping, not the file |
+//! | 73     | an offset: page 1 of `/bin/hello` mapped equals page 1 read with `read` |
+//! | 74     | an offset past the end of the file maps zeros                       |
+//! | 75-78  | file mapping errors: a closed descriptor `-EBADF`, a directory and the console `-ENODEV`, a write-only descriptor `-EACCES` |
+//! | 80-84  | `std::alloc`: 200 blocks aligned and apart, reuse after `free`, freed space merges back into one free block, a large block gets its own pages |
+//! | 85     | a closure that captures a value allocates through `@allocHandler` and frees through `@freeHandler` |
 
+import Alloc from "std::alloc";
 import Args from "std::args";
 import Io from "std::io";
 import Sys from "std::sys";
@@ -46,10 +54,25 @@ const MAP_TOP: u64 = 0x00007F0000000000;
 /// The most mappings `checkLimit` asks for.
 const LIMIT_ATTEMPTS: u64 = 40;
 
-/// The mappings of `checkLimit`.
+/// The text of `initramfs/etc/motd`.
+const MOTD: str = "Welcome to IgniOS.\n";
+
+/// Length of `MOTD`.
+const MOTD_LENGTH: u64 = 19;
+
+/// Blocks `checkAllocator` asks for.
+const BLOCKS: u64 = 200;
+
+/// What the checks share.
 record State {
-  /// Their addresses.
+  /// The mappings of `checkLimit`.
   static mut addresses: u64[40];
+
+  /// The blocks of `checkAllocator`.
+  static mut blocks: u64[200];
+
+  /// One page read with `read`.
+  static mut page: u8[4096];
 }
 
 /// Exits with `status` unless `got` equals `wanted`, after printing both.
@@ -209,6 +232,189 @@ function checkLimit(): void {
   }
 }
 
+/// A private mapping of a file.
+function checkFiles(): void {
+  let motd: i64 = Sys::open("/etc/motd" as *u8, Sys::O_RDONLY, 0);
+  let mapped: i64 = Sys::mmap(MOTD_LENGTH, Sys::PROT_READ | Sys::PROT_WRITE, Sys::MAP_PRIVATE, motd as u64, 0);
+
+  require(mapped > 0, 70);
+
+  let base: u64 = mapped as u64;
+  let mut index: u64 = 0;
+
+  while (index < MOTD_LENGTH) {
+    require(peek(base + index) == *(MOTD as *u8 + index), 70);
+    index += 1;
+  }
+
+  require(isZero(base + MOTD_LENGTH, PAGE - MOTD_LENGTH), 71);
+
+  poke(base, 0x4A);
+
+  let first: *mut u8 = &mut State::page as *mut u8;
+
+  expect(Sys::seek(motd as u64, 0, Sys::SEEK_SET), 0, 72);
+  expect(Sys::read(motd as u64, first, 1), 1, 72);
+  require(*first == 0x57 && peek(base) == 0x4A, 72);
+  expect(Sys::munmap(base, PAGE), 0, 72);
+
+  let hello: i64 = Sys::open("/bin/hello" as *u8, Sys::O_RDONLY, 0);
+  let second: i64 = Sys::mmap(PAGE, Sys::PROT_READ, Sys::MAP_PRIVATE, hello as u64, PAGE);
+
+  expect(Sys::seek(hello as u64, PAGE as i64, Sys::SEEK_SET), PAGE as i64, 73);
+  expect(Sys::read(hello as u64, first, PAGE), PAGE as i64, 73);
+  require(second > 0, 73);
+
+  index = 0;
+
+  while (index < PAGE) {
+    require(peek(second as u64 + index) == *(first + index), 73);
+    index += 1;
+  }
+
+  expect(Sys::munmap(second as u64, PAGE), 0, 73);
+
+  let past: i64 = Sys::mmap(PAGE, Sys::PROT_READ, Sys::MAP_PRIVATE, motd as u64, PAGE);
+
+  require(past > 0 && isZero(past as u64, PAGE), 74);
+  expect(Sys::munmap(past as u64, PAGE), 0, 74);
+
+  Sys::close(hello as u64);
+  Sys::close(motd as u64);
+
+  expect(Sys::mmap(PAGE, Sys::PROT_READ, Sys::MAP_PRIVATE, motd as u64, 0), 0 - Sys::EBADF, 75);
+
+  let directory: i64 = Sys::open("/etc" as *u8, Sys::O_RDONLY, 0);
+
+  expect(Sys::mmap(PAGE, Sys::PROT_READ, Sys::MAP_PRIVATE, directory as u64, 0), 0 - Sys::ENODEV, 76);
+  Sys::close(directory as u64);
+  expect(Sys::mmap(PAGE, Sys::PROT_READ, Sys::MAP_PRIVATE, Sys::STDOUT, 0), 0 - Sys::ENODEV, 77);
+
+  let writeOnly: i64 = Sys::open("/etc/motd" as *u8, Sys::O_WRONLY, 0);
+
+  expect(Sys::mmap(PAGE, Sys::PROT_READ, Sys::MAP_PRIVATE, writeOnly as u64, 0), 0 - Sys::EACCES, 78);
+  Sys::close(writeOnly as u64);
+}
+
+/// The address of block `index` of `checkAllocator`.
+function blockSlot(index: u64): *mut u64 {
+  return @pointerFromInteger<*mut u64>(@integerFromPointer(&mut State::blocks as *mut u64) + index * 8);
+}
+
+/// The size `checkAllocator` gives block `index`: 1 to 300 bytes.
+function blockSize(index: u64): u64 {
+  return 1 + (index * 37) % 300;
+}
+
+/// `std::alloc` on top of `mmap`.
+function checkAllocator(): void {
+  let before: u64 = Alloc::bytesInUse();
+  let mut index: u64 = 0;
+
+  while (index < BLOCKS) {
+    let block: *mut u8 = Alloc::allocate(blockSize(index), 16);
+
+    require(block != null && @integerFromPointer(block) % 16 == 0, 80);
+    *blockSlot(index) = @integerFromPointer(block);
+    fill(@integerFromPointer(block), blockSize(index), (index & 0xFF) as u8);
+    index += 1;
+  }
+
+  index = 0;
+
+  while (index < BLOCKS) {
+    require(holds(*blockSlot(index), blockSize(index), (index & 0xFF) as u8), 81);
+    index += 1;
+  }
+
+  let arenas: u64 = Alloc::arenaCount();
+
+  index = 0;
+
+  while (index < BLOCKS) {
+    if (index % 2 == 0) {
+      Alloc::free(@pointerFromInteger<*mut u8>(*blockSlot(index)));
+      *blockSlot(index) = @integerFromPointer(Alloc::allocate(blockSize(index), 16));
+      fill(*blockSlot(index), blockSize(index), (index & 0xFF) as u8);
+    }
+
+    index += 1;
+  }
+
+  require(Alloc::arenaCount() == arenas, 82);
+
+  index = 0;
+
+  while (index < BLOCKS) {
+    require(holds(*blockSlot(index), blockSize(index), (index & 0xFF) as u8), 82);
+    Alloc::free(@pointerFromInteger<*mut u8>(*blockSlot(index)));
+    index += 1;
+  }
+
+  expect(Alloc::bytesInUse() as i64, before as i64, 83);
+  expect(Alloc::freeBlockCount() as i64, 1, 83);
+
+  let whole: *mut u8 = Alloc::allocate(16000, 16);
+
+  require(whole != null && Alloc::arenaCount() == arenas, 83);
+  Alloc::free(whole);
+
+  let large: *mut u8 = Alloc::allocate(100000, 16);
+
+  require(large != null && @integerFromPointer(large) % PAGE == 0, 84);
+  fill(@integerFromPointer(large), 100000, 0x77);
+  require(holds(@integerFromPointer(large), 100000, 0x77), 84);
+  Alloc::free(large);
+  expect(Alloc::bytesInUse() as i64, before as i64, 84);
+}
+
+/// Stores `value` in the `length` bytes at `address`.
+function fill(address: u64, length: u64, value: u8): void {
+  let mut offset: u64 = 0;
+
+  while (offset < length) {
+    poke(address + offset, value);
+    offset += 1;
+  }
+}
+
+/// True when the `length` bytes at `address` all hold `value`.
+function holds(address: u64, length: u64, value: u8): boolean {
+  let mut offset: u64 = 0;
+
+  while (offset < length) {
+    if (peek(address + offset) != value) {
+      return false;
+    }
+
+    offset += 1;
+  }
+
+  return true;
+}
+
+/// A closure that adds `amount`. It captures `amount`, so its environment
+/// comes from `@allocHandler`.
+function makeAdder(amount: u64): (u64) -> u64 {
+  return (value: u64): u64 -> value + amount;
+}
+
+/// Uses a capturing closure and lets it go out of scope.
+function useClosure(): void {
+  let adder: (u64) -> u64 = makeAdder(40);
+
+  require(Alloc::bytesInUse() > 0, 85);
+  expect(adder(2) as i64, 42, 85);
+}
+
+/// The compiler's allocations go through `std::alloc`, and come back.
+function checkClosure(): void {
+  let before: u64 = Alloc::bytesInUse();
+
+  useClosure();
+  expect(Alloc::bytesInUse() as i64, before as i64, 85);
+}
+
 /// True when the NUL-terminated `text` is `word`.
 function modeIs(text: *u8, word: str): boolean {
   let length: u64 = Args::length(text);
@@ -242,6 +448,11 @@ function misbehave(mode: *u8): u64 {
 
     poke(address as u64, 0xC3);
     asm (address in rax) clobber(memory) { call rax }
+  } else if (modeIs(mode, "double-free")) {
+    let block: *mut u8 = Alloc::allocate(32, 16);
+
+    Alloc::free(block);
+    Alloc::free(block);
   } else if (modeIs(mode, "touch-none")) {
     let address: i64 = Sys::mmap(PAGE, Sys::PROT_NONE, Sys::MAP_PRIVATE | Sys::MAP_ANONYMOUS, 0xFFFFFFFFFFFFFFFF, 0);
 
@@ -268,8 +479,11 @@ function main(count: u64, values: *u64): u64 {
   checkSplit();
   checkProtection();
   checkLimit();
+  checkFiles();
+  checkAllocator();
+  checkClosure();
 
-  Io::print("mmtest: anonymous mappings, protection, munmap and their errors behave as on Linux\n");
+  Io::print("mmtest: anonymous and file mappings, protection, munmap, their errors and std::alloc behave as expected\n");
 
   return 0;
 }

@@ -1,6 +1,6 @@
 # The user standard library of IgniOS: what a program needs to talk to the
 # kernel and nothing else. A program names it with `std_path` in its
-# ignis.toml and imports `std::sys`, `std::io` and `std::args`. Every program
+# ignis.toml and imports `std::sys`, `std::io`, `std::args` and `std::alloc`. Every program
 # is linked after `start.S`, its entry point `_start`.
 
 # Import name to source file: `import Sys from "std::sys"` reads sys.ign.
@@ -8,6 +8,7 @@
 sys = "sys.ign"
 io = "io.ign"
 args = "args.ign"
+alloc = "alloc.ign"
 
 # Modules loaded implicitly into every program: none. A program imports what
 # it uses.

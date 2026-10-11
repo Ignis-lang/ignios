@@ -13,21 +13,34 @@
 //!
 //! The reason is the `strerror` text of the errno, as GNU cat prints it:
 //! `cat: /nope: No such file or directory`, `cat: /etc: Is a directory`.
-//! Bytes go through a 512-byte buffer, so a file of any size is copied in
-//! pieces.
+//!
+//! A regular file that is not empty is mapped with `mmap` (`PROT_READ`,
+//! `MAP_PRIVATE`) and written to standard output in one `write`, then
+//! unmapped. Anything else, and a file `mmap` refuses, goes through a
+//! 512-byte buffer with `read`: standard input, a directory (whose `read` is
+//! `EISDIR`), an empty file.
 
 import Args from "std::args";
 import Io from "std::io";
 import Sys from "std::sys";
 
-/// The copy buffer.
+/// The copy buffer and a `struct stat`.
 record Cat {
   /// Bytes read from a file and written to standard output.
   static mut buffer: u8[512];
+
+  /// The `struct stat` of the file being copied.
+  static mut stat: u8[144];
 }
 
 /// Size of `Cat::buffer`.
 const BUFFER_SIZE: u64 = 512;
+
+/// The file type bits of `st_mode` (offset 24 of `struct stat`).
+const MODE_TYPE_MASK: u32 = 0xF000;
+
+/// `S_IFREG`.
+const MODE_REGULAR: u32 = 0x8000;
 
 /// Copies the open `descriptor` to standard output until the end. Returns 0,
 /// or the negated errno of a failed read.
@@ -45,6 +58,36 @@ function copy(descriptor: u64): i64 {
   }
 
   return 0;
+}
+
+/// Writes the open `descriptor` to standard output through a private
+/// read-only mapping when it is a regular file that is not empty. Returns
+/// false when it is not, or when `mmap` refuses: the caller then copies it
+/// with `read`.
+function mapped(descriptor: u64): boolean {
+  let stat: *mut u8 = &mut Cat::stat as *mut u8;
+
+  if (Sys::fstat(descriptor, stat) < 0) {
+    return false;
+  }
+
+  let mode: u32 = *@pointerFromInteger<*u32>(@integerFromPointer(stat) + 24);
+  let size: u64 = *@pointerFromInteger<*u64>(@integerFromPointer(stat) + 48);
+
+  if ((mode & MODE_TYPE_MASK) != MODE_REGULAR || size == 0) {
+    return false;
+  }
+
+  let address: i64 = Sys::mmap(size, Sys::PROT_READ, Sys::MAP_PRIVATE, descriptor, 0);
+
+  if (address < 0) {
+    return false;
+  }
+
+  Sys::write(Sys::STDOUT, @pointerFromInteger<*u8>(address as u64), size);
+  Sys::munmap(address as u64, size);
+
+  return true;
 }
 
 /// Prints `cat: PATH: REASON` on standard error.
@@ -65,7 +108,7 @@ function catFile(path: *u8): boolean {
     return false;
   }
 
-  let result: i64 = copy(descriptor as u64);
+  let result: i64 = mapped(descriptor as u64) ? 0 : copy(descriptor as u64);
 
   Sys::close(descriptor as u64);
 

@@ -23,8 +23,8 @@ Early, and only tested in QEMU with OVMF.
 | User mode | Per-process address spaces (own PML4, shared kernel half, U/S pages, frames freed on exit); ring 3 entered with `iretq`, left through `SYSCALL`/`SYSRET` or an interrupt (TSS.RSP0 follows the running thread); a Linux x86_64 syscall subset (`read`, `write`, `openat`, `close`, `lseek`, `fstat`, `newfstatat`, `getdents64`, `mkdirat`, `mmap`, `munmap`, `exit`, `exit_group`, `getpid`, `sched_yield`, `nanosleep`, `-ENOSYS` for the rest) behind a per-process ABI table; every user pointer validated before use; a static ELF64 loader that starts programs from the file tree with argc and argv; a fault, privileged instruction or undefined instruction in ring 3 kills only that process; waiting for a process blocks until it is gone |
 | Files | A ustar initramfs loaded by Limine and checked at boot; an in-memory file tree seeded from it with copy on write, `/dev/console`, path rules as on Linux; per-process descriptor tables (16 descriptors, 0 to 2 on the console); nothing is saved across reboots |
 | Commands | `cat`, `ls`, `touch` and `mkdir` in `/bin`, written in Ignis on the Linux system calls; any line at the prompt that is not a built-in runs as a program |
-| Memory mappings | `mmap` of anonymous memory and private copies of files, `munmap` that trims and splits regions, `PROT_READ`/`PROT_WRITE`/`PROT_EXEC`/`PROT_NONE` enforced by the page tables, write with execute refused; up to 32 regions per process |
-| Next | a user allocator and `cat` on `mmap`, then a native IgniOS system call ABI |
+| Memory mappings | `mmap` of anonymous memory and private copies of files, `munmap` that trims and splits regions, `PROT_READ`/`PROT_WRITE`/`PROT_EXEC`/`PROT_NONE` enforced by the page tables, write with execute refused; up to 32 regions per process; `std::alloc`, a user heap on `mmap` behind the compiler's allocation hooks; `cat` reads files through `mmap` |
+| Next | a native IgniOS system call ABI |
 
 ## Quick start
 
@@ -58,7 +58,7 @@ The build also needs an Ignis compiler with freestanding support (Ignis `main` f
 
 Ignis compiles the whole kernel to one C unit, which clang compiles for `x86_64-unknown-none` with kernel flags (no red zone, no SSE in the kernel, `-mcmodel=kernel`). The few routines that cannot be written in Ignis are small `.S` files under `kernel/src/arch/x86_64/`: interrupt entry stubs, the code segment reload, the stack switch, the ring 3 entry and the `SYSCALL` stub, the per-CPU block, the fault probes, and the throwaway user programs of the boot self-tests. `ld.lld` links everything with `kernel/linker.ld`, and `mtools` writes the boot image. No cross GCC is involved.
 
-User programs are Ignis projects under `user/` built with `std = false` and the small user standard library in `user/lib` (`std::sys` wraps the system calls in inline asm, `std::io` prints). The Makefile links each one after the entry stub `user/lib/start.S` with `user/user.ld` into a static ELF64 at `0x400000` and packs it into the initramfs as `/bin/NAME`. The kernel runs `hello one two` at boot, before the keyboard line, and `run hello` at the prompt runs it again; `run PROGRAM ARG...` passes arguments.
+User programs are Ignis projects under `user/` built with `std = false` and the small user standard library in `user/lib` (`std::sys` wraps the system calls in inline asm, `std::io` prints, `std::args` reads argv, `std::alloc` is a heap on `mmap`). The Makefile links each one after the entry stub `user/lib/start.S` with `user/user.ld` into a static ELF64 at `0x400000` and packs it into the initramfs as `/bin/NAME`. The kernel runs `hello one two` at boot, before the keyboard line, and `run hello` at the prompt runs it again; `run PROGRAM ARG...` passes arguments.
 
 ## Layout
 
@@ -94,6 +94,7 @@ user/lib/                      the user standard library (entry stub, syscalls, 
 user/hello/                    the first user program
 user/cat, ls, touch, mkdir/    the commands
 user/fstest/                   ring 3 checks of the file system calls
+user/mmtest/                   ring 3 checks of mmap, munmap and std::alloc
 user/user.ld                   user program layout
 initramfs/                     files packed into the initramfs next to the programs in /bin
 boot/limine.conf               boot entry and the initramfs module

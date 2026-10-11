@@ -19,7 +19,7 @@
 //! | isolation (9 programs) | a fault or a forbidden instruction kills only that process, no frame leaks |
 //! | hello             | a real static ELF64 from the initramfs, argc and argv  |
 //! | files             | `/bin/fstest` checks every file system call and error from ring 3; nothing leaks |
-//! | memory            | `/bin/mmtest` checks `mmap` and `munmap`; four forbidden accesses to mappings are killed; nothing leaks |
+//! | memory            | `/bin/mmtest` checks `mmap`, `munmap` and `std::alloc`; four forbidden accesses to mappings are killed; a double free panics; nothing leaks |
 //! | refused           | a missing program, a directory, a file that is not ELF, an empty line and 33 arguments start nothing and leak nothing |
 //!
 //! `main.ign` calls `Tests::User::run` once, after the scheduler tests and before
@@ -113,6 +113,9 @@ namespace Tests::User {
 
   /// 128 + 8 (SIGFPE).
   const KILLED_BY_FPE: u64 = 136;
+
+  /// The status a user program's panic handler exits with.
+  const PANICKED: u64 = 101;
 
   /// The program sleeps 20 ms, which is two timer ticks.
   const SYSCALLS_SLEEP_TICKS: u64 = 2;
@@ -243,7 +246,8 @@ namespace Tests::User {
   /// runs it four more times to do something with a mapping that the page
   /// tables must stop: write to a read-only one, read one after `munmap`,
   /// execute one without `PROT_EXEC`, read a `PROT_NONE` one. Each must be
-  /// killed with SIGSEGV. The PMM free count must be the same at the end:
+  /// killed with SIGSEGV. A last run frees a `std::alloc` block twice, which
+  /// must end in the allocator's panic. The PMM free count must be the same at the end:
   /// mappings are freed by `munmap` or when the process ends.
   function runMemory(): void {
     let freeBefore: u64 = Mm::Pmm::freeFrameCount();
@@ -261,11 +265,15 @@ namespace Tests::User {
     expectMemoryKilled("mmtest execute");
     expectMemoryKilled("mmtest touch-none");
 
+    if (Proc::Programs::runNamed("mmtest double-free") != PANICKED) {
+      @panic("user test: std::alloc did not catch a double free");
+    }
+
     if (Mm::Pmm::freeFrameCount() != freeBefore) {
       @panic("user test: mappings leaked frames");
     }
 
-    Drivers::Console::writeLine("user: mmtest passed, writing read-only, using unmapped, executing non-exec and touching PROT_NONE memory were killed, no frame leaked");
+    Drivers::Console::writeLine("user: mmtest passed, writing read-only, using unmapped, executing non-exec and touching PROT_NONE memory were killed, a double free was caught, no frame leaked");
   }
 
   /// Panics unless running `line` ends with SIGSEGV.

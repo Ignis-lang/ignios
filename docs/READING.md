@@ -207,6 +207,8 @@ Docs 14 and 15.
 
 **`proc/memory.ign` and `syscall/linux/memory.ign`.** `mmap` and `munmap`. `Proc::Memory` keeps up to 32 regions per process, hands out addresses downwards from `0x7F0000000000`, allocates and zeroes every page at `mmap` time, and turns the protection into page table bits (W for write, NX unless execute, nothing mapped for `PROT_NONE`). `unmap` trims or splits regions and frees their pages; it never touches the ELF image or the stack. The Linux side checks the arguments (the header has the table), copies a file for a private file mapping, and refuses `MAP_SHARED`, `MAP_FIXED` and write with execute. `user/mmtest` checks all of it from ring 3. Doc 20.
 
+**`user/lib/alloc.ign`.** `std::alloc`, the heap of user programs: first-fit over 64 KiB arenas from `mmap`, an address-ordered free list that merges neighbours, and a mapping of its own for a block over 16 KiB, given back with `munmap`. It also defines the compiler's `@allocHandler` and `@freeHandler`, so closures that capture values work in a program that imports it. The header draws both block layouts.
+
 **`user/`.** The user side. `lib/start.S` is `_start`, the entry point of every program: it reads argc and argv from the initial stack and calls the program's `main`, because a compiled function cannot start on a stack that holds no return address. `lib/sys.ign` wraps the `syscall` instruction, `lib/io.ign` prints, `lib/args.ign` reads argv, and `hello/src/main.ign` is the first program. `user/user.ld` places programs at `0x400000`.
 
 ## Part 10. Files
@@ -227,7 +229,7 @@ Doc 19.
 
 **`user/fstest/`.** A ring 3 program that checks each call and each error the way a Linux program sees them, and exits with the number of the first check that failed. The table in its header lists the checks.
 
-**`user/cat/`, `user/ls/`, `user/touch/` and `user/mkdir/`.** The commands, each one a short Ignis program on `std::sys`. Each header has a table of what it does in each case and the exact error line, in the format of GNU coreutils (`ls: cannot access '/nope': No such file or directory`). `ls` reads `struct linux_dirent64` records and hides `.` and `..`; `touch` opens with `O_CREAT | O_RDONLY`, which also accepts an existing directory. `Sys::errorText` in `user/lib/sys.ign` is their `strerror`.
+**`user/cat/`, `user/ls/`, `user/touch/` and `user/mkdir/`.** The commands, each one a short Ignis program on `std::sys`. Each header has a table of what it does in each case and the exact error line, in the format of GNU coreutils (`ls: cannot access '/nope': No such file or directory`). `cat` maps a regular file with `mmap` and writes it in one call, and falls back to `read` for anything else; `ls` reads `struct linux_dirent64` records and hides `.` and `..`; `touch` opens with `O_CREAT | O_RDONLY`, which also accepts an existing directory. `Sys::errorText` in `user/lib/sys.ign` is their `strerror`.
 
 ## Part 11. Boot self-tests
 
@@ -364,9 +366,9 @@ vmm: self-test ok
 `Tests::Vmm::run` mapped a frame at a test address, wrote through it, read it through the direct map, and unmapped it.
 
 ```text
-modules: initramfs is /initramfs.tar, 102400 bytes at 0xffff80000a0cb000
+modules: initramfs is /initramfs.tar, 112640 bytes at 0xffff80000a0a5000
 ```
-The Limine module from `boot/limine.conf`. `initramfs` is the `module_string`, `/initramfs.tar` the path. `Mm::Modules::initialize` mapped its pages read only. The address is in the direct map, so the file sits at physical `0x0a0cb000`. Doc 15.
+The Limine module from `boot/limine.conf`. `initramfs` is the `module_string`, `/initramfs.tar` the path. `Mm::Modules::initialize` mapped its pages read only. The address is in the direct map, so the file sits at physical `0x0a0a5000`. Doc 15.
 
 ```text
 heap: self-test ok, 1092 KiB mapped, 0 bytes in use
@@ -374,16 +376,16 @@ heap: self-test ok, 1092 KiB mapped, 0 bytes in use
 `Tests::Heap::run` checked alignment, reuse, merging, growth (it allocates 1 MiB) and the compiler allocation handlers. 1092 KiB of heap pages stayed mapped and every block was freed. Doc 10.
 
 ```text
-initramfs: 102400 bytes, 8 files with 88483 bytes of data, 3 directories
+initramfs: 112640 bytes, 8 files with 97059 bytes of data, 3 directories
 initramfs: self-test ok, 6 malformed headers refused, 2 valid ones read, etc/motd read back
 ```
 `Fs::Initramfs::initialize` walked the archive: `etc/motd` and the seven programs in `bin` (`cat`, `fstest`, `hello`, `ls`, `mkdir`, `mmtest`, `touch`) are the files, and `.`, `bin` and `etc` the directories. The size is a multiple of 10240 bytes because tar pads the archive to whole records. `Tests::Initramfs::run` then fed the reader one broken header per error code (checksum, magic, a non-octal number, a `..` path, a symbolic link, data past the end), a file and a directory with a prefix, and compared `etc/motd` with the text it should hold.
 
 ```text
-vfs: 13 nodes, 88483 bytes in files, seeded from the initramfs
+vfs: 13 nodes, 97059 bytes in files, seeded from the initramfs
 vfs: self-test ok, lookup, create, read, write, truncate, remove and copy on write
 ```
-`Fs::Vfs::initialize` built the tree: the root, `bin` with its seven programs, `etc` and `etc/motd` from the archive, then `dev` and the device node `dev/console`. The file bytes are the same 88483 as in the archive, because nothing was copied. `Tests::Vfs::run` checked every path rule, created, wrote, read, truncated and removed a test directory `/t` and checked that the heap returned to where it was, then wrote to `/etc/motd` to check that the write copied the file and left the archive alone.
+`Fs::Vfs::initialize` built the tree: the root, `bin` with its seven programs, `etc` and `etc/motd` from the archive, then `dev` and the device node `dev/console`. The file bytes are the same 97059 as in the archive, because nothing was copied. `Tests::Vfs::run` checked every path rule, created, wrote, read, truncated and removed a test directory `/t` and checked that the heap returned to where it was, then wrote to `/etc/motd` to check that the write copied the file and left the archive alone.
 
 ```text
 address space: self-test ok, private user half, shared kernel half, frames returned
@@ -633,19 +635,21 @@ user: fstest passed, and removing /fstest gave back every byte it used
 
 ```text
 Welcome to IgniOS.
-mmtest: anonymous mappings, protection, munmap and their errors behave as on Linux
+mmtest: anonymous and file mappings, protection, munmap, their errors and std::alloc behave as expected
 process 21 exited with status 0
-process 22 faulted: #PF Page Fault at rip 0x00000000004002d5, error 0x0000000000000007, address 0x00007efffffff000
+process 22 faulted: #PF Page Fault at rip 0x0000000000400325, error 0x0000000000000007, address 0x00007efffffff000
 process 22 killed, status 139
-process 23 faulted: #PF Page Fault at rip 0x000000000040047f, error 0x0000000000000004, address 0x00007efffffff000
+process 23 faulted: #PF Page Fault at rip 0x00000000004004cf, error 0x0000000000000004, address 0x00007efffffff000
 process 23 killed, status 139
 process 24 faulted: #PF Page Fault at rip 0x00007efffffff000, error 0x0000000000000015, address 0x00007efffffff000
 process 24 killed, status 139
-process 25 faulted: #PF Page Fault at rip 0x00000000004004ce, error 0x0000000000000004, address 0x00007efffffff000
+process 25 faulted: #PF Page Fault at rip 0x0000000000400542, error 0x0000000000000004, address 0x00007efffffff000
 process 25 killed, status 139
-user: mmtest passed, writing read-only, using unmapped, executing non-exec and touching PROT_NONE memory were killed, no frame leaked
+panic: alloc: free of a pointer that is not a live block
+process 26 exited with status 101
+user: mmtest passed, writing read-only, using unmapped, executing non-exec and touching PROT_NONE memory were killed, a double free was caught, no frame leaked
 ```
-`Tests::User::runMemory` ran `/bin/mmtest` (the loader's `elf:` lines left out). The first line is `/etc/motd`, which the program read into a mapping and wrote from it, to show that system calls take mapped memory as a buffer. Then the program ran four more times with an argument, each one doing something the page tables must stop, and each one was killed. Every first mapping of a process is the page below `0x7F0000000000`, `0x7EFFFFFFF000`. The error codes say why: `0x7` is a write to a present read-only user page, `0x4` a user read of a page that is not present (unmapped, or `PROT_NONE`, which maps nothing), `0x15` an instruction fetch from a no-execute page; `rip` equal to the address is the jump into the mapping. The PMM free count was the same afterwards. Doc 20.
+`Tests::User::runMemory` ran `/bin/mmtest` (the loader's `elf:` lines left out). The first line is `/etc/motd`, which the program read into a mapping and wrote from it, to show that system calls take mapped memory as a buffer. The checks also mapped `/etc/motd` and a page of `/bin/hello` privately, and ran `std::alloc` through 200 blocks, a large block and a closure. Then the program ran four more times with an argument, each one doing something the page tables must stop, and each one was killed. Every first mapping of a process is the page below `0x7F0000000000`, `0x7EFFFFFFF000`. The error codes say why: `0x7` is a write to a present read-only user page, `0x4` a user read of a page that is not present (unmapped, or `PROT_NONE`, which maps nothing), `0x15` an instruction fetch from a no-execute page; `rip` equal to the address is the jump into the mapping. The last run freed a `std::alloc` block twice; the allocator panicked and the program's panic handler exited with 101. The PMM free count was the same afterwards. Doc 20.
 
 ```text
 cpu local: self-test ok, after ring 3 the kernel GS base is the per-CPU block and the user one is 0

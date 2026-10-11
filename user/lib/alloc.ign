@@ -1,0 +1,287 @@
+//!
+//! # Memory Allocation (user side)
+//!
+//! A heap for user programs, on memory from `mmap`.
+//!
+//! ## Overview
+//!
+//! Small requests come from arenas of `ARENA_SIZE` bytes that the allocator
+//! maps with `mmap` when it runs out of room, and returns to a free list on
+//! `free`. A request larger than `LARGE_LIMIT`, or with an alignment above 16,
+//! gets a mapping of its own, which `free` gives back with `munmap`.
+//!
+//! ```text
+//!   small block (in an arena)            large block (its own mapping)
+//!   ┌────────┬────────┬─────────┐        ┌──────────────┬────────┬────────┬──────────┐
+//!   │ size   │ USED   │ payload │        │ (page 0)     │ length │ USED   │ payload  │
+//!   │ 8 B    │ 8 B    │ ...     │        │              │ | LARGE│        │ page 1.. │
+//!   └────────┴────────┴─────────┘        └──────────────┴────────┴────────┴──────────┘
+//!   a free block keeps the address       the header is the last 16 bytes of the
+//!   of the next free block instead       first page; the payload is page aligned
+//!   of USED
+//! ```
+//!
+//! The free list is sorted by address. `free` puts a block back in its place
+//! and merges it with a neighbour it touches, so freed space comes back as one
+//! block. Arenas are never unmapped: they sit next to each other (`mmap` hands
+//! out addresses downwards without gaps), and merging across two of them is
+//! harmless.
+//!
+//! `free` checks the `USED` mark and panics on a pointer that is not a live
+//! block, which catches a double free.
+//!
+//! The module defines the compiler's `@allocHandler` and `@freeHandler`, so a
+//! program that imports it can use closures that capture values.
+
+import Sys from "std::sys";
+
+/// The allocator's state.
+record AllocState {
+  /// Address of the first free block, 0 when the list is empty.
+  static mut freeList: u64 = 0;
+
+  /// Arenas mapped so far.
+  static mut arenas: u64 = 0;
+
+  /// Bytes handed out and not freed, headers included.
+  static mut inUse: u64 = 0;
+}
+
+/// The allocator API.
+export namespace Alloc {
+  /// Bytes of one arena.
+  const ARENA_SIZE: u64 = 65536;
+
+  /// Bytes of a block header: the size, then `USED` or the next free block.
+  const HEADER: u64 = 16;
+
+  /// Every small payload is aligned to this.
+  const ALIGNMENT: u64 = 16;
+
+  /// The smallest block a split leaves behind.
+  const MIN_BLOCK: u64 = 32;
+
+  /// Requests above this get their own mapping.
+  const LARGE_LIMIT: u64 = 16384;
+
+  /// 4 KiB.
+  const PAGE: u64 = 4096;
+
+  /// The mark of a block in use.
+  const USED: u64 = 0x55534544;
+
+  /// Bit 0 of the size of a large block.
+  const LARGE: u64 = 1;
+
+  /// Returns `size` bytes aligned to `align` (a power of two, at most 4096),
+  /// or null when the kernel gives no more memory.
+  function allocate(size: u64, align: u64): *mut u8 {
+    let wanted: u64 = size == 0 ? 1 : size;
+
+    if (align > ALIGNMENT || wanted > LARGE_LIMIT) {
+      return allocateLarge(wanted);
+    }
+
+    let total: u64 = roundUp(wanted, ALIGNMENT) + HEADER;
+    let mut block: u64 = takeFit(total);
+
+    if (block == 0) {
+      if (!addArena()) {
+        return null;
+      }
+
+      block = takeFit(total);
+    }
+
+    setWord(block + 8, USED);
+    AllocState::inUse += word(block);
+
+    return @pointerFromInteger<*mut u8>(block + HEADER);
+  }
+
+  /// Gives back a block from `allocate`. Null is ignored. Panics on a
+  /// pointer that is not a live block.
+  function free(pointer: *mut u8): void {
+    if (pointer == null) {
+      return;
+    }
+
+    let block: u64 = @integerFromPointer(pointer) - HEADER;
+
+    if (word(block + 8) != USED) {
+      @panic("alloc: free of a pointer that is not a live block");
+    }
+
+    let size: u64 = word(block);
+
+    if ((size & LARGE) != 0) {
+      let length: u64 = size & ~LARGE;
+
+      AllocState::inUse -= length;
+      setWord(block + 8, 0);
+      Sys::munmap(@integerFromPointer(pointer) - PAGE, length);
+      return;
+    }
+
+    AllocState::inUse -= size;
+    insertFree(block);
+  }
+
+  /// Bytes handed out and not freed, headers and large mappings included.
+  function bytesInUse(): u64 {
+    return AllocState::inUse;
+  }
+
+  /// Arenas mapped so far.
+  function arenaCount(): u64 {
+    return AllocState::arenas;
+  }
+
+  /// Blocks on the free list. With every block freed and the arenas next to
+  /// each other, merging leaves exactly one.
+  function freeBlockCount(): u64 {
+    let mut count: u64 = 0;
+    let mut block: u64 = AllocState::freeList;
+
+    while (block != 0) {
+      count += 1;
+      block = word(block + 8);
+    }
+
+    return count;
+  }
+
+  /// A mapping of its own: one page for the header, then the payload,
+  /// page aligned.
+  function allocateLarge(size: u64): *mut u8 {
+    let length: u64 = roundUp(size, PAGE) + PAGE;
+    let mapping: i64 = Sys::mmap(length, Sys::PROT_READ | Sys::PROT_WRITE, Sys::MAP_PRIVATE | Sys::MAP_ANONYMOUS, 0xFFFFFFFFFFFFFFFF, 0);
+
+    if (mapping < 0) {
+      return null;
+    }
+
+    let payload: u64 = (mapping as u64) + PAGE;
+
+    setWord(payload - HEADER, length | LARGE);
+    setWord(payload - HEADER + 8, USED);
+    AllocState::inUse += length;
+
+    return @pointerFromInteger<*mut u8>(payload);
+  }
+
+  /// Maps a new arena and puts it on the free list as one block.
+  function addArena(): boolean {
+    let mapping: i64 = Sys::mapAnonymous(ARENA_SIZE);
+
+    if (mapping < 0) {
+      return false;
+    }
+
+    setWord(mapping as u64, ARENA_SIZE);
+    insertFree(mapping as u64);
+    AllocState::arenas += 1;
+
+    return true;
+  }
+
+  /// Takes the first free block of at least `total` bytes off the list,
+  /// splits off the rest when it is at least `MIN_BLOCK`, and returns the
+  /// block, or 0 when none fits.
+  function takeFit(total: u64): u64 {
+    let mut previous: u64 = 0;
+    let mut block: u64 = AllocState::freeList;
+
+    while (block != 0) {
+      let size: u64 = word(block);
+
+      if (size >= total) {
+        let mut next: u64 = word(block + 8);
+
+        if (size - total >= MIN_BLOCK) {
+          let rest: u64 = block + total;
+
+          setWord(rest, size - total);
+          setWord(rest + 8, next);
+          setWord(block, total);
+          next = rest;
+        }
+
+        if (previous == 0) {
+          AllocState::freeList = next;
+        } else {
+          setWord(previous + 8, next);
+        }
+
+        return block;
+      }
+
+      previous = block;
+      block = word(block + 8);
+    }
+
+    return 0;
+  }
+
+  /// Puts `block` on the free list in address order and merges it with the
+  /// block before and after it when they touch.
+  function insertFree(block: u64): void {
+    let mut previous: u64 = 0;
+    let mut next: u64 = AllocState::freeList;
+
+    while (next != 0 && next < block) {
+      previous = next;
+      next = word(next + 8);
+    }
+
+    setWord(block + 8, next);
+
+    if (next != 0 && block + word(block) == next) {
+      setWord(block, word(block) + word(next));
+      setWord(block + 8, word(next + 8));
+    }
+
+    if (previous == 0) {
+      AllocState::freeList = block;
+    } else if (previous + word(previous) == block) {
+      setWord(previous, word(previous) + word(block));
+      setWord(previous + 8, word(block + 8));
+    } else {
+      setWord(previous + 8, block);
+    }
+  }
+
+  /// `value` rounded up to a multiple of `unit`, a power of two.
+  function roundUp(value: u64, unit: u64): u64 {
+    return (value + unit - 1) & ~(unit - 1);
+  }
+
+  /// The word at `address`.
+  function word(address: u64): u64 {
+    return *@pointerFromInteger<*u64>(address);
+  }
+
+  /// Stores `value` at `address`.
+  function setWord(address: u64, value: u64): void {
+    *@pointerFromInteger<*mut u64>(address) = value;
+  }
+
+  /// The compiler's allocation hook, for closure environments and the like.
+  /// Panics when no memory is left: compiled code cannot handle null.
+  @allocHandler
+  function onAllocate(size: u64, align: u64): *mut u8 {
+    let pointer: *mut u8 = allocate(size, align);
+
+    if (pointer == null) {
+      @panic("alloc: out of memory");
+    }
+
+    return pointer;
+  }
+
+  /// The compiler's release hook.
+  @freeHandler
+  function onFree(pointer: *mut u8): void {
+    free(pointer);
+  }
+}
