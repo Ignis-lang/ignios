@@ -1,0 +1,73 @@
+//!
+//! # touch
+//!
+//! `touch FILE...`: creates each file that does not exist, empty.
+//!
+//! ## Behaviour
+//!
+//! | Case                         | Effect                                          | Status |
+//! |------------------------------|-------------------------------------------------|--------|
+//! | the file does not exist      | an empty regular file, mode 0644                | 0      |
+//! | the file or directory exists | nothing: there is no clock date to set yet      | 0      |
+//! | it cannot be created         | `touch: cannot touch 'PATH': REASON` on standard error | 1 |
+//! | no arguments                 | `touch: missing file operand` on standard error | 1      |
+//!
+//! The file is opened with `O_CREAT | O_RDONLY`, which creates it when it is
+//! missing and also succeeds on an existing directory, the way GNU touch
+//! accepts one.
+
+import Args from "std::args";
+import Io from "std::io";
+import Sys from "std::sys";
+
+/// rw-r--r--.
+const FILE_MODE: u64 = 0x1A4;
+
+/// Creates `path` if missing. Returns true on success.
+function touchFile(path: *u8): boolean {
+  let descriptor: i64 = Sys::open(path, Sys::O_CREAT | Sys::O_RDONLY, FILE_MODE);
+
+  if (descriptor < 0) {
+    Io::error("touch: cannot touch '");
+    Io::errorString(path);
+    Io::error("': ");
+    Io::error(Sys::errorText(descriptor));
+    Io::error("\n");
+    return false;
+  }
+
+  Sys::close(descriptor as u64);
+
+  return true;
+}
+
+/// Called by `_start` with argc and argv.
+@externName("ignis_main")
+function main(count: u64, values: *u64): u64 {
+  if (count < 2) {
+    Io::error("touch: missing file operand\n");
+    return 1;
+  }
+
+  let mut status: u64 = 0;
+  let mut index: u64 = 1;
+
+  while (index < count) {
+    if (!touchFile(Args::get(values, index))) {
+      status = 1;
+    }
+
+    index += 1;
+  }
+
+  return status;
+}
+
+/// Prints the message and exits with status 101.
+@panicHandler
+function onPanic(message: str, file: str, line: u32): never {
+  Io::error("touch: panic: ");
+  Io::error(message);
+  Io::error("\n");
+  Sys::exit(101);
+}

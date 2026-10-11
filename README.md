@@ -22,7 +22,8 @@ Early, and only tested in QEMU with OVMF.
 | Memory | Bitmap frame allocator over the Limine memory map (4 KiB frames and 2 MiB runs, frees of unmanaged frames rejected); own 4-level page tables (kernel image per segment with W^X, direct map with 2 MiB pages, write-combining framebuffer, NX and write protection on); kernel heap in the higher half behind the compiler's allocation handlers |
 | User mode | Per-process address spaces (own PML4, shared kernel half, U/S pages, frames freed on exit); ring 3 entered with `iretq`, left through `SYSCALL`/`SYSRET` or an interrupt (TSS.RSP0 follows the running thread); a Linux x86_64 syscall subset (`read`, `write`, `openat`, `close`, `lseek`, `fstat`, `newfstatat`, `getdents64`, `mkdirat`, `exit`, `exit_group`, `getpid`, `sched_yield`, `nanosleep`, `-ENOSYS` for the rest) behind a per-process ABI table; every user pointer validated before use; a static ELF64 loader that starts programs from the file tree with argc and argv; a fault, privileged instruction or undefined instruction in ring 3 kills only that process; waiting for a process blocks until it is gone |
 | Files | A ustar initramfs loaded by Limine and checked at boot; an in-memory file tree seeded from it with copy on write, `/dev/console`, path rules as on Linux; per-process descriptor tables (16 descriptors, 0 to 2 on the console); nothing is saved across reboots |
-| Next | `cat`, `ls`, `touch` and `mkdir`, then `mmap`, then a native IgniOS system call ABI |
+| Commands | `cat`, `ls`, `touch` and `mkdir` in `/bin`, written in Ignis on the Linux system calls; any line at the prompt that is not a built-in runs as a program |
+| Next | `mmap`, then a native IgniOS system call ABI |
 
 ## Quick start
 
@@ -33,7 +34,7 @@ nix develop
 make run
 ```
 
-QEMU opens a window. Click it to give it the keyboard and type at the prompt. The terminal shows the serial log.
+QEMU opens a window. Click it to give it the keyboard and type at the prompt: `ls /`, `cat /etc/motd`, `mkdir /tmp`, `touch /tmp/a`, `ls /tmp`. The programs are in `/bin`, and the files you create live in memory until the next boot. The terminal shows the serial log.
 
 The build also needs an Ignis compiler with freestanding support (Ignis `main` from October 2026 or later). The Makefile uses the `ignis` on your `PATH`; point elsewhere with `make IGNIS=/path/to/ignis`.
 
@@ -43,11 +44,12 @@ The build also needs an Ignis compiler with freestanding support (Ignis `main` f
 |---|---|
 | `kernel` | Builds `build/kernel.elf` |
 | `user` | Builds the user programs `build/user/NAME.elf` from `user/NAME`, `user/lib` and the entry stub `user/lib/start.S` |
-| `image` | Builds `build/ignios.img`, a FAT32 EFI system partition with Limine, the kernel and the user program |
+| `image` | Builds `build/ignios.img`, a FAT32 EFI system partition with Limine, the kernel and the initramfs |
 | `run` | Boots in QEMU with the serial console on stdio |
-| `run-headless` | Boots without a display and checks the banner and prompt in `build/serial.log` |
+| `run-headless` | Boots without a display and checks the banner, the prompt and the lines of `hello` in `build/serial.log` |
 | `screenshot` | Boots headless and saves the screen to `build/screen.png` |
 | `keytest` | Types keys through the QEMU monitor and checks the echo |
+| `shelltest` | Types a session of `cat`, `ls`, `touch` and `mkdir`, their errors included, and checks every line they print |
 | `font` | Regenerates `kernel/src/drivers/font_8x16.ign` from the Spleen package |
 | `clean` | Removes `build/` |
 
@@ -89,6 +91,8 @@ The dependencies run one way, and the compiler rejects an import cycle. `Lib`, `
 kernel/linker.ld               higher-half layout
 user/lib/                      the user standard library (entry stub, syscalls, text output, argv)
 user/hello/                    the first user program
+user/cat, ls, touch, mkdir/    the commands
+user/fstest/                   ring 3 checks of the file system calls
 user/user.ld                   user program layout
 initramfs/                     files packed into the initramfs next to the programs in /bin
 boot/limine.conf               boot entry and the initramfs module

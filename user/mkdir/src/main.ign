@@ -1,0 +1,69 @@
+//!
+//! # mkdir
+//!
+//! `mkdir DIRECTORY...`: creates each directory.
+//!
+//! ## Behaviour
+//!
+//! | Case                       | Effect                                                   | Status |
+//! |----------------------------|----------------------------------------------------------|--------|
+//! | the parent exists          | a new empty directory, mode 0755                         | 0      |
+//! | it cannot be created       | `mkdir: cannot create directory 'PATH': REASON` on standard error, then the next one | 1 |
+//! | no arguments               | `mkdir: missing operand` on standard error               | 1      |
+//!
+//! Missing parents are not created (there is no `-p`): `mkdir /a/b` without
+//! `/a` is `No such file or directory`.
+
+import Args from "std::args";
+import Io from "std::io";
+import Sys from "std::sys";
+
+/// rwxr-xr-x.
+const DIRECTORY_MODE: u64 = 0x1ED;
+
+/// Creates `path`. Returns true on success.
+function makeOne(path: *u8): boolean {
+  let result: i64 = Sys::makeDirectory(path, DIRECTORY_MODE);
+
+  if (result < 0) {
+    Io::error("mkdir: cannot create directory '");
+    Io::errorString(path);
+    Io::error("': ");
+    Io::error(Sys::errorText(result));
+    Io::error("\n");
+    return false;
+  }
+
+  return true;
+}
+
+/// Called by `_start` with argc and argv.
+@externName("ignis_main")
+function main(count: u64, values: *u64): u64 {
+  if (count < 2) {
+    Io::error("mkdir: missing operand\n");
+    return 1;
+  }
+
+  let mut status: u64 = 0;
+  let mut index: u64 = 1;
+
+  while (index < count) {
+    if (!makeOne(Args::get(values, index))) {
+      status = 1;
+    }
+
+    index += 1;
+  }
+
+  return status;
+}
+
+/// Prints the message and exits with status 101.
+@panicHandler
+function onPanic(message: str, file: str, line: u32): never {
+  Io::error("mkdir: panic: ");
+  Io::error(message);
+  Io::error("\n");
+  Sys::exit(101);
+}

@@ -71,7 +71,7 @@ Each subsystem is a directory under `kernel/src/` with a `mod.ign` facade. The f
 | 7 | Keyboard | `drivers/ps2.ign`, `lib/scancode_queue.ign`, `drivers/keyboard.ign` |
 | 8 | Threads, scheduling and the shell | `arch/x86_64/context.ign`, `context_asm.S`, `sched/thread.ign`, `sched/scheduler.ign`, `shell/*.ign` |
 | 9 | User mode | `arch/x86_64/usermode.ign`, `usermode_asm.S`, `proc/process.ign`, `syscall/*.ign`, `proc/elf.ign`, `mm/modules.ign`, `proc/programs.ign`, `user/` |
-| 10 | Files | `initramfs/`, `fs/tar.ign`, `fs/initramfs.ign`, `fs/vfs.ign`, `fs/files.ign`, `syscall/linux/files.ign`, `user/fstest/` |
+| 10 | Files | `initramfs/`, `fs/tar.ign`, `fs/initramfs.ign`, `fs/vfs.ign`, `fs/files.ign`, `syscall/linux/files.ign`, `user/fstest/`, `user/cat/`, `user/ls/`, `user/touch/`, `user/mkdir/` |
 | 11 | Boot self-tests | `tests/*.ign`, `arch/x86_64/user_test_asm.S` |
 | 12 | Scripts | `scripts/` |
 
@@ -187,7 +187,7 @@ Doc 13.
 
 **`shell/terminal.ign`.** The terminal loop the boot thread becomes. It is the clearest example of the `cli`, check, `sti; hlt` pattern that avoids a lost wakeup: the queue is tested with interrupts off so a key cannot arrive between the test and the sleep.
 
-**`shell/commands.ign` and `shell/thread_commands.ign`.** The commands: `uptime`, `ps`, `threads` and `run PROGRAM [ARG...]`.
+**`shell/commands.ign` and `shell/thread_commands.ign`.** The commands: `uptime`, `ps`, `threads` and `run PROGRAM [ARG...]`. Any other line that is not blank runs as a program, so `cat /etc/motd` is `run cat /etc/motd`.
 
 ## Part 9. User mode
 
@@ -223,13 +223,15 @@ Docs 14 and 15.
 
 **`user/fstest/`.** A ring 3 program that checks each call and each error the way a Linux program sees them, and exits with the number of the first check that failed. The table in its header lists the checks.
 
+**`user/cat/`, `user/ls/`, `user/touch/` and `user/mkdir/`.** The commands, each one a short Ignis program on `std::sys`. Each header has a table of what it does in each case and the exact error line, in the format of GNU coreutils (`ls: cannot access '/nope': No such file or directory`). `ls` reads `struct linux_dirent64` records and hides `.` and `..`; `touch` opens with `O_CREAT | O_RDONLY`, which also accepts an existing directory. `Sys::errorText` in `user/lib/sys.ign` is their `strerror`.
+
 ## Part 11. Boot self-tests
 
 **`tests/`.** One file per check, run by `kmain` where the subsystem is ready. Each prints one line and panics on the first violation, so a boot that continues has passed it. The tests use only the public functions of the subsystems. `pmm.ign`, `vmm.ign`, `heap.ign`, `address_space.ign`, `timer.ign` and `context.ign` check the primitives, `initramfs.ign` feeds the ustar reader one malformed header per error code, `vfs.ign` walks the path rules and every status code of the file tree, `user.ign` also runs `/bin/fstest` and the programs `run` must refuse, `address_space.ign` including a 2 MiB user page. `protection.ign` checks that SMAP and SMEP fault. `scheduler.ign` runs round-robin order, sleeping, a full table, one address space per thread and preemption of threads that never yield. `user.ign` and `arch/x86_64/user_test_asm.S` hold sixteen throwaway ring 3 programs. Seven behave (exit, registers, spin, a spin with RFLAGS.AC set, system calls, the x87 and SSE check that runs as two processes, and a 200 ms nap that `wait` must block on) and nine do something forbidden. The kernel must kill each of the nine with the right status. `cpu_local.ign` runs last and checks that every way in and out of ring 3 left the GS bases balanced.
 
 ## Part 12. Scripts
 
-**`scripts/keytest.sh` and `scripts/screenshot.sh`.** Boot QEMU headless, wait for the prompt on the serial log, and drive the QEMU monitor (`sendkey`, `screendump`). `keytest.sh` also checks the echo. **`scripts/gen-font.py`** regenerates `drivers/font_8x16.ign` from the Spleen BDF file. **`flake.nix`** provides the toolchain.
+**`scripts/keytest.sh`, `scripts/shelltest.sh` and `scripts/screenshot.sh`.** Boot QEMU headless, wait for the prompt on the serial log, and drive the QEMU monitor (`sendkey`, `screendump`). `keytest.sh` also checks the echo. `shelltest.sh` types one command at a time, waits for the next prompt, and compares what each command printed, line for line, with the session in the script. **`scripts/gen-font.py`** regenerates `drivers/font_8x16.ign` from the Spleen BDF file. **`flake.nix`** provides the toolchain.
 
 ---
 
@@ -355,9 +357,9 @@ vmm: self-test ok
 `Tests::Vmm::run` mapped a frame at a test address, wrote through it, read it through the direct map, and unmapped it.
 
 ```text
-modules: initramfs is /initramfs.tar, 40960 bytes at 0xffff80000a0db000
+modules: initramfs is /initramfs.tar, 92160 bytes at 0xffff80000a0ce000
 ```
-The Limine module from `boot/limine.conf`. `initramfs` is the `module_string`, `/initramfs.tar` the path. `Mm::Modules::initialize` mapped its pages read only. The address is in the direct map, so the file sits at physical `0x0a0db000`. Doc 15.
+The Limine module from `boot/limine.conf`. `initramfs` is the `module_string`, `/initramfs.tar` the path. `Mm::Modules::initialize` mapped its pages read only. The address is in the direct map, so the file sits at physical `0x0a0ce000`. Doc 15.
 
 ```text
 heap: self-test ok, 1092 KiB mapped, 0 bytes in use
@@ -365,16 +367,16 @@ heap: self-test ok, 1092 KiB mapped, 0 bytes in use
 `Tests::Heap::run` checked alignment, reuse, merging, growth (it allocates 1 MiB) and the compiler allocation handlers. 1092 KiB of heap pages stayed mapped and every block was freed. Doc 10.
 
 ```text
-initramfs: 40960 bytes, 3 files with 30395 bytes of data, 3 directories
+initramfs: 92160 bytes, 7 files with 75315 bytes of data, 3 directories
 initramfs: self-test ok, 6 malformed headers refused, 2 valid ones read, etc/motd read back
 ```
-`Fs::Initramfs::initialize` walked the archive: `etc/motd`, `bin/hello` and `bin/fstest` are the files, and `.`, `bin` and `etc` the directories. The size is a multiple of 10240 bytes because tar pads the archive to whole records. `Tests::Initramfs::run` then fed the reader one broken header per error code (checksum, magic, a non-octal number, a `..` path, a symbolic link, data past the end), a file and a directory with a prefix, and compared `etc/motd` with the text it should hold.
+`Fs::Initramfs::initialize` walked the archive: `etc/motd` and the six programs in `bin` (`cat`, `fstest`, `hello`, `ls`, `mkdir`, `touch`) are the files, and `.`, `bin` and `etc` the directories. The size is a multiple of 10240 bytes because tar pads the archive to whole records. `Tests::Initramfs::run` then fed the reader one broken header per error code (checksum, magic, a non-octal number, a `..` path, a symbolic link, data past the end), a file and a directory with a prefix, and compared `etc/motd` with the text it should hold.
 
 ```text
-vfs: 8 nodes, 30395 bytes in files, seeded from the initramfs
+vfs: 12 nodes, 75315 bytes in files, seeded from the initramfs
 vfs: self-test ok, lookup, create, read, write, truncate, remove and copy on write
 ```
-`Fs::Vfs::initialize` built the tree: the root, `bin`, `bin/fstest`, `bin/hello`, `etc` and `etc/motd` from the archive, then `dev` and the device node `dev/console`. The file bytes are the same 30395 as in the archive, because nothing was copied. `Tests::Vfs::run` checked every path rule, created, wrote, read, truncated and removed a test directory `/t` and checked that the heap returned to where it was, then wrote to `/etc/motd` to check that the write copied the file and left the archive alone.
+`Fs::Vfs::initialize` built the tree: the root, `bin` with its six programs, `etc` and `etc/motd` from the archive, then `dev` and the device node `dev/console`. The file bytes are the same 75315 as in the archive, because nothing was copied. `Tests::Vfs::run` checked every path rule, created, wrote, read, truncated and removed a test directory `/t` and checked that the heap returned to where it was, then wrote to `/etc/motd` to check that the write copied the file and left the archive alone.
 
 ```text
 address space: self-test ok, private user half, shared kernel half, frames returned
@@ -637,4 +639,18 @@ keyboard: PS/2, scancode set 1, US layout, IRQ1 through the IOAPIC
 ```text
 > 
 ```
-`Shell::Terminal::run` printed the prompt and sleeps in `sti; hlt` until a key arrives. Everything after this line in a real run is what you type. `make keytest` types a fixed sequence here and checks the echo.
+`Shell::Terminal::run` printed the prompt and sleeps in `sti; hlt` until a key arrives. Everything after this line in a real run is what you type. `make keytest` types a fixed sequence here and checks the echo, and `make shelltest` types a session of `cat`, `ls`, `touch` and `mkdir`. A session looks like this (the loader's `elf:` lines left out):
+
+```text
+> mkdir /tmp
+process 21 exited with status 0
+> touch /tmp/a
+process 22 exited with status 0
+> ls /tmp
+a
+process 23 exited with status 0
+> cat /nope
+cat: /nope: No such file or directory
+process 24 exited with status 1
+```
+Each line that is not a built-in command (`uptime`, `ps`, `threads`, `run`) runs as a program from `/bin`. The tree lives in memory: `/tmp` is gone after a reboot.

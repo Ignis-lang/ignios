@@ -19,6 +19,32 @@ export namespace Io {
     Sys::write(Sys::STDOUT, bytes, length);
   }
 
+  /// Writes the NUL-terminated string at `text` to standard output.
+  function printString(text: *u8): void {
+    printBytes(text, stringLength(text));
+  }
+
+  /// Writes a NUL-terminated string to standard error.
+  function error(text: str): void {
+    errorString(text as *u8);
+  }
+
+  /// Writes the NUL-terminated string at `text` to standard error.
+  function errorString(text: *u8): void {
+    Sys::write(Sys::STDERR, text, stringLength(text));
+  }
+
+  /// The length of the NUL-terminated string at `text`, without the NUL.
+  function stringLength(text: *u8): u64 {
+    let mut length: u64 = 0;
+
+    while (*(text + length) != 0) {
+      length += 1;
+    }
+
+    return length;
+  }
+
   /// Writes a NUL-terminated string to standard output.
   function print(text: str): void {
     let mut length: u64 = 0;

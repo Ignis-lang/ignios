@@ -1,0 +1,108 @@
+//!
+//! # cat
+//!
+//! `cat FILE...`: writes each file to standard output, in order.
+//!
+//! ## Behaviour
+//!
+//! | Case                    | Output                                         | Status |
+//! |-------------------------|------------------------------------------------|--------|
+//! | every file readable     | their bytes, one after the other               | 0      |
+//! | a file cannot be opened or read | `cat: PATH: REASON` on standard error, then the next file | 1 |
+//! | no arguments            | standard input, which is empty for now         | 0      |
+//!
+//! The reason is the `strerror` text of the errno, as GNU cat prints it:
+//! `cat: /nope: No such file or directory`, `cat: /etc: Is a directory`.
+//! Bytes go through a 512-byte buffer, so a file of any size is copied in
+//! pieces.
+
+import Args from "std::args";
+import Io from "std::io";
+import Sys from "std::sys";
+
+/// The copy buffer.
+record Cat {
+  /// Bytes read from a file and written to standard output.
+  static mut buffer: u8[512];
+}
+
+/// Size of `Cat::buffer`.
+const BUFFER_SIZE: u64 = 512;
+
+/// Copies the open `descriptor` to standard output until the end. Returns 0,
+/// or the negated errno of a failed read.
+function copy(descriptor: u64): i64 {
+  let buffer: *mut u8 = &mut Cat::buffer as *mut u8;
+
+  while (true) {
+    let count: i64 = Sys::read(descriptor, buffer, BUFFER_SIZE);
+
+    if (count <= 0) {
+      return count;
+    }
+
+    Sys::write(Sys::STDOUT, buffer as *u8, count as u64);
+  }
+
+  return 0;
+}
+
+/// Prints `cat: PATH: REASON` on standard error.
+function report(path: *u8, result: i64): void {
+  Io::error("cat: ");
+  Io::errorString(path);
+  Io::error(": ");
+  Io::error(Sys::errorText(result));
+  Io::error("\n");
+}
+
+/// Copies one file to standard output. Returns true on success.
+function catFile(path: *u8): boolean {
+  let descriptor: i64 = Sys::open(path, Sys::O_RDONLY, 0);
+
+  if (descriptor < 0) {
+    report(path, descriptor);
+    return false;
+  }
+
+  let result: i64 = copy(descriptor as u64);
+
+  Sys::close(descriptor as u64);
+
+  if (result < 0) {
+    report(path, result);
+    return false;
+  }
+
+  return true;
+}
+
+/// Called by `_start` with argc and argv.
+@externName("ignis_main")
+function main(count: u64, values: *u64): u64 {
+  if (count < 2) {
+    return copy(Sys::STDIN) < 0 ? 1 : 0;
+  }
+
+  let mut status: u64 = 0;
+  let mut index: u64 = 1;
+
+  while (index < count) {
+    if (!catFile(Args::get(values, index))) {
+      status = 1;
+    }
+
+    index += 1;
+  }
+
+  return status;
+}
+
+/// Prints the message and exits with status 101.
+@panicHandler
+function onPanic(message: str, file: str, line: u32): never {
+  Io::error("cat: panic: ");
+  Io::error(message);
+  Io::error("\n");
+  Sys::exit(101);
+}

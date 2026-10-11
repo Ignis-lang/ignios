@@ -1,0 +1,174 @@
+//!
+//! # ls
+//!
+//! `ls [PATH...]`: lists the entries of each directory, one name per line.
+//!
+//! ## Behaviour
+//!
+//! | Case                  | Output                                               | Status |
+//! |-----------------------|------------------------------------------------------|--------|
+//! | no arguments          | the entries of the current directory, which is `/`   | 0      |
+//! | a directory           | its entries in creation order, without `.` and `..`  | 0      |
+//! | a file                | its path, as given                                   | 0      |
+//! | more than one path    | each directory under a `PATH:` heading, a blank line between them | 0 |
+//! | a path that fails     | `ls: cannot access 'PATH': REASON` on standard error | 2      |
+//!
+//! The names come from `getdents64`, read in 512-byte batches. Each record is
+//! a `struct linux_dirent64`: the name starts at byte 19 and the record
+//! length is the 2 bytes at offset 16. Status 2 for a missing path is GNU
+//! ls's "serious trouble".
+
+import Args from "std::args";
+import Io from "std::io";
+import Sys from "std::sys";
+
+/// What the listing shares.
+record Ls {
+  /// Directory records from `getdents64`.
+  static mut buffer: u8[512];
+
+  /// A `struct stat`.
+  static mut stat: u8[144];
+}
+
+/// Size of `Ls::buffer`.
+const BUFFER_SIZE: u64 = 512;
+
+/// The file type bits of `st_mode` (offset 24 of `struct stat`).
+const MODE_TYPE_MASK: u32 = 0xF000;
+
+/// `S_IFDIR`.
+const MODE_DIRECTORY: u32 = 0x4000;
+
+/// Offset of `d_reclen` in a record.
+const RECORD_LENGTH_OFFSET: u64 = 16;
+
+/// Offset of `d_name` in a record.
+const RECORD_NAME_OFFSET: u64 = 19;
+
+/// Prints `ls: cannot access 'PATH': REASON` on standard error.
+function report(path: *u8, result: i64): void {
+  Io::error("ls: cannot access '");
+  Io::errorString(path);
+  Io::error("': ");
+  Io::error(Sys::errorText(result));
+  Io::error("\n");
+}
+
+/// True when the NUL-terminated `name` is `.` or `..`.
+function isDotEntry(name: *u8): boolean {
+  if (*name != 0x2E) {
+    return false;
+  }
+
+  return *(name + 1) == 0 || (*(name + 1) == 0x2E && *(name + 2) == 0);
+}
+
+/// Prints every entry of the open directory `descriptor` but `.` and `..`.
+/// Returns 0, or the negated errno of a failed read.
+function listEntries(descriptor: u64): i64 {
+  let buffer: *mut u8 = &mut Ls::buffer as *mut u8;
+
+  while (true) {
+    let total: i64 = Sys::readDirectory(descriptor, buffer, BUFFER_SIZE);
+
+    if (total <= 0) {
+      return total;
+    }
+
+    let mut offset: u64 = 0;
+
+    while (offset < total as u64) {
+      let entry: *mut u8 = buffer + offset;
+      let length: u64 = (*(entry + RECORD_LENGTH_OFFSET) as u64) | ((*(entry + RECORD_LENGTH_OFFSET + 1) as u64) << 8);
+      let name: *u8 = (entry + RECORD_NAME_OFFSET) as *u8;
+
+      if (!isDotEntry(name)) {
+        Io::printString(name);
+        Io::print("\n");
+      }
+
+      offset += length;
+    }
+  }
+
+  return 0;
+}
+
+/// Lists one path. With `heading`, a directory is listed under `PATH:`.
+/// Returns true on success.
+function listPath(path: *u8, heading: boolean): boolean {
+  let stat: *mut u8 = &mut Ls::stat as *mut u8;
+  let described: i64 = Sys::statAt(Sys::AT_FDCWD, path, stat, 0);
+
+  if (described < 0) {
+    report(path, described);
+    return false;
+  }
+
+  let mode: u32 = *@pointerFromInteger<*u32>(@integerFromPointer(stat) + 24);
+
+  if ((mode & MODE_TYPE_MASK) != MODE_DIRECTORY) {
+    Io::printString(path);
+    Io::print("\n");
+    return true;
+  }
+
+  let descriptor: i64 = Sys::open(path, Sys::O_RDONLY | Sys::O_DIRECTORY, 0);
+
+  if (descriptor < 0) {
+    report(path, descriptor);
+    return false;
+  }
+
+  if (heading) {
+    Io::printString(path);
+    Io::print(":\n");
+  }
+
+  let result: i64 = listEntries(descriptor as u64);
+
+  Sys::close(descriptor as u64);
+
+  if (result < 0) {
+    report(path, result);
+    return false;
+  }
+
+  return true;
+}
+
+/// Called by `_start` with argc and argv.
+@externName("ignis_main")
+function main(count: u64, values: *u64): u64 {
+  if (count < 2) {
+    return listPath("." as *u8, false) ? 0 : 2;
+  }
+
+  let heading: boolean = count > 2;
+  let mut status: u64 = 0;
+  let mut index: u64 = 1;
+
+  while (index < count) {
+    if (heading && index > 1) {
+      Io::print("\n");
+    }
+
+    if (!listPath(Args::get(values, index), heading)) {
+      status = 2;
+    }
+
+    index += 1;
+  }
+
+  return status;
+}
+
+/// Prints the message and exits with status 101.
+@panicHandler
+function onPanic(message: str, file: str, line: u32): never {
+  Io::error("ls: panic: ");
+  Io::error(message);
+  Io::error("\n");
+  Sys::exit(101);
+}

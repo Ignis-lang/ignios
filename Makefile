@@ -12,7 +12,8 @@
 #   kernel.elf + initramfs.tar + Limine + boot/limine.conf --mtools--> build/ignios.img (FAT32 ESP)
 #
 # Common targets: `make run` (window), `make run-headless` (serial log check),
-# `make keytest` (types keys and checks the echo), `make clean`.
+# `make keytest` (types keys and checks the echo), `make shelltest` (types a
+# session of cat, ls, touch and mkdir and checks the output), `make clean`.
 
 # The Ignis compiler. Override with `make IGNIS=/path/to/ignis`.
 IGNIS ?= ignis
@@ -37,7 +38,7 @@ IGNIS_OBJECT := $(BUILD)/ignis/user/obj/kernel.o
 # The user programs. Each NAME is an Ignis project in user/NAME whose ignis.toml
 # writes its object to build/user/NAME; it is linked with the entry stub
 # user/lib/start.S and shipped in the initramfs as /bin/NAME.
-USER_PROGRAMS := hello fstest
+USER_PROGRAMS := hello fstest cat ls touch mkdir
 USER_ELFS := $(patsubst %,$(BUILD)/user/%.elf,$(USER_PROGRAMS))
 USER_LIB_SOURCES := $(shell find user/lib -name '*.ign' -o -name '*.toml')
 USER_START := $(BUILD)/user/start.o
@@ -81,7 +82,7 @@ USER_LDFLAGS := -m elf_x86_64 -nostdlib -static --no-dynamic-linker \
 
 # Targets that name an action, not a file. `make` with no target builds
 # `all`, the boot image.
-.PHONY: all kernel user esp image run run-headless screenshot keytest font clean
+.PHONY: all kernel user esp image run run-headless screenshot keytest shelltest font clean
 
 all: image
 
@@ -191,6 +192,12 @@ keytest: $(IMAGE) $(OVMF_VARS_COPY)
 		$(QEMU) $(QEMU_FLAGS) -display none -serial file:$(SERIAL_LOG)
 	pnmtopng $(SCREEN_PPM) > $(SCREEN_PNG)
 	@echo "wrote $(SCREEN_PNG)"
+
+# Boots without a display, types a shell session (cat, ls, touch, mkdir and
+# their errors) through the QEMU monitor and checks the serial log.
+shelltest: $(IMAGE) $(OVMF_VARS_COPY)
+	scripts/shelltest.sh $(SERIAL_LOG) $(HEADLESS_SECONDS) -- \
+		$(QEMU) $(QEMU_FLAGS) -display none -serial file:$(SERIAL_LOG)
 
 # Regenerates the committed console font from the Spleen BDF in the devShell.
 font:

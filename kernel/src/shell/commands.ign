@@ -13,8 +13,9 @@
 //! | `threads`   | Starts the demo threads (`thread_commands.ign`)         |
 //! | `run PROGRAM [ARG...]` | Runs PROGRAM in ring 3; a name without `/` is in /bin |
 //!
-//! A line that names no command does nothing: there is no "unknown command"
-//! message. The line buffer is not NUL-terminated, so every comparison is
+//! Any other line runs as a program, as if it started with `run`: `cat
+//! /etc/motd` runs `/bin/cat`, and a name that is not in `/bin` prints
+//! `run: /bin/NAME: no such file or directory`. A blank line does nothing. The line buffer is not NUL-terminated, so every comparison is
 //! bounded by the length the terminal passes in.
 
 import Drivers from "@drivers";
@@ -103,8 +104,8 @@ namespace Shell::Commands {
     return true;
   }
 
-  /// Runs the command on the line. A line that names no command does nothing:
-  /// there is no "unknown command" message.
+  /// Runs the command on the line. A line that names no built-in command runs
+  /// as a program; a blank line does nothing.
   function run(line: *mut u8, length: u64): void {
     if (lineIs(line, length, UPTIME_COMMAND)) {
       printUptime();
@@ -116,6 +117,23 @@ namespace Shell::Commands {
       }
     } else if (lineStartsWith(line, length, RUN_COMMAND)) {
       Proc::Programs::run((line + RUN_COMMAND_LENGTH) as *u8, length - RUN_COMMAND_LENGTH);
+    } else if (!isBlank(line, length)) {
+      Proc::Programs::run(line as *u8, length);
     }
+  }
+
+  /// True when the line has nothing but spaces.
+  function isBlank(line: *mut u8, length: u64): boolean {
+    let mut index: u64 = 0;
+
+    while (index < length) {
+      if (*(line + index) != 0x20) {
+        return false;
+      }
+
+      index += 1;
+    }
+
+    return true;
   }
 }
