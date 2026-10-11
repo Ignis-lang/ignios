@@ -27,7 +27,7 @@ The concept documents explain the x86_64 and kernel background, and this guide r
 | 06 | Devices and I/O | 14 | Address spaces and user mode |
 | 07 | Framebuffer console | 15 | System calls and ELF programs |
 | 16 | x87 and SSE state | 17 | SMEP, SMAP and fault probes |
-| 18 | Per-CPU data and `swapgs` | | |
+| 18 | Per-CPU data and `swapgs` | 19 | Files: initramfs, VFS and descriptors |
 
 ## The subsystems
 
@@ -208,6 +208,8 @@ Docs 14 and 15.
 **`user/`.** The user side. `lib/start.S` is `_start`, the entry point of every program: it reads argc and argv from the initial stack and calls the program's `main`, because a compiled function cannot start on a stack that holds no return address. `lib/sys.ign` wraps the `syscall` instruction, `lib/io.ign` prints, `lib/args.ign` reads argv, and `hello/src/main.ign` is the first program. `user/user.ld` places programs at `0x400000`.
 
 ## Part 10. Files
+
+Doc 19.
 
 **`initramfs/` and the `$(INITRAMFS)` rule of the `Makefile`.** The files the kernel boots with. The Makefile copies `initramfs/` and the user programs (in `/bin`) to `build/initramfs/` and packs that directory as a ustar archive with fixed owner, group and times, so the archive depends only on the files. `boot/limine.conf` loads it as the module `initramfs`.
 
