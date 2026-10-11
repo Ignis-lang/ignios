@@ -36,6 +36,8 @@
 //!   ├─ Mm::Vmm::initialize + Tests::Vmm ... own page tables, CR3 switch   mm/        doc 09
 //!   ├─ Mm::Modules::initialize ............ map Limine modules            mm/        doc 15
 //!   ├─ Mm::Heap::initialize + Tests::Heap . kernel heap                   mm/        doc 10
+//!   ├─ Fs::Initramfs::initialize + Tests::Initramfs
+//!   │  .................................... check the initramfs archive   fs/
 //!   ├─ Tests::AddressSpace ................ private user halves           mm/        doc 14
 //!   ├─ Trap::Setup::initializeProtection +
 //!   │  Tests::Protection .................. SMEP and SMAP on, probed      trap/      doc 17
@@ -72,6 +74,7 @@ import Apic from "@apic";
 import Arch from "@arch";
 import Boot from "@boot";
 import Drivers from "@drivers";
+import Fs from "@fs";
 import Mm from "@mm";
 import Proc from "@proc";
 import Sched from "@sched";
@@ -131,6 +134,10 @@ function kmain(): void {
 
   Mm::Heap::initialize();
   Tests::Heap::run();
+
+  Fs::Initramfs::initialize();
+  Fs::Initramfs::report();
+  Tests::Initramfs::run();
 
   Tests::AddressSpace::run();
 

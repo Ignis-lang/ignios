@@ -12,6 +12,7 @@
 //! | `Tests::Pmm`          | `pmm.ign`           | frame allocation, uniqueness, reuse, the free count        |
 //! | `Tests::Vmm`          | `vmm.ign`           | `map`, `unmap` and `translate` against the direct map      |
 //! | `Tests::Heap`         | `heap.ign`          | alignment, reuse, merging, growth, the compiler handlers   |
+//! | `Tests::Initramfs`    | `initramfs.ign`     | the ustar reader refuses each malformed header, etc/motd   |
 //! | `Tests::AddressSpace` | `address_space.ign` | private user half, shared kernel half, no leaked frames    |
 //! | `Tests::Protection`   | `protection.ign`    | SMAP and SMEP stop ring 0 at user pages                    |
 //! | `Tests::Timer`        | `timer.ign`         | ticks arrive                                               |
@@ -35,6 +36,7 @@ import _ from "./address_space";
 import _ from "./context";
 import _ from "./cpu_local";
 import _ from "./heap";
+import _ from "./initramfs";
 import _ from "./pmm";
 import _ from "./protection";
 import _ from "./scheduler";

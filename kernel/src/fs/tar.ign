@@ -1,0 +1,419 @@
+//!
+//! # Ustar Archives
+//!
+//! A reader for the POSIX ustar format, the archive the initramfs is.
+//!
+//! ## Overview
+//!
+//! A ustar archive is a sequence of 512-byte blocks. Each member is one
+//! header block followed by its data, rounded up to whole blocks. One or two
+//! blocks of zeros end the archive.
+//!
+//! ```text
+//!   offset 0      header of member 1        512 bytes
+//!   offset 512    data of member 1          size rounded up to 512
+//!   ...           header of member 2
+//!   ...
+//!   end           zero block, zero block
+//! ```
+//!
+//! The header fields this reader uses. Numbers are ASCII octal, ended by a NUL
+//! or a space, with leading spaces allowed:
+//!
+//! | Offset | Length | Field    | Use                                                  |
+//! |--------|--------|----------|------------------------------------------------------|
+//! | 0      | 100    | name     | the path, or its last part when `prefix` is set      |
+//! | 100    | 8      | mode     | permission bits, reported, not enforced              |
+//! | 124    | 12     | size     | data length in bytes                                 |
+//! | 148    | 8      | chksum   | sum of the 512 header bytes, this field read as spaces |
+//! | 156    | 1      | typeflag | `'0'` or NUL a regular file, `'5'` a directory       |
+//! | 257    | 6      | magic    | `"ustar"` and a NUL (POSIX) or a space (GNU)         |
+//! | 345    | 155    | prefix   | the leading directories of a long path               |
+//!
+//! The full path is `prefix/name` when `prefix` is not empty. `next` returns
+//! it normalized: no leading `./` or `/`, no trailing `/`, so `./etc/` reads
+//! as `etc` and the archive root `./` reads as the empty path. A path with a
+//! `..` component is refused, so an archive cannot name a file outside the
+//! tree it is unpacked into.
+//!
+//! Every field is checked before use: the checksum, the magic, the octal
+//! digits and that the data lies inside the archive. Members of any other
+//! type (links, devices, FIFOs) are refused, since the kernel builds its own
+//! archive and never needs them.
+//!
+//! See POSIX.1-2017, `pax`, "ustar Interchange Format".
+
+import Lib from "@lib";
+
+namespace Fs {
+  /// One member of an archive, as `Fs::Tar::next` reports it.
+  @cLayout
+  record TarEntry {
+    /// `Fs::Tar::FILE` or `Fs::Tar::DIRECTORY`.
+    public kind: u64;
+
+    /// The permission bits of the `mode` field.
+    public mode: u64;
+
+    /// The first data byte, inside the archive. Valid for a file.
+    public data: *u8;
+
+    /// The data length in bytes. 0 for a directory.
+    public size: u64;
+
+    /// The length of the normalized path written to the caller's buffer.
+    public pathLength: u64;
+
+    /// The offset of the header that follows this member.
+    public next: u64;
+  }
+}
+
+/// The ustar reader.
+namespace Fs::Tar {
+  /// The size of a header block and the unit data is rounded up to.
+  const BLOCK_SIZE: u64 = 512;
+
+  /// The longest normalized path: a 155-byte prefix, a slash and a 100-byte
+  /// name. A caller's path buffer must hold this many bytes.
+  const PATH_CAPACITY: u64 = 256;
+
+  /// A regular file.
+  const FILE: u64 = 1;
+
+  /// A directory.
+  const DIRECTORY: u64 = 2;
+
+  /// `next` read a member.
+  const OK: u64 = 0;
+
+  /// `next` reached the end of the archive.
+  const END: u64 = 1;
+
+  /// A header or its data runs past the end of the archive.
+  const ERR_TRUNCATED: u64 = 2;
+
+  /// The checksum field does not match the header.
+  const ERR_CHECKSUM: u64 = 3;
+
+  /// The magic field is not `ustar`.
+  const ERR_MAGIC: u64 = 4;
+
+  /// A numeric field has a character that is not an octal digit.
+  const ERR_NUMBER: u64 = 5;
+
+  /// The path is too long or has a `..` component.
+  const ERR_PATH: u64 = 6;
+
+  /// The member is neither a regular file nor a directory.
+  const ERR_TYPE: u64 = 7;
+
+  /// Offset and length of the `name` field.
+  const NAME_OFFSET: u64 = 0;
+
+  /// 100 bytes.
+  const NAME_LENGTH: u64 = 100;
+
+  /// Offset and length of the `mode` field.
+  const MODE_OFFSET: u64 = 100;
+
+  /// 8 bytes.
+  const MODE_LENGTH: u64 = 8;
+
+  /// Offset and length of the `size` field.
+  const SIZE_OFFSET: u64 = 124;
+
+  /// 12 bytes.
+  const SIZE_LENGTH: u64 = 12;
+
+  /// Offset and length of the `chksum` field.
+  const CHECKSUM_OFFSET: u64 = 148;
+
+  /// 8 bytes.
+  const CHECKSUM_LENGTH: u64 = 8;
+
+  /// Offset of the `typeflag` byte.
+  const TYPE_OFFSET: u64 = 156;
+
+  /// Offset of the `magic` field.
+  const MAGIC_OFFSET: u64 = 257;
+
+  /// Offset and length of the `prefix` field.
+  const PREFIX_OFFSET: u64 = 345;
+
+  /// 155 bytes.
+  const PREFIX_LENGTH: u64 = 155;
+
+  /// ASCII space, also the value the checksum field counts as.
+  const SPACE: u8 = 0x20;
+
+  /// ASCII `/`.
+  const SLASH: u8 = 0x2F;
+
+  /// ASCII `.`.
+  const DOT: u8 = 0x2E;
+
+  /// ASCII `0`.
+  const DIGIT_ZERO: u8 = 0x30;
+
+  /// ASCII `7`.
+  const DIGIT_SEVEN: u8 = 0x37;
+
+  /// Typeflag of a regular file, `'0'`. Old archives write a NUL instead.
+  const TYPE_FILE: u8 = 0x30;
+
+  /// Typeflag of a directory, `'5'`.
+  const TYPE_DIRECTORY: u8 = 0x35;
+
+  /// Reads the member whose header starts at `offset` in the `size` bytes at
+  /// `archive`. On `OK` fills `entry` and writes the normalized path to
+  /// `path`, which holds `PATH_CAPACITY` bytes; continue with `entry.next`.
+  /// Returns `END` at a zero block or at the exact end of the archive, and
+  /// an `ERR_` code for anything malformed. Nothing outside the archive is
+  /// read.
+  function next(
+    archive: *u8,
+    size: u64,
+    offset: u64,
+    entry: *mut Fs::TarEntry,
+    path: *mut u8
+  ): u64 {
+    if (offset == size) {
+      return END;
+    }
+
+    if (offset > size || size - offset < BLOCK_SIZE) {
+      return ERR_TRUNCATED;
+    }
+
+    let header: *u8 = archive + offset;
+
+    if (isZeroBlock(header)) {
+      return END;
+    }
+
+    let mut stored: u64 = 0;
+
+    if (!readOctal(header + CHECKSUM_OFFSET, CHECKSUM_LENGTH, &mut stored as *mut u64)) {
+      return ERR_NUMBER;
+    }
+
+    if (stored != checksum(header)) {
+      return ERR_CHECKSUM;
+    }
+
+    if (!hasMagic(header)) {
+      return ERR_MAGIC;
+    }
+
+    let mut length: u64 = 0;
+    let mut mode: u64 = 0;
+
+    if (!readOctal(header + SIZE_OFFSET, SIZE_LENGTH, &mut length as *mut u64) || !readOctal(header + MODE_OFFSET, MODE_LENGTH, &mut mode as *mut u64)) {
+      return ERR_NUMBER;
+    }
+
+    let typeflag: u8 = *(header + TYPE_OFFSET);
+    let mut kind: u64 = FILE;
+
+    if (typeflag == TYPE_DIRECTORY) {
+      kind = DIRECTORY;
+      length = 0;
+    } else if (typeflag != TYPE_FILE && typeflag != 0) {
+      return ERR_TYPE;
+    }
+
+    let dataStart: u64 = offset + BLOCK_SIZE;
+    let rounded: u64 = roundUp(length);
+
+    if (rounded < length || size - dataStart < rounded) {
+      return ERR_TRUNCATED;
+    }
+
+    let pathLength: u64 = buildPath(header, path);
+
+    if (pathLength > PATH_CAPACITY) {
+      return ERR_PATH;
+    }
+
+    (*entry).kind = kind;
+    (*entry).mode = mode;
+    (*entry).data = archive + dataStart;
+    (*entry).size = length;
+    (*entry).pathLength = pathLength;
+    (*entry).next = dataStart + rounded;
+
+    return OK;
+  }
+
+  /// A short text for an `ERR_` code.
+  function describe(error: u64): str {
+    return match (error) {
+      ERR_TRUNCATED -> "a member runs past the end of the archive",
+      ERR_CHECKSUM -> "a header checksum does not match",
+      ERR_MAGIC -> "a header is not ustar",
+      ERR_NUMBER -> "a numeric field is not octal",
+      ERR_PATH -> "a path is too long or has a .. component",
+      ERR_TYPE -> "a member is neither a file nor a directory",
+      _ -> "unknown error",
+    };
+  }
+
+  /// `length` rounded up to a whole number of blocks. Wraps to a smaller
+  /// value for a length near 2^64, which `next` detects.
+  function roundUp(length: u64): u64 {
+    return (length + BLOCK_SIZE - 1) / BLOCK_SIZE * BLOCK_SIZE;
+  }
+
+  /// True when the 512 bytes at `header` are all zero.
+  function isZeroBlock(header: *u8): boolean {
+    let mut index: u64 = 0;
+
+    while (index < BLOCK_SIZE) {
+      if (*(header + index) != 0) {
+        return false;
+      }
+
+      index += 1;
+    }
+
+    return true;
+  }
+
+  /// The sum of the 512 header bytes as unsigned values, with the 8 bytes of
+  /// the checksum field counted as spaces.
+  function checksum(header: *u8): u64 {
+    let mut sum: u64 = 0;
+    let mut index: u64 = 0;
+
+    while (index < BLOCK_SIZE) {
+      if (index >= CHECKSUM_OFFSET && index < CHECKSUM_OFFSET + CHECKSUM_LENGTH) {
+        sum += SPACE as u64;
+      } else {
+        sum += *(header + index) as u64;
+      }
+
+      index += 1;
+    }
+
+    return sum;
+  }
+
+  /// True when the magic field starts with `ustar`. The byte after it is a
+  /// NUL in POSIX archives and a space in GNU ones; both are accepted.
+  function hasMagic(header: *u8): boolean {
+    let magic: *u8 = header + MAGIC_OFFSET;
+
+    return *magic == ('u' as u8) && *(magic + 1) == ('s' as u8) && *(magic + 2) == ('t' as u8) && *(magic + 3) == ('a' as u8) && *(magic + 4) == ('r' as u8);
+  }
+
+  /// Reads the octal number in the `length` bytes at `field` into `value`.
+  /// Leading spaces are skipped, a NUL or a space ends the number, and an
+  /// empty field reads as 0. Returns false on any other character, or when
+  /// the value does not fit 64 bits.
+  function readOctal(field: *u8, length: u64, value: *mut u64): boolean {
+    let mut index: u64 = 0;
+    let mut result: u64 = 0;
+
+    while (index < length && *(field + index) == SPACE) {
+      index += 1;
+    }
+
+    while (index < length) {
+      let digit: u8 = *(field + index);
+
+      if (digit == 0 || digit == SPACE) {
+        break;
+      }
+
+      if (digit < DIGIT_ZERO || digit > DIGIT_SEVEN) {
+        return false;
+      }
+
+      if (result > (0xFFFFFFFFFFFFFFFF >> 3)) {
+        return false;
+      }
+
+      result = result * 8 + (digit - DIGIT_ZERO) as u64;
+      index += 1;
+    }
+
+    *value = result;
+
+    return true;
+  }
+
+  /// Writes the normalized path of the member at `header` to `path` and
+  /// returns its length, or `PATH_CAPACITY + 1` when the path has a `..`
+  /// component. `prefix` and `name` together never exceed `PATH_CAPACITY`.
+  function buildPath(header: *u8, path: *mut u8): u64 {
+    let mut length: u64 = 0;
+    let prefixLength: u64 = fieldLength(header + PREFIX_OFFSET, PREFIX_LENGTH);
+
+    if (prefixLength > 0) {
+      Lib::Mem::copy(path, header + PREFIX_OFFSET, prefixLength);
+      length = prefixLength;
+      *(path + length) = SLASH;
+      length += 1;
+    }
+
+    let nameLength: u64 = fieldLength(header + NAME_OFFSET, NAME_LENGTH);
+
+    Lib::Mem::copy(path + length, header + NAME_OFFSET, nameLength);
+    length += nameLength;
+
+    return normalize(path, length);
+  }
+
+  /// The number of bytes before the first NUL in a field of `capacity`
+  /// bytes, or `capacity` when the field is full.
+  function fieldLength(field: *u8, capacity: u64): u64 {
+    let mut length: u64 = 0;
+
+    while (length < capacity && *(field + length) != 0) {
+      length += 1;
+    }
+
+    return length;
+  }
+
+  /// Rewrites the `length` bytes at `path` in place without empty and `.`
+  /// components, joined by single slashes, and returns the new length, or
+  /// `PATH_CAPACITY + 1` when a component is `..`.
+  function normalize(path: *mut u8, length: u64): u64 {
+    let mut read: u64 = 0;
+    let mut written: u64 = 0;
+
+    while (read < length) {
+      while (read < length && *(path + read) == SLASH) {
+        read += 1;
+      }
+
+      let start: u64 = read;
+
+      while (read < length && *(path + read) != SLASH) {
+        read += 1;
+      }
+
+      let componentLength: u64 = read - start;
+
+      if (componentLength == 0 || (componentLength == 1 && *(path + start) == DOT)) {
+        continue;
+      }
+
+      if (componentLength == 2 && *(path + start) == DOT && *(path + start + 1) == DOT) {
+        return PATH_CAPACITY + 1;
+      }
+
+      if (written > 0) {
+        *(path + written) = SLASH;
+        written += 1;
+      }
+
+      Lib::Mem::move(path + written, (path + start) as *u8, componentLength);
+      written += componentLength;
+    }
+
+    return written;
+  }
+}

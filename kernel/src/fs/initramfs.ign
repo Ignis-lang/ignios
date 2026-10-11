@@ -1,0 +1,127 @@
+//!
+//! # Initramfs
+//!
+//! The archive of files the kernel starts with, loaded by Limine as a module.
+//!
+//! ## Overview
+//!
+//! The Makefile packs `build/initramfs/` (the files of `initramfs/` in the
+//! repository and the user programs) into `build/initramfs.tar`, a ustar
+//! archive, and `boot/limine.conf` loads it as the module named `initramfs`.
+//! `Mm::Modules::initialize` has already mapped it read only by the time
+//! `initialize` runs.
+//!
+//! ```text
+//!   initramfs/etc/motd ──┐
+//!   build/user/*.elf ────┴─► build/initramfs/ ─tar─► build/initramfs.tar
+//!                                                       │ Limine module "initramfs"
+//!                                                       ▼
+//!                                          Fs::Initramfs::initialize
+//!                                          (walks every member once with Fs::Tar)
+//! ```
+//!
+//! `initialize` walks the whole archive once and refuses to boot when any
+//! member is malformed, so later readers (`Fs::Vfs` seeds its tree from it)
+//! can rely on every member being valid. The archive stays where Limine put
+//! it: file data is never copied until something writes to it.
+
+import Drivers from "@drivers";
+import Mm from "@mm";
+import _ from "./tar";
+
+/// What `initialize` found.
+record InitramfsState {
+  /// The first byte of the archive, null without one.
+  static mut archive: *u8 = null;
+
+  /// The archive size in bytes.
+  static mut size: u64 = 0;
+
+  /// The number of regular files.
+  static mut files: u64 = 0;
+
+  /// The number of directories, the archive root `./` included.
+  static mut directories: u64 = 0;
+
+  /// The total data bytes of the regular files.
+  static mut dataBytes: u64 = 0;
+
+  /// Path buffer of `initialize`.
+  static mut path: u8[256];
+}
+
+/// The initramfs API.
+namespace Fs::Initramfs {
+  /// The name `boot/limine.conf` gives the module.
+  const MODULE_NAME: str = "initramfs";
+
+  /// Finds the module, checks every member and reports the counts. Panics
+  /// when the module is missing or malformed: the kernel has no files
+  /// without it.
+  function initialize(): void {
+    let index: u64 = Mm::Modules::find(MODULE_NAME as *u8, 9);
+
+    if (index == Mm::Modules::NOT_FOUND) {
+      @panic("initramfs: no module named initramfs");
+    }
+
+    let archive: *u8 = Mm::Modules::address(index);
+    let size: u64 = Mm::Modules::size(index);
+    let mut entry: Fs::TarEntry = Fs::TarEntry { kind: 0, mode: 0, data: null, size: 0, pathLength: 0, next: 0 };
+    let mut offset: u64 = 0;
+
+    while (true) {
+      let status: u64 = Fs::Tar::next(archive, size, offset, &mut entry as *mut Fs::TarEntry, &mut InitramfsState::path as *mut u8);
+
+      if (status == Fs::Tar::END) {
+        break;
+      }
+
+      if (status != Fs::Tar::OK) {
+        Drivers::Console::write("initramfs: ");
+        Drivers::Console::writeLine(Fs::Tar::describe(status));
+        @panic("initramfs: malformed archive");
+      }
+
+      if (entry.kind == Fs::Tar::FILE) {
+        InitramfsState::files += 1;
+        InitramfsState::dataBytes += entry.size;
+      } else {
+        InitramfsState::directories += 1;
+      }
+
+      offset = entry.next;
+    }
+
+    InitramfsState::archive = archive;
+    InitramfsState::size = size;
+  }
+
+  /// Prints one line with the archive size and what it holds.
+  function report(): void {
+    Drivers::Console::write("initramfs: ");
+    Drivers::Console::writeDecimal(InitramfsState::size);
+    Drivers::Console::write(" bytes, ");
+    Drivers::Console::writeDecimal(InitramfsState::files);
+    Drivers::Console::write(" files with ");
+    Drivers::Console::writeDecimal(InitramfsState::dataBytes);
+    Drivers::Console::write(" bytes of data, ");
+    Drivers::Console::writeDecimal(InitramfsState::directories);
+    Drivers::Console::writeLine(" directories");
+  }
+
+  /// The first byte of the archive. Valid after `initialize`.
+  function archive(): *u8 {
+    return InitramfsState::archive;
+  }
+
+  /// The archive size in bytes. Valid after `initialize`.
+  function size(): u64 {
+    return InitramfsState::size;
+  }
+
+  /// The number of regular files in the archive.
+  function fileCount(): u64 {
+    return InitramfsState::files;
+  }
+}

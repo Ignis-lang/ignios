@@ -1,0 +1,214 @@
+//!
+//! # Initramfs Self-Test
+//!
+//! Checks the ustar reader on archives built in memory and on the real
+//! initramfs.
+//!
+//! ## Overview
+//!
+//! | Case                          | Expected                                   |
+//! |-------------------------------|--------------------------------------------|
+//! | valid file `./a/./b//c/`      | `OK`, path `a/b/c`, size, data, mode, next |
+//! | header then zero block        | `END` after the member                     |
+//! | one header byte changed       | `ERR_CHECKSUM`                             |
+//! | magic `ustaq`                 | `ERR_MAGIC`                                |
+//! | size field `12x`              | `ERR_NUMBER`                               |
+//! | path `a/../b`                 | `ERR_PATH`                                 |
+//! | typeflag `'2'` (symlink)      | `ERR_TYPE`                                 |
+//! | size larger than the archive  | `ERR_TRUNCATED`                            |
+//! | prefix `usr` and name `bin`   | `OK`, path `usr/bin`                       |
+//! | the real archive              | `etc/motd` holds `MOTD`                    |
+//!
+//! Each malformed case changes one field of a valid header and recomputes the
+//! checksum, except the checksum case itself, so each one fails for exactly
+//! the reason it names.
+
+import Drivers from "@drivers";
+import Fs from "@fs";
+import Lib from "@lib";
+import Mm from "@mm";
+
+namespace Tests::Initramfs {
+  /// Three blocks: a header, one data block and a zero block.
+  const ARCHIVE_SIZE: u64 = 1536;
+
+  /// The data of the file in the built archive.
+  const DATA: str = "hello";
+
+  /// What `initramfs/etc/motd` holds.
+  const MOTD: str = "Welcome to IgniOS.\n";
+
+  /// Runs every case and prints one line. Panics on the first mismatch.
+  function run(): void {
+    let archive: *mut u8 = Mm::Heap::allocate(ARCHIVE_SIZE, 16);
+    let path: *mut u8 = Mm::Heap::allocate(Fs::Tar::PATH_CAPACITY, 16);
+    let mut entry: Fs::TarEntry = Fs::TarEntry { kind: 0, mode: 0, data: null, size: 0, pathLength: 0, next: 0 };
+    let entryPointer: *mut Fs::TarEntry = &mut entry as *mut Fs::TarEntry;
+
+    buildValid(archive);
+
+    if (Fs::Tar::next(archive as *u8, ARCHIVE_SIZE, 0, entryPointer, path) != Fs::Tar::OK) {
+      @panic("initramfs self-test: a valid header was refused");
+    }
+
+    if (entry.kind != Fs::Tar::FILE || entry.size != 5 || entry.mode != 0x1A4 || entry.next != 1024) {
+      @panic("initramfs self-test: wrong kind, size, mode or next offset");
+    }
+
+    expectText(path as *u8, entry.pathLength, "a/b/c", "initramfs self-test: path not normalized");
+    expectText(entry.data, entry.size, DATA, "initramfs self-test: wrong file data");
+
+    if (Fs::Tar::next(archive as *u8, ARCHIVE_SIZE, entry.next, entryPointer, path) != Fs::Tar::END) {
+      @panic("initramfs self-test: a zero block did not end the archive");
+    }
+
+    buildValid(archive);
+    *(archive + 10) = 'x' as u8;
+    expectStatus(archive, Fs::Tar::ERR_CHECKSUM, "initramfs self-test: a changed byte passed the checksum");
+
+    buildValid(archive);
+    *(archive + 261) = 'q' as u8;
+    sealChecksum(archive);
+    expectStatus(archive, Fs::Tar::ERR_MAGIC, "initramfs self-test: a wrong magic was accepted");
+
+    buildValid(archive);
+    writeText(archive + 124, "12x");
+    sealChecksum(archive);
+    expectStatus(archive, Fs::Tar::ERR_NUMBER, "initramfs self-test: a non-octal size was accepted");
+
+    buildValid(archive);
+    Lib::Mem::fill(archive, 0, 100);
+    writeText(archive, "a/../b");
+    sealChecksum(archive);
+    expectStatus(archive, Fs::Tar::ERR_PATH, "initramfs self-test: a .. component was accepted");
+
+    buildValid(archive);
+    *(archive + 156) = '2' as u8;
+    sealChecksum(archive);
+    expectStatus(archive, Fs::Tar::ERR_TYPE, "initramfs self-test: a symbolic link was accepted");
+
+    buildValid(archive);
+    writeOctal(archive + 124, 12, 4096);
+    sealChecksum(archive);
+    expectStatus(archive, Fs::Tar::ERR_TRUNCATED, "initramfs self-test: data past the end was accepted");
+
+    buildValid(archive);
+    Lib::Mem::fill(archive, 0, 100);
+    writeText(archive, "bin/");
+    writeText(archive + 345, "usr");
+    *(archive + 156) = '5' as u8;
+    sealChecksum(archive);
+
+    if (Fs::Tar::next(archive as *u8, ARCHIVE_SIZE, 0, entryPointer, path) != Fs::Tar::OK || entry.kind != Fs::Tar::DIRECTORY || entry.size != 0) {
+      @panic("initramfs self-test: a directory with a prefix was refused");
+    }
+
+    expectText(path as *u8, entry.pathLength, "usr/bin", "initramfs self-test: prefix and name not joined");
+
+    Mm::Heap::free(path);
+    Mm::Heap::free(archive);
+
+    checkMotd();
+
+    Drivers::Console::writeLine("initramfs: self-test ok, 6 malformed headers refused, 2 valid ones read, etc/motd read back");
+  }
+
+  /// Finds `etc/motd` in the real initramfs and compares it with `MOTD`.
+  function checkMotd(): void {
+    let path: *mut u8 = Mm::Heap::allocate(Fs::Tar::PATH_CAPACITY, 16);
+    let mut entry: Fs::TarEntry = Fs::TarEntry { kind: 0, mode: 0, data: null, size: 0, pathLength: 0, next: 0 };
+    let mut offset: u64 = 0;
+    let mut found: boolean = false;
+
+    while (Fs::Tar::next(Fs::Initramfs::archive(), Fs::Initramfs::size(), offset, &mut entry as *mut Fs::TarEntry, path) == Fs::Tar::OK) {
+      if (entry.pathLength == 8 && Lib::Mem::compare(path as *u8, "etc/motd" as *u8, 8) == 0) {
+        expectText(entry.data, entry.size, MOTD, "initramfs self-test: etc/motd has other contents");
+        found = true;
+      }
+
+      offset = entry.next;
+    }
+
+    Mm::Heap::free(path);
+
+    if (!found) {
+      @panic("initramfs self-test: no etc/motd in the archive");
+    }
+  }
+
+  /// Writes a valid archive: a regular file `./a/./b//c/` of mode 0644 that
+  /// holds `DATA`, then a zero block.
+  function buildValid(archive: *mut u8): void {
+    Lib::Mem::fill(archive, 0, ARCHIVE_SIZE);
+    writeText(archive, "./a/./b//c/");
+    writeOctal(archive + 100, 8, 0x1A4);
+    writeOctal(archive + 124, 12, 5);
+    *(archive + 156) = '0' as u8;
+    writeText(archive + 257, "ustar");
+    writeText(archive + 263, "00");
+    writeText(archive + 512, DATA);
+    sealChecksum(archive);
+  }
+
+  /// Computes the header checksum and writes it the way tar does: six octal
+  /// digits, a NUL and a space.
+  function sealChecksum(header: *mut u8): void {
+    writeOctal(header + 148, 7, Fs::Tar::checksum(header as *u8));
+    *(header + 155) = 0x20;
+  }
+
+  /// Writes `value` as `width - 1` zero-padded octal digits and a NUL.
+  function writeOctal(field: *mut u8, width: u64, value: u64): void {
+    let mut remaining: u64 = value;
+    let mut index: u64 = width - 1;
+
+    *(field + index) = 0;
+
+    while (index > 0) {
+      index -= 1;
+      *(field + index) = ('0' as u8) + (remaining % 8) as u8;
+      remaining = remaining / 8;
+    }
+  }
+
+  /// Copies the bytes of `text`, without its NUL, to `destination`.
+  function writeText(destination: *mut u8, text: str): void {
+    Lib::Mem::copy(destination, text as *u8, textLength(text));
+  }
+
+  /// The length of `text` without its NUL.
+  function textLength(text: str): u64 {
+    let mut length: u64 = 0;
+
+    while (*(text as *u8 + length) != 0) {
+      length += 1;
+    }
+
+    return length;
+  }
+
+  /// Prints `message` and panics unless the `length` bytes at `bytes` are `text`.
+  function expectText(bytes: *u8, length: u64, text: str, message: str): void {
+    if (length != textLength(text) || Lib::Mem::compare(bytes, text as *u8, length) != 0) {
+      Drivers::Console::writeLine(message);
+      @panic("initramfs self-test: unexpected bytes");
+    }
+  }
+
+  /// Prints `message` and panics unless reading the first member gives `status`.
+  function expectStatus(archive: *mut u8, status: u64, message: str): void {
+    let path: *mut u8 = Mm::Heap::allocate(Fs::Tar::PATH_CAPACITY, 16);
+    let mut entry: Fs::TarEntry = Fs::TarEntry { kind: 0, mode: 0, data: null, size: 0, pathLength: 0, next: 0 };
+    let got: u64 = Fs::Tar::next(archive as *u8, ARCHIVE_SIZE, 0, &mut entry as *mut Fs::TarEntry, path);
+
+    Mm::Heap::free(path);
+
+    if (got != status) {
+      Drivers::Console::write("initramfs self-test: got status ");
+      Drivers::Console::writeDecimal(got);
+      Drivers::Console::writeLine("");
+      Drivers::Console::writeLine(message);
+      @panic("initramfs self-test: unexpected status");
+    }
+  }
+}

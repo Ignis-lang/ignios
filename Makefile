@@ -37,6 +37,13 @@ HELLO := $(BUILD)/hello.elf
 HELLO_OBJECT := $(BUILD)/user/hello/user/obj/hello.o
 HELLO_SOURCES := $(shell find user/hello user/lib -name '*.ign' -o -name '*.toml')
 
+# The initramfs: the files under initramfs/ plus the user programs in /bin,
+# packed as a ustar archive that Limine loads as the module `initramfs`.
+# Owner, group and times are fixed so the archive depends only on the files.
+INITRAMFS_DIR := $(BUILD)/initramfs
+INITRAMFS := $(BUILD)/initramfs.tar
+INITRAMFS_FILES := $(shell find initramfs -type f)
+
 # Assembles the `.S` files. `ASFLAGS` use the kernel code model so symbol
 # addresses match what the Ignis-generated C expects.
 CLANG ?= clang
@@ -89,6 +96,14 @@ $(HELLO): $(HELLO_OBJECT) user/user.ld
 	$(LD) $(USER_LDFLAGS) -o $@ $(HELLO_OBJECT)
 
 # Assembles one `.S` file.
+$(INITRAMFS): $(INITRAMFS_FILES) $(HELLO)
+	rm -rf $(INITRAMFS_DIR)
+	mkdir -p $(INITRAMFS_DIR)/bin
+	cp -R initramfs/. $(INITRAMFS_DIR)/
+	cp $(HELLO) $(INITRAMFS_DIR)/bin/hello
+	tar --format=ustar --owner=0 --group=0 --numeric-owner --mtime=@0 --sort=name \
+		-cf $@ -C $(INITRAMFS_DIR) .
+
 $(BUILD)/asm/%.o: kernel/src/%.S
 	@mkdir -p $(dir $@)
 	$(CLANG) $(ASFLAGS) -o $@ $<
@@ -101,7 +116,7 @@ $(KERNEL): $(IGNIS_OBJECT) $(ASM_OBJECTS) kernel/linker.ld
 # Lays out the EFI System Partition tree: the Limine EFI binary at the removable
 # media path firmware boots from, Limine's configuration, the kernel and the
 # user program.
-esp: $(KERNEL) $(HELLO) boot/limine.conf
+esp: $(KERNEL) $(HELLO) $(INITRAMFS) boot/limine.conf
 	@test -n "$(LIMINE_DIR)" || { echo "LIMINE_DIR is not set; run inside nix develop" >&2; exit 1; }
 	rm -rf $(ESP)
 	mkdir -p $(ESP)/EFI/BOOT
@@ -109,6 +124,7 @@ esp: $(KERNEL) $(HELLO) boot/limine.conf
 	cp boot/limine.conf $(ESP)/EFI/BOOT/limine.conf
 	cp $(KERNEL) $(ESP)/kernel.elf
 	cp $(HELLO) $(ESP)/hello.elf
+	cp $(INITRAMFS) $(ESP)/initramfs.tar
 
 image: $(IMAGE)
 
@@ -121,6 +137,7 @@ $(IMAGE): esp
 	mcopy -i $@ -s $(ESP)/EFI ::/
 	mcopy -i $@ $(ESP)/kernel.elf ::/kernel.elf
 	mcopy -i $@ $(ESP)/hello.elf ::/hello.elf
+	mcopy -i $@ $(ESP)/initramfs.tar ::/initramfs.tar
 
 # A private copy of the firmware variable store, so firmware writes never touch
 # the read-only Nix store file.

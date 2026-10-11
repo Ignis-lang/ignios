@@ -41,6 +41,7 @@ Each subsystem is a directory under `kernel/src/` with a `mod.ign` facade. The f
 | `drivers/` | `Drivers` | `@drivers` | Arch, Boot, Lib | `Serial`, `Console`, `Color`, `Font`, `Ps2`, `Keyboard` |
 | `acpi/` | `Acpi` | `@acpi` | Boot, Drivers | `Rsdp`, `Xsdt`, `Madt`, `Table` |
 | `mm/` | `Mm` | `@mm` | Arch, Boot, Drivers, Lib | `Pmm`, `Vmm`, `AddressSpace`, `Heap`, `Modules` |
+| `fs/` | `Fs` | `@fs` | Drivers, Lib, Mm | `Tar`, `Initramfs` |
 | `apic/` | `Apic` | `@apic` | Acpi, Arch, Drivers, Mm | `Lapic`, `Ioapic` |
 | `time/` | `Time` | `@time` | Apic, Arch, Drivers | `Timer` |
 | `sched/` | `Sched` | `@sched` | Arch, Mm, Time | `Thread`, `Scheduler` |
@@ -48,7 +49,7 @@ Each subsystem is a directory under `kernel/src/` with a `mod.ign` facade. The f
 | `syscall/` | `Syscall` | `@syscall` | Arch, Drivers, Mm, Proc, Sched, Time | `Operation`, `Linux` |
 | `trap/` | `Trap` | `@trap` | Apic, Arch, Drivers, Proc, Sched, Time | `Exception`, `Setup`, the dispatcher |
 | `shell/` | `Shell` | `@shell` | Arch, Drivers, Lib, Proc, Sched, Time | `Terminal`, `Commands`, `ThreadCommands` |
-| `tests/` | `Tests` | `@tests` | Arch, Boot, Drivers, Mm, Proc, Sched, Time, Trap | the boot self-tests |
+| `tests/` | `Tests` | `@tests` | Arch, Boot, Drivers, Fs, Lib, Mm, Proc, Sched, Time, Trap | the boot self-tests |
 
 `main.ign` imports every facade and `panic.ign`. The compiler rejects an import cycle, so the table is a layering: a subsystem imports only rows above it. A few places in it need a reason, because a plain layering would put them elsewhere.
 
@@ -70,8 +71,9 @@ Each subsystem is a directory under `kernel/src/` with a `mod.ign` facade. The f
 | 7 | Keyboard | `drivers/ps2.ign`, `lib/scancode_queue.ign`, `drivers/keyboard.ign` |
 | 8 | Threads, scheduling and the shell | `arch/x86_64/context.ign`, `context_asm.S`, `sched/thread.ign`, `sched/scheduler.ign`, `shell/*.ign` |
 | 9 | User mode | `arch/x86_64/usermode.ign`, `usermode_asm.S`, `proc/process.ign`, `syscall/*.ign`, `proc/elf.ign`, `mm/modules.ign`, `proc/programs.ign`, `user/` |
-| 10 | Boot self-tests | `tests/*.ign`, `arch/x86_64/user_test_asm.S` |
-| 11 | Scripts | `scripts/` |
+| 10 | Files | `initramfs/`, `fs/tar.ign`, `fs/initramfs.ign` |
+| 11 | Boot self-tests | `tests/*.ign`, `arch/x86_64/user_test_asm.S` |
+| 12 | Scripts | `scripts/` |
 
 All paths are under `kernel/src/` unless they say otherwise. The assembly files and the architecture code are in `kernel/src/arch/x86_64/`.
 
@@ -87,7 +89,7 @@ Read these first. They define what the kernel is made of and how it gets the mac
 
 **`kernel/linker.ld`.** Puts the kernel at `0xffffffff80000000` in three segments (text, rodata, data) with the page-aligned boundary symbols `__text_start` and so on. The table in the header shows the layout. `Mm::Vmm::mapKernelImage` uses these symbols to map each segment with its own permissions. Doc 01.
 
-**`boot/limine.conf`.** The Limine configuration: the kernel path, and the `hello.elf` module that `run hello` starts. Doc 01.
+**`boot/limine.conf`.** The Limine configuration: the kernel path, the `hello.elf` module that `run hello` starts, and the initramfs archive. Doc 01.
 
 **`boot/mod.ign` and `boot/limine.ign`.** The Limine boot protocol. A request is a global record with a fixed identifier that Limine finds by scanning the loaded image and answers by writing a pointer into its `response` field. Look at the diagram in the header and at `readResponse`, which reads the pointer with a volatile load because Limine wrote it behind the compiler's back. The memory map entry types are in the table above `MEMMAP_USABLE`. `requireBaseRevision` and `requireFramebuffer` are the two checks `kmain` makes before anything else. Doc 01.
 
@@ -205,11 +207,19 @@ Docs 14 and 15.
 
 **`user/`.** The user side. `lib/sys.ign` wraps the `syscall` instruction, `lib/io.ign` prints, and `hello/src/main.ign` is the program. `user/user.ld` places it at `0x400000`.
 
-## Part 10. Boot self-tests
+## Part 10. Files
 
-**`tests/`.** One file per check, run by `kmain` where the subsystem is ready. Each prints one line and panics on the first violation, so a boot that continues has passed it. The tests use only the public functions of the subsystems. `pmm.ign`, `vmm.ign`, `heap.ign`, `address_space.ign`, `timer.ign` and `context.ign` check the primitives, `address_space.ign` including a 2 MiB user page. `protection.ign` checks that SMAP and SMEP fault. `scheduler.ign` runs round-robin order, sleeping, a full table, one address space per thread and preemption of threads that never yield. `user.ign` and `arch/x86_64/user_test_asm.S` hold sixteen throwaway ring 3 programs. Seven behave (exit, registers, spin, a spin with RFLAGS.AC set, system calls, the x87 and SSE check that runs as two processes, and a 200 ms nap that `wait` must block on) and nine do something forbidden. The kernel must kill each of the nine with the right status. `cpu_local.ign` runs last and checks that every way in and out of ring 3 left the GS bases balanced.
+**`initramfs/` and the `$(INITRAMFS)` rule of the `Makefile`.** The files the kernel boots with. The Makefile copies `initramfs/` and the user programs (in `/bin`) to `build/initramfs/` and packs that directory as a ustar archive with fixed owner, group and times, so the archive depends only on the files. `boot/limine.conf` loads it as the module `initramfs`.
 
-## Part 11. Scripts
+**`fs/tar.ign`.** The ustar reader. The header has the block layout and the table of header fields. `next` reads one member and checks everything before it trusts it: the checksum, the magic, the octal numbers, that the data lies inside the archive, and the member type. Look at `normalize`, which turns `./a/./b//c/` into `a/b/c` and refuses a `..` component, so an archive cannot name a file outside its tree.
+
+**`fs/initramfs.ign`.** Finds the module, walks every member once and refuses to boot if one is malformed. Later readers can then trust the archive. The data is never copied: it stays where Limine loaded it.
+
+## Part 11. Boot self-tests
+
+**`tests/`.** One file per check, run by `kmain` where the subsystem is ready. Each prints one line and panics on the first violation, so a boot that continues has passed it. The tests use only the public functions of the subsystems. `pmm.ign`, `vmm.ign`, `heap.ign`, `address_space.ign`, `timer.ign` and `context.ign` check the primitives, `initramfs.ign` feeds the ustar reader one malformed header per error code, `address_space.ign` including a 2 MiB user page. `protection.ign` checks that SMAP and SMEP fault. `scheduler.ign` runs round-robin order, sleeping, a full table, one address space per thread and preemption of threads that never yield. `user.ign` and `arch/x86_64/user_test_asm.S` hold sixteen throwaway ring 3 programs. Seven behave (exit, registers, spin, a spin with RFLAGS.AC set, system calls, the x87 and SSE check that runs as two processes, and a 200 ms nap that `wait` must block on) and nine do something forbidden. The kernel must kill each of the nine with the right status. `cpu_local.ign` runs last and checks that every way in and out of ring 3 left the GS bases balanced.
+
+## Part 12. Scripts
 
 **`scripts/keytest.sh` and `scripts/screenshot.sh`.** Boot QEMU headless, wait for the prompt on the serial log, and drive the QEMU monitor (`sendkey`, `screendump`). `keytest.sh` also checks the echo. **`scripts/gen-font.py`** regenerates `drivers/font_8x16.ign` from the Spleen BDF file. **`flake.nix`** provides the toolchain.
 
@@ -338,13 +348,20 @@ vmm: self-test ok
 
 ```text
 modules: hello is /hello.elf, 13152 bytes at 0xffff80000a0e8000
+modules: initramfs is /initramfs.tar, 20480 bytes at 0xffff80000a0e1000
 ```
-The Limine module from `boot/limine.conf`. `hello` is the `module_string`, `/hello.elf` the path. `Mm::Modules::initialize` mapped its pages read only. The address is in the direct map, so the file sits at physical `0x0a0e8000`. Doc 15.
+The Limine modules from `boot/limine.conf`. `hello` is the `module_string` of the first, `/hello.elf` the path. `Mm::Modules::initialize` mapped its pages read only. The address is in the direct map, so the file sits at physical `0x0a0e8000`. Doc 15.
 
 ```text
 heap: self-test ok, 1092 KiB mapped, 0 bytes in use
 ```
 `Tests::Heap::run` checked alignment, reuse, merging, growth (it allocates 1 MiB) and the compiler allocation handlers. 1092 KiB of heap pages stayed mapped and every block was freed. Doc 10.
+
+```text
+initramfs: 20480 bytes, 2 files with 13171 bytes of data, 3 directories
+initramfs: self-test ok, 6 malformed headers refused, 2 valid ones read, etc/motd read back
+```
+`Fs::Initramfs::initialize` walked the archive: `etc/motd` and `bin/hello` are the files, and `.`, `bin` and `etc` the directories. The size is a multiple of 10240 bytes because tar pads the archive to whole records. `Tests::Initramfs::run` then fed the reader one broken header per error code (checksum, magic, a non-octal number, a `..` path, a symbolic link, data past the end), a file and a directory with a prefix, and compared `etc/motd` with the text it should hold.
 
 ```text
 address space: self-test ok, private user half, shared kernel half, frames returned

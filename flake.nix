@@ -25,6 +25,7 @@
           pkgs.mtools
           pkgs.gnumake
           pkgs.coreutils
+          pkgs.gnutar
           pkgs.python3
           pkgs.netpbm
         ];

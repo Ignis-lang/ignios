@@ -1,0 +1,29 @@
+//!
+//! # Fs
+//!
+//! Files: the initramfs archive the kernel boots with.
+//!
+//! ## Public API
+//!
+//! | Name            | File            | Purpose                                         |
+//! |-----------------|-----------------|-------------------------------------------------|
+//! | `Fs::Tar`       | `tar.ign`       | reads the members of a ustar archive, checked   |
+//! | `Fs::Initramfs` | `initramfs.ign` | finds the initramfs module and validates it     |
+//!
+//! ## Dependencies
+//!
+//! | Imports   | Why                                              |
+//! |-----------|--------------------------------------------------|
+//! | `Mm`      | the initramfs is a Limine module                 |
+//! | `Lib`     | `memcpy` and `memmove` for paths                 |
+//! | `Drivers` | the boot report                                  |
+//!
+//! `Fs` sits above `Mm` and below `Proc`: a process opens files, and the
+//! files need memory.
+
+import _ from "./initramfs";
+import _ from "./tar";
+
+/// Aggregate namespace of the file code. The files above contribute the
+/// sub-namespaces listed in the module header.
+export namespace Fs {}
