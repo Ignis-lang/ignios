@@ -6,8 +6,10 @@
 #   kernel/src/**/*.ign --ignis build--> build/ignis/user/obj/kernel.o  (one C unit, compiled by clang)
 #   kernel/src/**/*.S   --clang -c-----> build/asm/**/*.o
 #   kernel.o + asm .o   --ld.lld -T kernel/linker.ld--> build/kernel.elf
-#   user/hello          --ignis build--> hello.o --ld.lld -T user/user.ld--> build/hello.elf
-#   kernel.elf + hello.elf + Limine + boot/limine.conf --mtools--> build/ignios.img (FAT32 ESP)
+#   user/lib/start.S    --clang -c-----> build/user/start.o
+#   user/NAME           --ignis build--> NAME.o --ld.lld -T user/user.ld (with start.o)--> build/user/NAME.elf
+#   initramfs/ + build/user/*.elf --tar--> build/initramfs.tar   (programs in /bin)
+#   kernel.elf + initramfs.tar + Limine + boot/limine.conf --mtools--> build/ignios.img (FAT32 ESP)
 #
 # Common targets: `make run` (window), `make run-headless` (serial log check),
 # `make keytest` (types keys and checks the echo), `make clean`.
@@ -32,10 +34,13 @@ HEADLESS_SECONDS ?= 15
 IGNIS_SOURCES := $(sort $(shell find kernel/src -name '*.ign'))
 IGNIS_OBJECT := $(BUILD)/ignis/user/obj/kernel.o
 
-# The user program and the files its build depends on.
-HELLO := $(BUILD)/hello.elf
-HELLO_OBJECT := $(BUILD)/user/hello/user/obj/hello.o
-HELLO_SOURCES := $(shell find user/hello user/lib -name '*.ign' -o -name '*.toml')
+# The user programs. Each NAME is an Ignis project in user/NAME whose ignis.toml
+# writes its object to build/user/NAME; it is linked with the entry stub
+# user/lib/start.S and shipped in the initramfs as /bin/NAME.
+USER_PROGRAMS := hello
+USER_ELFS := $(patsubst %,$(BUILD)/user/%.elf,$(USER_PROGRAMS))
+USER_LIB_SOURCES := $(shell find user/lib -name '*.ign' -o -name '*.toml')
+USER_START := $(BUILD)/user/start.o
 
 # The initramfs: the files under initramfs/ plus the user programs in /bin,
 # packed as a ustar archive that Limine loads as the module `initramfs`.
@@ -86,24 +91,30 @@ kernel: $(KERNEL)
 $(IGNIS_OBJECT): $(IGNIS_SOURCES) ignis.toml
 	$(IGNIS) build
 
-user: $(HELLO)
+user: $(USER_ELFS)
 
-# The user program is its own Ignis project under user/hello.
-$(HELLO_OBJECT): $(HELLO_SOURCES)
-	cd user/hello && $(IGNIS) build
+# The entry stub every user program starts in (`_start`).
+$(USER_START): user/lib/start.S
+	@mkdir -p $(dir $@)
+	$(CLANG) --target=x86_64-unknown-none -fno-pic -fno-pie -c -o $@ $<
 
-$(HELLO): $(HELLO_OBJECT) user/user.ld
-	$(LD) $(USER_LDFLAGS) -o $@ $(HELLO_OBJECT)
+# One user program: compile its Ignis project, then link its object after the
+# entry stub. The second expansion lists the program's own sources.
+.SECONDEXPANSION:
+$(BUILD)/user/%.elf: $$(shell find user/$$* -name '*.ign' -o -name '*.toml') $(USER_LIB_SOURCES) $(USER_START) user/user.ld
+	cd user/$* && $(IGNIS) build
+	$(LD) $(USER_LDFLAGS) -o $@ $(USER_START) $(BUILD)/user/$*/user/obj/$*.o
 
-# Assembles one `.S` file.
-$(INITRAMFS): $(INITRAMFS_FILES) $(HELLO)
+# Packs initramfs/ and the user programs (as /bin/NAME) into the archive.
+$(INITRAMFS): $(INITRAMFS_FILES) $(USER_ELFS)
 	rm -rf $(INITRAMFS_DIR)
 	mkdir -p $(INITRAMFS_DIR)/bin
 	cp -R initramfs/. $(INITRAMFS_DIR)/
-	cp $(HELLO) $(INITRAMFS_DIR)/bin/hello
+	for program in $(USER_PROGRAMS); do cp $(BUILD)/user/$$program.elf $(INITRAMFS_DIR)/bin/$$program; done
 	tar --format=ustar --owner=0 --group=0 --numeric-owner --mtime=@0 --sort=name \
 		-cf $@ -C $(INITRAMFS_DIR) .
 
+# Assembles one `.S` file.
 $(BUILD)/asm/%.o: kernel/src/%.S
 	@mkdir -p $(dir $@)
 	$(CLANG) $(ASFLAGS) -o $@ $<
@@ -115,15 +126,14 @@ $(KERNEL): $(IGNIS_OBJECT) $(ASM_OBJECTS) kernel/linker.ld
 
 # Lays out the EFI System Partition tree: the Limine EFI binary at the removable
 # media path firmware boots from, Limine's configuration, the kernel and the
-# user program.
-esp: $(KERNEL) $(HELLO) $(INITRAMFS) boot/limine.conf
+# initramfs.
+esp: $(KERNEL) $(INITRAMFS) boot/limine.conf
 	@test -n "$(LIMINE_DIR)" || { echo "LIMINE_DIR is not set; run inside nix develop" >&2; exit 1; }
 	rm -rf $(ESP)
 	mkdir -p $(ESP)/EFI/BOOT
 	cp $(LIMINE_DIR)/BOOTX64.EFI $(ESP)/EFI/BOOT/BOOTX64.EFI
 	cp boot/limine.conf $(ESP)/EFI/BOOT/limine.conf
 	cp $(KERNEL) $(ESP)/kernel.elf
-	cp $(HELLO) $(ESP)/hello.elf
 	cp $(INITRAMFS) $(ESP)/initramfs.tar
 
 image: $(IMAGE)
@@ -136,7 +146,6 @@ $(IMAGE): esp
 	mformat -i $@ -F -v IGNIOS ::
 	mcopy -i $@ -s $(ESP)/EFI ::/
 	mcopy -i $@ $(ESP)/kernel.elf ::/kernel.elf
-	mcopy -i $@ $(ESP)/hello.elf ::/hello.elf
 	mcopy -i $@ $(ESP)/initramfs.tar ::/initramfs.tar
 
 # A private copy of the firmware variable store, so firmware writes never touch
@@ -163,6 +172,7 @@ run-headless: $(IMAGE) $(OVMF_VARS_COPY)
 	grep -q '^ IgniOS ' $(SERIAL_LOG)
 	grep -q '^> ' $(SERIAL_LOG)
 	grep -q '^i64 minimum = -9223372036854775808[^0-9]' $(SERIAL_LOG)
+	grep -q '^argv: hello one two[^ ]' $(SERIAL_LOG)
 	grep -q '^user: [1-9][0-9]* interrupts from ring 3 with RFLAGS.AC set ran their handlers with AC clear' $(SERIAL_LOG)
 
 # Boots without a display until the console prompt appears on COM1, then

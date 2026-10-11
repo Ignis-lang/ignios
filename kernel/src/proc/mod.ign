@@ -10,7 +10,7 @@
 //! |---------------------|----------------|-----------------------------------------------------------|
 //! | `Proc::Process`     | `process.ign`  | create, start, wait for, exit and kill processes          |
 //! | `Proc::Elf`         | `elf.ign`      | map the `PT_LOAD` segments of a static ELF64 into a space |
-//! | `Proc::Programs`    | `programs.ign` | find a Limine module by name and run it as a process      |
+//! | `Proc::Programs`    | `programs.ign` | run a program from the file tree with its arguments       |
 //! | `Proc::LoadedImage` | `elf.ign`      | what the loader reports: entry point, segments, pages     |
 //!
 //! ## Dependencies

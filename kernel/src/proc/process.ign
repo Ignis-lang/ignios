@@ -21,11 +21,12 @@
 //! ## Lifetime
 //!
 //! ```text
-//!   Proc::Programs::run("hello")
-//!     └─ Proc::Process::startElf(image)
+//!   Proc::Programs::run("hello one two")
+//!     └─ Proc::Process::startElf(image, arguments)
 //!          ├─ Mm::AddressSpace::create            new PML4, kernel half shared
 //!          ├─ Proc::Elf::load                       map and fill PT_LOAD segments
 //!          ├─ mapStack                        8 zeroed no-execute pages
+//!          ├─ buildStack                      argc, argv, envp, auxv, strings
 //!          └─ launch
 //!               ├─ slot := RUNNING, id := nextId++
 //!               └─ Sched::Scheduler::spawnIn(userMain, slot, root)   thread owns `root`
@@ -48,8 +49,11 @@
 //!                       │ stack: 8 pages, read/write, no-execute, zeroed
 //!   0x00007FFFFFFFF000  ┘ STACK_TOP = Mm::AddressSpace::USER_LIMIT, the first
 //!                         byte past the stack and the page that stays unmapped
-//!   initial RSP = STACK_TOP - 8, as if a `call` had just pushed a return
-//!   address, so the System V ABI alignment holds at the first instruction
+//!   an ELF program starts with the Linux initial stack at the top of it
+//!   (argc, argv, an empty envp, the auxiliary vector, the argument strings;
+//!   see `buildStack`) and RSP 16-byte aligned on argc. A raw test program
+//!   from `startCode` gets RSP = STACK_TOP - 8 instead, as if a `call` had
+//!   just pushed a return address.
 //! ```
 //!
 //! See concept doc 14.
@@ -131,6 +135,27 @@ namespace Proc::Process {
   /// stack grows down from here and the page at this address stays unmapped.
   const STACK_TOP: u64 = Mm::AddressSpace::USER_LIMIT;
 
+  /// The most arguments a program gets, its name included.
+  const MAX_ARGUMENTS: u64 = 32;
+
+  /// The most bytes the argument strings take, their NULs included. The
+  /// strings and the argv array then fit the first two stack pages.
+  const MAX_ARGUMENT_BYTES: u64 = 4096;
+
+  /// Auxiliary vector type that ends the vector, `AT_NULL`.
+  const AUX_NULL: u64 = 0;
+
+  /// Auxiliary vector type of the page size, `AT_PAGESZ`.
+  const AUX_PAGE_SIZE: u64 = 6;
+
+  /// Auxiliary vector type of the program entry point, `AT_ENTRY`.
+  const AUX_ENTRY: u64 = 9;
+
+  /// Words of the initial stack that do not depend on the argument count:
+  /// argc, the 0 after argv, the 0 that is the empty envp, and three
+  /// auxiliary vector pairs.
+  const FIXED_STACK_WORDS: u64 = 9;
+
   /// Process ids start at 1.
   function initialize(): void {
     ProcessState::nextId = 1;
@@ -159,13 +184,20 @@ namespace Proc::Process {
 
     Lib::Mem::copy(Boot::Hhdm::toVirtual(frame), code, length);
 
-    return launch(root, CODE_BASE);
+    return launch(root, CODE_BASE, STACK_TOP - 8);
   }
 
   /// Starts a process from the ELF executable in the `size` bytes at `image`
-  /// and a fresh stack. Prints what the loader mapped, or why it refused the
-  /// file. Returns the process id, or `NO_PROCESS`.
-  function startElf(image: *u8, size: u64): u64 {
+  /// and a fresh stack that holds `count` arguments. `strings` is the
+  /// `stringBytes` bytes of the arguments, each one ended by a NUL, in order.
+  /// Prints what the loader mapped, or why it refused the file. Returns the
+  /// process id, or `NO_PROCESS`.
+  function startElf(image: *u8, size: u64, strings: *u8, stringBytes: u64, count: u64): u64 {
+    if (count == 0 || count > MAX_ARGUMENTS || stringBytes > MAX_ARGUMENT_BYTES) {
+      Drivers::Console::writeLine("elf: too many arguments");
+      return NO_PROCESS;
+    }
+
     let root: u64 = Mm::AddressSpace::create();
 
     if (root == Mm::Pmm::NO_FRAME) {
@@ -194,11 +226,90 @@ namespace Proc::Process {
     Drivers::Console::writeDecimal(loaded.pages);
     Drivers::Console::write(" pages, entry ");
     Drivers::Console::writeHex(loaded.entry);
-    Drivers::Console::write(", stack top ");
-    Drivers::Console::writeHex(STACK_TOP);
-    Drivers::Console::writeLine("");
+    let stackPointer: u64 = buildStack(root, strings, stringBytes, count, loaded.entry);
 
-    return launch(root, loaded.entry);
+    if (stackPointer == 0) {
+      Drivers::Console::writeLine("elf: out of memory for the arguments");
+      Mm::AddressSpace::destroy(root);
+      return NO_PROCESS;
+    }
+
+    Drivers::Console::write(", stack pointer ");
+    Drivers::Console::writeHex(stackPointer);
+    Drivers::Console::write(", ");
+    Drivers::Console::writeDecimal(count);
+    Drivers::Console::writeLine(" arguments");
+
+    return launch(root, loaded.entry, stackPointer);
+  }
+
+  /// Writes the initial stack of a program to the stack pages of `root`, the
+  /// layout Linux gives a static executable, and returns the stack pointer
+  /// the program starts with, or 0 when memory runs out:
+  ///
+  /// ```text
+  ///   STACK_TOP           ┐
+  ///                       │ the argument strings, NUL-terminated
+  ///   stringsStart        ┘ (STACK_TOP - stringBytes rounded up to 16)
+  ///                         padding to a 16-byte boundary
+  ///                         AT_NULL, 0
+  ///                         AT_ENTRY, entry
+  ///                         AT_PAGESZ, 4096          auxiliary vector
+  ///                         0                        envp, empty
+  ///                         0                        end of argv
+  ///                         argv[count - 1] ... argv[0]   addresses in the strings
+  ///   stack pointer ──►     argc                     16-byte aligned
+  /// ```
+  ///
+  /// Unlike a function entry, nothing looks like a return address: the
+  /// program's `_start` (`user/lib/start.S`) reads argc at the stack
+  /// pointer. `startElf` keeps the arguments small enough for the two top
+  /// stack pages.
+  function buildStack(root: u64, strings: *u8, stringBytes: u64, count: u64, entry: u64): u64 {
+    let stringsStart: u64 = STACK_TOP - (stringBytes + 15) / 16 * 16;
+    let words: u64 = FIXED_STACK_WORDS + count;
+    let stackPointer: u64 = (stringsStart - words * 8) / 16 * 16;
+    let table: *mut u64 = Mm::Heap::allocate(words * 8, 16) as *mut u64;
+
+    if (table == null) {
+      return 0;
+    }
+
+    let mut index: u64 = 0;
+    let mut offset: u64 = 0;
+
+    writeWord(table, 0, count);
+
+    while (index < count) {
+      writeWord(table, 1 + index, stringsStart + offset);
+
+      while (*(strings + offset) != 0) {
+        offset += 1;
+      }
+
+      offset += 1;
+      index += 1;
+    }
+
+    writeWord(table, 1 + count, 0);
+    writeWord(table, 2 + count, 0);
+    writeWord(table, 3 + count, AUX_PAGE_SIZE);
+    writeWord(table, 4 + count, PAGE_SIZE);
+    writeWord(table, 5 + count, AUX_ENTRY);
+    writeWord(table, 6 + count, entry);
+    writeWord(table, 7 + count, AUX_NULL);
+    writeWord(table, 8 + count, 0);
+
+    let copied: boolean = Mm::AddressSpace::copyToUser(root, stringsStart, strings, stringBytes) && Mm::AddressSpace::copyToUser(root, stackPointer, table as *u8, words * 8);
+
+    Mm::Heap::free(table as *mut u8);
+
+    return copied ? stackPointer : 0;
+  }
+
+  /// Stores `value` as word `index` of `table`.
+  function writeWord(table: *mut u64, index: u64, value: u64): void {
+    *@pointerFromInteger<*mut u64>(@integerFromPointer(table) + index * 8) = value;
   }
 
   /// Maps the user stack, zeroed and no-execute. Returns false when memory
@@ -221,12 +332,9 @@ namespace Proc::Process {
 
   /// Makes a process of the address space `root`, which the process now owns
   /// and which must already hold the program and its stack, and queues its
-  /// thread. The program starts at `entry`. The stack pointer starts 8 below
-  /// the top, as if a `call` had just pushed a return address, so a function
-  /// compiled for the System V ABI sees the alignment it expects at its
-  /// first instruction. Returns the process id, or `NO_PROCESS`; the space is
-  /// destroyed on failure.
-  function launch(root: u64, entry: u64): u64 {
+  /// thread. The program starts at `entry` with `stackPointer`. Returns the
+  /// process id, or `NO_PROCESS`; the space is destroyed on failure.
+  function launch(root: u64, entry: u64, stackPointer: u64): u64 {
     let saved: u64 = Arch::Cpu::saveAndDisableInterrupts();
     let slot: u64 = findFreeSlot();
 
@@ -241,7 +349,7 @@ namespace Proc::Process {
     (*process).id = ProcessState::nextId;
     (*process).state = RUNNING;
     (*process).entry = entry;
-    (*process).stackPointer = STACK_TOP - 8;
+    (*process).stackPointer = stackPointer;
     (*process).status = 0;
     (*process).abi = ABI_LINUX;
 

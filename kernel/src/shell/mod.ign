@@ -9,7 +9,7 @@
 //! | Name                    | File                  | Purpose                                                      |
 //! |-------------------------|-----------------------|--------------------------------------------------------------|
 //! | `Shell::Terminal::run`  | `terminal.ign`        | the prompt loop, never returns                               |
-//! | `Shell::Commands`       | `commands.ign`        | matches a line against `uptime`, `ps`, `threads`, `run NAME` |
+//! | `Shell::Commands`       | `commands.ign`        | matches a line against `uptime`, `ps`, `threads`, `run PROGRAM [ARG...]` |
 //! | `Shell::ThreadCommands` | `thread_commands.ign` | the `ps` table and the `threads` demo                        |
 //!
 //! ## Dependencies
@@ -24,7 +24,7 @@
 //! | `Arch`    | `cli`, `sti`, `hlt` around the empty-queue check      |
 //! | `Time`    | `uptime`                                              |
 //! | `Sched`   | `ps` and the demo threads                             |
-//! | `Proc`    | `run NAME` starts a program from a Limine module      |
+//! | `Proc`    | `run PROGRAM` starts a program from the file tree      |
 
 import _ from "./commands";
 import _ from "./terminal";

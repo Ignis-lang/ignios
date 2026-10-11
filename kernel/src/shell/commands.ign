@@ -11,7 +11,7 @@
 //! | `uptime`    | Time since the timer started, from the tick counter     |
 //! | `ps`        | Lists the kernel threads (`thread_commands.ign`)        |
 //! | `threads`   | Starts the demo threads (`thread_commands.ign`)         |
-//! | `run NAME`  | Runs the Limine module called NAME in ring 3            |
+//! | `run PROGRAM [ARG...]` | Runs PROGRAM in ring 3; a name without `/` is in /bin |
 //!
 //! A line that names no command does nothing: there is no "unknown command"
 //! message. The line buffer is not NUL-terminated, so every comparison is
@@ -33,8 +33,8 @@ namespace Shell::Commands {
   /// Starts the demo threads.
   const THREADS_COMMAND: str = "threads";
 
-  /// Runs a program the bootloader loaded: `run hello`. The command is a prefix
-  /// followed by a module name.
+  /// Runs a program from the file tree: `run hello`, `run /bin/cat /etc/motd`.
+  /// The command is a prefix followed by the program and its arguments.
   const RUN_COMMAND: str = "run ";
 
   /// Byte length of `RUN_COMMAND`, including the trailing space.

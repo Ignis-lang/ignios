@@ -15,8 +15,8 @@
 //!
 //! ```text
 //!   boot/limine.conf                         boot/limine.ign / mm/modules.ign
-//!   module_path:   boot():/hello.elf   ──►   File.path    "/hello.elf"
-//!   module_string: hello               ──►   File.string  "hello"   <- `run hello`
+//!   module_path:   boot():/initramfs.tar ──► File.path    "/initramfs.tar"
+//!   module_string: initramfs           ──►   File.string  "initramfs"  <- Fs::Initramfs
 //!                                            File.address, File.size
 //! ```
 

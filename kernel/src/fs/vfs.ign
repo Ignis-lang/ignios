@@ -195,6 +195,22 @@ namespace Fs::Vfs {
     seed();
   }
 
+  /// A short text for a status code, as `strerror` would print it.
+  function describe(status: u64): str {
+    return match (status) {
+      OK -> "success",
+      NOT_FOUND -> "no such file or directory",
+      NOT_DIRECTORY -> "not a directory",
+      IS_DIRECTORY -> "is a directory",
+      EXISTS -> "file exists",
+      NAME_TOO_LONG -> "file name too long",
+      NO_MEMORY -> "out of memory",
+      NOT_EMPTY -> "directory not empty",
+      INVALID -> "invalid argument",
+      _ -> "unknown error",
+    };
+  }
+
   /// The root directory.
   function root(): *mut Fs::Node {
     return VfsState::root;

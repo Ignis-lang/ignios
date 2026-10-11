@@ -17,7 +17,8 @@
 //! | alignment check   | an interrupt from ring 3 with RFLAGS.AC set runs its handler with AC clear, and the program gets AC back |
 //! | syscalls          | `write`, `getpid`, `sched_yield`, `nanosleep` and their errors |
 //! | isolation (9 programs) | a fault or a forbidden instruction kills only that process, no frame leaks |
-//! | hello             | a real static ELF64 loaded from a Limine module        |
+//! | hello             | a real static ELF64 from the initramfs, argc and argv  |
+//! | refused           | a missing program, a directory, a file that is not ELF, an empty line and 33 arguments start nothing and leak nothing |
 //!
 //! `main.ign` calls `Tests::User::run` once, after the scheduler tests and before
 //! it enables the keyboard.
@@ -151,6 +152,7 @@ namespace Tests::User {
     runWait();
     runIsolation();
     runHello();
+    runRefused();
   }
 
   /// Runs `ALIGNMENT_SPIN` and checks, through the counters of
@@ -194,6 +196,33 @@ namespace Tests::User {
     Drivers::Console::writeLine(" interrupts from ring 3 with RFLAGS.AC set ran their handlers with AC clear");
   }
 
+  /// Asks `Proc::Programs::run` for things it must refuse and checks that
+  /// none started a process and that no frame or heap byte leaked. Each
+  /// refusal prints its reason on the console.
+  function runRefused(): void {
+    let freeBefore: u64 = Mm::Pmm::freeFrameCount();
+    let heapBefore: u64 = Mm::Heap::allocatedBytes();
+
+    expectRefused("nope");
+    expectRefused("/etc");
+    expectRefused("/etc/motd");
+    expectRefused("   ");
+    expectRefused("hello 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31 32");
+
+    if (Mm::Pmm::freeFrameCount() != freeBefore || Mm::Heap::allocatedBytes() != heapBefore) {
+      @panic("user test: a refused program leaked frames or heap memory");
+    }
+
+    Drivers::Console::writeLine("user: run refused a missing program, a directory, a file that is not ELF, an empty line and 33 arguments");
+  }
+
+  /// Panics unless running `line` starts no process.
+  function expectRefused(line: str): void {
+    if (Proc::Programs::runNamed(line) != Proc::Process::NO_PROCESS) {
+      @panic("user test: run started a program it should have refused");
+    }
+  }
+
   /// Runs every program that does something a user program must not and
   /// checks that each one is killed with the status of the matching signal,
   /// that the kernel is still running afterwards and that no frame leaked.
@@ -228,16 +257,18 @@ namespace Tests::User {
     }
   }
 
-  /// Runs `hello`, the ELF program the bootloader loaded as a module. It
-  /// prints from ring 3 and exits with 0 when its own checks pass.
+  /// Runs `hello one two`: the ELF program `/bin/hello` from the initramfs,
+  /// with two arguments. It prints its arguments from ring 3 (`make
+  /// run-headless` checks the line) and exits with 0 when its own checks
+  /// pass.
   function runHello(): void {
-    let status: u64 = Proc::Programs::runNamed("hello");
+    let status: u64 = Proc::Programs::runNamed("hello one two");
 
     if (status != 0) {
       @panic("user test: the hello program failed");
     }
 
-    Drivers::Console::writeLine("user: hello from a static ELF64 module loaded by Limine ran and exited with status 0");
+    Drivers::Console::writeLine("user: /bin/hello from the initramfs ran with 3 arguments and exited with status 0");
   }
 
   /// Runs the system call program, which prints from ring 3 and checks the

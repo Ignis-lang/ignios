@@ -1,48 +1,72 @@
 //!
 //! # Running Programs
 //!
-//! Running the programs the bootloader loaded: look a module up by name,
-//! start it as a process and wait for it.
+//! Running a program from the file tree: split the command line into
+//! arguments, find the file, start it as a process and wait for it.
 //!
 //! ## Overview
 //!
-//! `run hello` at the terminal ends up in `Proc::Programs::run`:
+//! `run cat /etc/motd` at the terminal ends up in `Proc::Programs::run` with
+//! the line `cat /etc/motd`:
 //!
 //! ```text
-//!   Proc::Programs::run(name, length)
-//!     ├─ Mm::Modules::find            match the module string
-//!     ├─ Proc::Process::startElf        build the address space, load, launch
-//!     └─ Proc::Process::wait            block until the process is gone, return its status
+//!   Proc::Programs::run(line, length)
+//!     ├─ split            words separated by spaces -> "cat\0/etc/motd\0", 2 arguments
+//!     ├─ program path     a word without `/` is looked up in /bin: /bin/cat
+//!     ├─ Fs::Vfs::lookup  must be a regular file
+//!     ├─ Proc::Process::startElf(file data, arguments)
+//!     │                   build the address space, load, write argc and argv, launch
+//!     └─ Proc::Process::wait   block until the process is gone, return its status
 //! ```
+//!
+//! Argument 0 is the program word as typed (`cat`), as a Unix shell passes
+//! it. The lookup and the start run with interrupts off, because the file
+//! tree has no locks: no process can change the file while it is being read.
 
+import Arch from "@arch";
 import Drivers from "@drivers";
+import Fs from "@fs";
+import Lib from "@lib";
 import Mm from "@mm";
 import _ from "./process";
 
 /// The program API.
 namespace Proc::Programs {
-  /// Runs the module whose configuration string is the `length` bytes at
-  /// `name`, waits for the process and returns its exit status. Returns
+  /// The directory a program name without a slash is looked up in.
+  const BIN_PREFIX: str = "/bin/";
+
+  /// The length of `BIN_PREFIX`.
+  const BIN_PREFIX_LENGTH: u64 = 5;
+
+  /// ASCII space, the only separator between arguments.
+  const SPACE: u8 = 0x20;
+
+  /// ASCII `/`.
+  const SLASH: u8 = 0x2F;
+
+  /// Runs the command line in the `length` bytes at `line`, waits for the
+  /// process and returns its exit status. Returns
   /// `Proc::Process::NO_PROCESS` after printing why when no process ran.
-  function run(name: *u8, length: u64): u64 {
-    let index: u64 = Mm::Modules::find(name, length);
+  function run(line: *u8, length: u64): u64 {
+    let strings: *mut u8 = Mm::Heap::allocate(length + 1, 16);
 
-    if (index == Mm::Modules::NOT_FOUND) {
-      Drivers::Console::write("run: no program named ");
-
-      let mut position: u64 = 0;
-
-      while (position < length) {
-        Drivers::Console::writeChar(*(name + position));
-        position += 1;
-      }
-
-      Drivers::Console::writeLine("");
-
+    if (strings == null) {
+      Drivers::Console::writeLine("run: out of memory");
       return Proc::Process::NO_PROCESS;
     }
 
-    let id: u64 = Proc::Process::startElf(Mm::Modules::address(index), Mm::Modules::size(index));
+    let mut stringBytes: u64 = 0;
+    let count: u64 = split(line, length, strings, &mut stringBytes as *mut u64);
+
+    if (count == 0) {
+      Mm::Heap::free(strings);
+      Drivers::Console::writeLine("run: no program given");
+      return Proc::Process::NO_PROCESS;
+    }
+
+    let id: u64 = start(strings as *u8, stringBytes, count);
+
+    Mm::Heap::free(strings);
 
     if (id == Proc::Process::NO_PROCESS) {
       return Proc::Process::NO_PROCESS;
@@ -51,14 +75,129 @@ namespace Proc::Programs {
     return Proc::Process::wait(id);
   }
 
-  /// `run` for a name known at compile time.
-  function runNamed(name: str): u64 {
+  /// `run` for a line known at compile time.
+  function runNamed(line: str): u64 {
     let mut length: u64 = 0;
 
-    while (*(name as *u8 + length) != 0) {
+    while (*(line as *u8 + length) != 0) {
       length += 1;
     }
 
-    return run(name as *u8, length);
+    return run(line as *u8, length);
+  }
+
+  /// Copies the words of the `length` bytes at `line` to `strings`, each one
+  /// followed by a NUL, writes the bytes used to `used` and returns the
+  /// number of words. `strings` holds `length + 1` bytes, which is enough:
+  /// every word but the last one gives up a space for its NUL.
+  function split(line: *u8, length: u64, strings: *mut u8, used: *mut u64): u64 {
+    let mut position: u64 = 0;
+    let mut written: u64 = 0;
+    let mut count: u64 = 0;
+
+    while (position < length) {
+      while (position < length && *(line + position) == SPACE) {
+        position += 1;
+      }
+
+      if (position == length) {
+        break;
+      }
+
+      while (position < length && *(line + position) != SPACE) {
+        *(strings + written) = *(line + position);
+        written += 1;
+        position += 1;
+      }
+
+      *(strings + written) = 0;
+      written += 1;
+      count += 1;
+    }
+
+    *used = written;
+
+    return count;
+  }
+
+  /// Finds the program the first string names and starts it with the
+  /// `count` NUL-terminated `strings` as its arguments. Returns the process
+  /// id, or `NO_PROCESS` after printing why.
+  function start(strings: *u8, stringBytes: u64, count: u64): u64 {
+    let nameLength: u64 = stringLength(strings);
+    let hasSlash: boolean = contains(strings, nameLength, SLASH);
+    let pathLength: u64 = hasSlash ? nameLength : BIN_PREFIX_LENGTH + nameLength;
+    let path: *mut u8 = Mm::Heap::allocate(pathLength, 16);
+
+    if (path == null) {
+      Drivers::Console::writeLine("run: out of memory");
+      return Proc::Process::NO_PROCESS;
+    }
+
+    if (hasSlash) {
+      Lib::Mem::copy(path, strings, nameLength);
+    } else {
+      Lib::Mem::copy(path, BIN_PREFIX as *u8, BIN_PREFIX_LENGTH);
+      Lib::Mem::copy(path + BIN_PREFIX_LENGTH, strings, nameLength);
+    }
+
+    let saved: u64 = Arch::Cpu::saveAndDisableInterrupts();
+    let mut node: *mut Fs::Node = null;
+    let status: u64 = Fs::Vfs::lookup(Fs::Vfs::root(), path as *u8, pathLength, &mut node as *mut *mut Fs::Node);
+    let mut id: u64 = Proc::Process::NO_PROCESS;
+
+    if (status != Fs::Vfs::OK) {
+      reportPath(path as *u8, pathLength, Fs::Vfs::describe(status));
+    } else if ((*node).kind != Fs::Vfs::FILE) {
+      reportPath(path as *u8, pathLength, "not a regular file");
+    } else {
+      id = Proc::Process::startElf((*node).data as *u8, (*node).size, strings, stringBytes, count);
+    }
+
+    Arch::Cpu::restoreInterrupts(saved);
+    Mm::Heap::free(path);
+
+    return id;
+  }
+
+  /// The length of the NUL-terminated string at `text`, without the NUL.
+  function stringLength(text: *u8): u64 {
+    let mut length: u64 = 0;
+
+    while (*(text + length) != 0) {
+      length += 1;
+    }
+
+    return length;
+  }
+
+  /// True when the `length` bytes at `text` contain `byte`.
+  function contains(text: *u8, length: u64, byte: u8): boolean {
+    let mut index: u64 = 0;
+
+    while (index < length) {
+      if (*(text + index) == byte) {
+        return true;
+      }
+
+      index += 1;
+    }
+
+    return false;
+  }
+
+  /// Prints `run: PATH: reason`.
+  function reportPath(path: *u8, length: u64, reason: str): void {
+    let mut index: u64 = 0;
+
+    Drivers::Console::write("run: ");
+
+    while (index < length) {
+      Drivers::Console::writeChar(*(path + index));
+      index += 1;
+    }
+
+    Drivers::Console::write(": ");
+    Drivers::Console::writeLine(reason);
   }
 }

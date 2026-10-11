@@ -1,0 +1,37 @@
+//!
+//! # Program Arguments
+//!
+//! Access to the argc and argv that `start.S` passes to the program's `main`.
+//!
+//! ## Overview
+//!
+//! A program declares its entry point as
+//!
+//! ```ignis
+//! @externName("ignis_main")
+//! function main(count: u64, values: *u64): u64 { ... }
+//! ```
+//!
+//! `values` is the argv array on the initial stack: `count` user addresses of
+//! NUL-terminated strings, then a 0. Entry 0 is the program name as the shell
+//! typed it. The value `main` returns is the exit status.
+
+/// Reading argv.
+export namespace Args {
+  /// The address of argument `index` of the array `values`. The caller keeps
+  /// `index` below the argument count.
+  function get(values: *u64, index: u64): *u8 {
+    return @pointerFromInteger<*u8>(*@pointerFromInteger<*u64>(@integerFromPointer(values) + index * 8));
+  }
+
+  /// The length of the NUL-terminated string at `text`, without the NUL.
+  function length(text: *u8): u64 {
+    let mut count: u64 = 0;
+
+    while (*(text + count) != 0) {
+      count += 1;
+    }
+
+    return count;
+  }
+}

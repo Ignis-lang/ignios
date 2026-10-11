@@ -45,7 +45,7 @@ Each subsystem is a directory under `kernel/src/` with a `mod.ign` facade. The f
 | `apic/` | `Apic` | `@apic` | Acpi, Arch, Drivers, Mm | `Lapic`, `Ioapic` |
 | `time/` | `Time` | `@time` | Apic, Arch, Drivers | `Timer` |
 | `sched/` | `Sched` | `@sched` | Arch, Mm, Time | `Thread`, `Scheduler` |
-| `proc/` | `Proc` | `@proc` | Arch, Boot, Drivers, Lib, Mm, Sched | `Process`, `Elf`, `Programs` |
+| `proc/` | `Proc` | `@proc` | Arch, Boot, Drivers, Fs, Lib, Mm, Sched | `Process`, `Elf`, `Programs` |
 | `syscall/` | `Syscall` | `@syscall` | Arch, Drivers, Mm, Proc, Sched, Time | `Operation`, `Linux` |
 | `trap/` | `Trap` | `@trap` | Apic, Arch, Drivers, Proc, Sched, Time | `Exception`, `Setup`, the dispatcher |
 | `shell/` | `Shell` | `@shell` | Arch, Drivers, Lib, Proc, Sched, Time | `Terminal`, `Commands`, `ThreadCommands` |
@@ -89,7 +89,7 @@ Read these first. They define what the kernel is made of and how it gets the mac
 
 **`kernel/linker.ld`.** Puts the kernel at `0xffffffff80000000` in three segments (text, rodata, data) with the page-aligned boundary symbols `__text_start` and so on. The table in the header shows the layout. `Mm::Vmm::mapKernelImage` uses these symbols to map each segment with its own permissions. Doc 01.
 
-**`boot/limine.conf`.** The Limine configuration: the kernel path, the `hello.elf` module that `run hello` starts, and the initramfs archive. Doc 01.
+**`boot/limine.conf`.** The Limine configuration: the kernel path and the only module, the initramfs archive with the user programs in `/bin`. Doc 01.
 
 **`boot/mod.ign` and `boot/limine.ign`.** The Limine boot protocol. A request is a global record with a fixed identifier that Limine finds by scanning the loaded image and answers by writing a pointer into its `response` field. Look at the diagram in the header and at `readResponse`, which reads the pointer with a volatile load because Limine wrote it behind the compiler's back. The memory map entry types are in the table above `MEMMAP_USABLE`. `requireBaseRevision` and `requireFramebuffer` are the two checks `kmain` makes before anything else. Doc 01.
 
@@ -187,7 +187,7 @@ Doc 13.
 
 **`shell/terminal.ign`.** The terminal loop the boot thread becomes. It is the clearest example of the `cli`, check, `sti; hlt` pattern that avoids a lost wakeup: the queue is tested with interrupts off so a key cannot arrive between the test and the sleep.
 
-**`shell/commands.ign` and `shell/thread_commands.ign`.** The commands: `uptime`, `ps`, `threads` and `run NAME`.
+**`shell/commands.ign` and `shell/thread_commands.ign`.** The commands: `uptime`, `ps`, `threads` and `run PROGRAM [ARG...]`.
 
 ## Part 9. User mode
 
@@ -201,11 +201,11 @@ Docs 14 and 15.
 
 **`syscall/dispatch.ign`, `operation.ign` and `linux/`.** Two-step dispatch: the call number maps to an operation through a per-process table, then the operation runs. `dispatch.ign` draws the flow, `operation.ign` has the ABI independent operations, `linux/table.ign` lists the calls and `linux/write.ign` and `linux/nanosleep.ign` are the handlers. Every user pointer goes through `Mm::AddressSpace::copyFromUser` or `copyToUser`, and a bad one is `-EFAULT`.
 
-**`proc/elf.ign`.** The ELF64 loader. The header maps the segments of `hello.elf` to user addresses and shows the header structures. It refuses a segment that is both writable and executable.
+**`proc/elf.ign`.** The ELF64 loader. The header maps the segments of `build/user/hello.elf` to user addresses and shows the header structures. It refuses a segment that is both writable and executable.
 
-**`mm/modules.ign` and `proc/programs.ign`.** Find a Limine module by its configuration string, and run it as a process.
+**`mm/modules.ign` and `proc/programs.ign`.** `Mm::Modules` maps the Limine modules and finds one by its configuration string; the only one is the initramfs. `Proc::Programs::run` splits a command line into arguments, looks the program up in the file tree (`/bin/NAME` for a name without a slash) and starts it. `Proc::Process::buildStack` writes the Linux initial stack: argc, argv, an empty envp, the auxiliary vector and the strings, with the diagram in its comment.
 
-**`user/`.** The user side. `lib/sys.ign` wraps the `syscall` instruction, `lib/io.ign` prints, and `hello/src/main.ign` is the program. `user/user.ld` places it at `0x400000`.
+**`user/`.** The user side. `lib/start.S` is `_start`, the entry point of every program: it reads argc and argv from the initial stack and calls the program's `main`, because a compiled function cannot start on a stack that holds no return address. `lib/sys.ign` wraps the `syscall` instruction, `lib/io.ign` prints, `lib/args.ign` reads argv, and `hello/src/main.ign` is the first program. `user/user.ld` places programs at `0x400000`.
 
 ## Part 10. Files
 
@@ -349,10 +349,9 @@ vmm: self-test ok
 `Tests::Vmm::run` mapped a frame at a test address, wrote through it, read it through the direct map, and unmapped it.
 
 ```text
-modules: hello is /hello.elf, 13152 bytes at 0xffff80000a0e8000
-modules: initramfs is /initramfs.tar, 20480 bytes at 0xffff80000a0e1000
+modules: initramfs is /initramfs.tar, 20480 bytes at 0xffff80000a0e8000
 ```
-The Limine modules from `boot/limine.conf`. `hello` is the `module_string` of the first, `/hello.elf` the path. `Mm::Modules::initialize` mapped its pages read only. The address is in the direct map, so the file sits at physical `0x0a0e8000`. Doc 15.
+The Limine module from `boot/limine.conf`. `initramfs` is the `module_string`, `/initramfs.tar` the path. `Mm::Modules::initialize` mapped its pages read only. The address is in the direct map, so the file sits at physical `0x0a0e8000`. Doc 15.
 
 ```text
 heap: self-test ok, 1092 KiB mapped, 0 bytes in use
@@ -573,14 +572,15 @@ user: isolation ok, a null write, hlt, cli, ud2, a kernel read, port I/O, a writ
 ### The ELF program
 
 ```text
-elf: PT_LOAD 0x0000000000400000 file 2082 mem 2082 r-x
-elf: PT_LOAD 0x0000000000401000 file 179 mem 179 r--
+elf: PT_LOAD 0x0000000000400000 file 2210 mem 2210 r-x
+elf: PT_LOAD 0x0000000000401000 file 187 mem 187 r--
 elf: PT_LOAD 0x0000000000402000 file 8 mem 16 rw-
-elf: 3 segments, 3 pages, entry 0x0000000000400000, stack top 0x00007ffffffff000
+elf: 3 segments, 3 pages, entry 0x0000000000400000, stack pointer 0x00007fffffffef90, 3 arguments
 ```
-`Proc::Process::startElf` loaded `hello.elf`. One line per segment: address, bytes copied from the file, bytes in memory, permissions. The data segment has 8 file bytes and 16 memory bytes, so the last 8 are zero (`.bss`). The last line is the summary. Doc 15.
+`Tests::User::runHello` ran the line `hello one two`, so `Proc::Programs::run` looked up `/bin/hello` in the file tree and `Proc::Process::startElf` loaded it. One line per segment: address, bytes copied from the file, bytes in memory, permissions. The data segment has 8 file bytes and 16 memory bytes, so the last 8 are zero (`.bss`). The last line is the summary. The entry is `_start` of `user/lib/start.S`, linked first. The stack pointer is the address of argc: the 14 bytes of `hello\0one\0two\0` rounded up to 16 below the top, then 12 words (argc, three argv entries, two zeros, three auxiliary pairs), rounded down to 16. Doc 15.
 
 ```text
+argv: hello one two
 hello from user mode, pid 19
 data 42, bss 0 then 1
 i64 minimum = -9223372036854775808
@@ -591,9 +591,19 @@ sleep(0.05 s) = 0
 yield() = 0
 goodbye from user mode
 process 19 exited with status 0
-user: hello from a static ELF64 module loaded by Limine ran and exited with status 0
+user: /bin/hello from the initramfs ran with 3 arguments and exited with status 0
 ```
-The output of `user/hello/src/main.ign`. It is process 19, after the 18 test processes. `data 42` shows `.data` was loaded (41 plus 1), `bss 0 then 1` shows `.bss` was zeroed. The i64 minimum line shows that `Io::printNumber` negates in `u64`, where -2^63 has a magnitude; `make run-headless` fails if it is wrong. The three negative results are `-EFAULT`, `-EBADF` and `-ENOSYS`.
+The output of `user/hello/src/main.ign`. The first line is argv as `main` received it from `_start`; `make run-headless` checks it. It is process 19, after the 18 test processes. `data 42` shows `.data` was loaded (41 plus 1), `bss 0 then 1` shows `.bss` was zeroed. The i64 minimum line shows that `Io::printNumber` negates in `u64`, where -2^63 has a magnitude; `make run-headless` fails if it is wrong. The three negative results are `-EFAULT`, `-EBADF` and `-ENOSYS`.
+
+```text
+run: /bin/nope: no such file or directory
+run: /etc: not a regular file
+elf: the file is smaller than an ELF header
+run: no program given
+elf: too many arguments
+user: run refused a missing program, a directory, a file that is not ELF, an empty line and 33 arguments
+```
+`Tests::User::runRefused` asked `run` for a program that does not exist, a directory, `/etc/motd` (a text file the ELF loader refuses), a line of spaces and 33 arguments, one more than `MAX_ARGUMENTS`. None started a process, and the PMM free count and the heap were the same afterwards.
 
 ```text
 cpu local: self-test ok, after ring 3 the kernel GS base is the per-CPU block and the user one is 0

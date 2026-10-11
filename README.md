@@ -20,7 +20,7 @@ Early, and only tested in QEMU with OVMF.
 | Threads | Kernel threads with their own stacks and a guard page, a round-robin run queue, `yield`, `sleep`, `exit` and `join`, an idle thread, and preemption by the timer tick with 100 ms time slices; `ps` lists the threads and `threads` starts a demo; the boot thread runs the terminal |
 | Input | PS/2 keyboard, scancode set 1, US layout, Shift and Caps Lock, line editing at a `>` prompt |
 | Memory | Bitmap frame allocator over the Limine memory map (4 KiB frames and 2 MiB runs, frees of unmanaged frames rejected); own 4-level page tables (kernel image per segment with W^X, direct map with 2 MiB pages, write-combining framebuffer, NX and write protection on); kernel heap in the higher half behind the compiler's allocation handlers |
-| User mode | Per-process address spaces (own PML4, shared kernel half, U/S pages, frames freed on exit); ring 3 entered with `iretq`, left through `SYSCALL`/`SYSRET` or an interrupt (TSS.RSP0 follows the running thread); a Linux x86_64 syscall subset (`write`, `exit`, `exit_group`, `getpid`, `sched_yield`, `nanosleep`, `-ENOSYS` for the rest) behind a per-process ABI table; every user pointer validated before use; a static ELF64 loader fed by Limine modules; a fault, privileged instruction or undefined instruction in ring 3 kills only that process; waiting for a process blocks until it is gone |
+| User mode | Per-process address spaces (own PML4, shared kernel half, U/S pages, frames freed on exit); ring 3 entered with `iretq`, left through `SYSCALL`/`SYSRET` or an interrupt (TSS.RSP0 follows the running thread); a Linux x86_64 syscall subset (`write`, `exit`, `exit_group`, `getpid`, `sched_yield`, `nanosleep`, `-ENOSYS` for the rest) behind a per-process ABI table; every user pointer validated before use; a static ELF64 loader that starts programs from the file tree with argc and argv; a fault, privileged instruction or undefined instruction in ring 3 kills only that process; waiting for a process blocks until it is gone |
 | Next | a filesystem and a native IgniOS system call ABI |
 
 ## Quick start
@@ -41,7 +41,7 @@ The build also needs an Ignis compiler with freestanding support (Ignis `main` f
 | Target | What it does |
 |---|---|
 | `kernel` | Builds `build/kernel.elf` |
-| `user` | Builds the user program `build/hello.elf` from `user/hello` and `user/lib` |
+| `user` | Builds the user programs `build/user/NAME.elf` from `user/NAME`, `user/lib` and the entry stub `user/lib/start.S` |
 | `image` | Builds `build/ignios.img`, a FAT32 EFI system partition with Limine, the kernel and the user program |
 | `run` | Boots in QEMU with the serial console on stdio |
 | `run-headless` | Boots without a display and checks the banner and prompt in `build/serial.log` |
@@ -54,7 +54,7 @@ The build also needs an Ignis compiler with freestanding support (Ignis `main` f
 
 Ignis compiles the whole kernel to one C unit, which clang compiles for `x86_64-unknown-none` with kernel flags (no red zone, no SSE in the kernel, `-mcmodel=kernel`). The few routines that cannot be written in Ignis are small `.S` files under `kernel/src/arch/x86_64/`: interrupt entry stubs, the code segment reload, the stack switch, the ring 3 entry and the `SYSCALL` stub, the per-CPU block, the fault probes, and the throwaway user programs of the boot self-tests. `ld.lld` links everything with `kernel/linker.ld`, and `mtools` writes the boot image. No cross GCC is involved.
 
-User programs are Ignis projects under `user/` built with `std = false` and the small user standard library in `user/lib` (`std::sys` wraps the system calls in inline asm, `std::io` prints). The Makefile links each one with `user/user.ld` into a static ELF64 at `0x400000`, copies it into the boot image and `boot/limine.conf` lists it as a Limine module. The kernel runs `hello` at boot, before the keyboard line, and `run hello` at the prompt runs it again.
+User programs are Ignis projects under `user/` built with `std = false` and the small user standard library in `user/lib` (`std::sys` wraps the system calls in inline asm, `std::io` prints). The Makefile links each one after the entry stub `user/lib/start.S` with `user/user.ld` into a static ELF64 at `0x400000` and packs it into the initramfs as `/bin/NAME`. The kernel runs `hello one two` at boot, before the keyboard line, and `run hello` at the prompt runs it again; `run PROGRAM ARG...` passes arguments.
 
 ## Layout
 
@@ -70,10 +70,11 @@ The kernel is split into subsystems. Each one is a directory under `kernel/src/`
 | `kernel/src/drivers/` | `Drivers` | `@drivers` | COM1, the framebuffer console and its font, the PS/2 controller, the keyboard decoder |
 | `kernel/src/acpi/` | `Acpi` | `@acpi` | RSDP, XSDT/RSDT and MADT parsing |
 | `kernel/src/mm/` | `Mm` | `@mm` | physical frames, page tables, address spaces, the kernel heap, Limine modules |
+| `kernel/src/fs/` | `Fs` | `@fs` | the initramfs (ustar) and the in-memory file tree |
 | `kernel/src/apic/` | `Apic` | `@apic` | local APIC and IOAPIC |
 | `kernel/src/time/` | `Time` | `@time` | APIC timer calibration, the tick counter, uptime |
 | `kernel/src/sched/` | `Sched` | `@sched` | the thread table and stacks, the run queue, sleep and timer preemption |
-| `kernel/src/proc/` | `Proc` | `@proc` | process table, ELF loader, program registry |
+| `kernel/src/proc/` | `Proc` | `@proc` | process table, ELF loader, running a program from a path with arguments |
 | `kernel/src/syscall/` | `Syscall` | `@syscall` | dispatch, the kernel operations, the Linux ABI table and handlers |
 | `kernel/src/trap/` | `Trap` | `@trap` | the interrupt dispatcher, exception reports, GDT/IDT/`SYSCALL` setup with their log lines |
 | `kernel/src/shell/` | `Shell` | `@shell` | the terminal loop and its commands |
@@ -85,10 +86,11 @@ The dependencies run one way, and the compiler rejects an import cycle. `Lib`, `
 
 ```
 kernel/linker.ld               higher-half layout
-user/lib/                      the user standard library (syscalls, text output)
+user/lib/                      the user standard library (entry stub, syscalls, text output, argv)
 user/hello/                    the first user program
 user/user.ld                   user program layout
-boot/limine.conf               boot entry and the user program module
+initramfs/                     files packed into the initramfs next to the programs in /bin
+boot/limine.conf               boot entry and the initramfs module
 docs/READING.md                reading guide: subsystem by subsystem, address space map, annotated boot log
 scripts/                       font generator, screenshot and key test drivers
 ```

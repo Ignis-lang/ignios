@@ -22,7 +22,7 @@
 //!
 //! ## From File to Address Space
 //!
-//! The `hello` program as `user.ld` lays it out (`readelf -l build/hello.elf`):
+//! The `hello` program as `user.ld` lays it out (`readelf -l build/user/hello.elf`):
 //!
 //! ```text
 //!   ELF file (hello.elf)                      user address space of the process
