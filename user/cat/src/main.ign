@@ -24,23 +24,14 @@ import Args from "std::args";
 import Io from "std::io";
 import Sys from "std::sys";
 
-/// The copy buffer and a `struct stat`.
+/// The copy buffer.
 record Cat {
   /// Bytes read from a file and written to standard output.
   static mut buffer: u8[512];
-
-  /// The `struct stat` of the file being copied.
-  static mut stat: u8[144];
 }
 
 /// Size of `Cat::buffer`.
 const BUFFER_SIZE: u64 = 512;
-
-/// The file type bits of `st_mode` (offset 24 of `struct stat`).
-const MODE_TYPE_MASK: u32 = 0xF000;
-
-/// `S_IFREG`.
-const MODE_REGULAR: u32 = 0x8000;
 
 /// Copies the open `descriptor` to standard output until the end. Returns 0,
 /// or the negated errno of a failed read.
@@ -65,19 +56,13 @@ function copy(descriptor: u64): i64 {
 /// false when it is not, or when `mmap` refuses: the caller then copies it
 /// with `read`.
 function mapped(descriptor: u64): boolean {
-  let stat: *mut u8 = &mut Cat::stat as *mut u8;
+  let mut info: Sys::FileInfo = Sys::FileInfo { kind: 0, size: 0, id: 0, mode: 0 };
 
-  if (Sys::fstat(descriptor, stat) < 0) {
+  if (Sys::info(descriptor, &mut info as *mut Sys::FileInfo) < 0 || info.kind != Sys::KIND_FILE || info.size == 0) {
     return false;
   }
 
-  let mode: u32 = *@pointerFromInteger<*u32>(@integerFromPointer(stat) + 24);
-  let size: u64 = *@pointerFromInteger<*u64>(@integerFromPointer(stat) + 48);
-
-  if ((mode & MODE_TYPE_MASK) != MODE_REGULAR || size == 0) {
-    return false;
-  }
-
+  let size: u64 = info.size;
   let address: i64 = Sys::mmap(size, Sys::PROT_READ, Sys::MAP_PRIVATE, descriptor, 0);
 
   if (address < 0) {

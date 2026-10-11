@@ -9,7 +9,7 @@ description = "Lists directories"
 # not the Ignis one.
 [ignis]
 std = false
-std_path = "../lib"
+std_path = "../lib/linux"
 
 [build]
 bin = false

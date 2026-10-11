@@ -6,8 +6,8 @@
 #   kernel/src/**/*.ign --ignis build--> build/ignis/user/obj/kernel.o  (one C unit, compiled by clang)
 #   kernel/src/**/*.S   --clang -c-----> build/asm/**/*.o
 #   kernel.o + asm .o   --ld.lld -T kernel/linker.ld--> build/kernel.elf
-#   user/lib/start.S    --clang -c-----> build/user/start.o
-#   user/NAME           --ignis build--> NAME.o --ld.lld -T user/user.ld (with start.o)--> build/user/NAME.elf
+#   user/lib/FLAVOUR/start.S --clang -c--> build/user/start-FLAVOUR.o   (FLAVOUR: linux or native)
+#   user/NAME           --ignis build--> NAME.o --ld.lld -T user/user.ld (with its start)--> build/user/NAME.elf
 #   initramfs/ + build/user/*.elf --tar--> build/initramfs.tar   (programs in /bin)
 #   kernel.elf + initramfs.tar + Limine + boot/limine.conf --mtools--> build/ignios.img (FAT32 ESP)
 #
@@ -36,12 +36,17 @@ IGNIS_SOURCES := $(sort $(shell find kernel/src -name '*.ign'))
 IGNIS_OBJECT := $(BUILD)/ignis/user/obj/kernel.o
 
 # The user programs. Each NAME is an Ignis project in user/NAME whose ignis.toml
-# writes its object to build/user/NAME; it is linked with the entry stub
-# user/lib/start.S and shipped in the initramfs as /bin/NAME.
+# writes its object to build/user/NAME and picks a library flavour with
+# `std_path` (../lib/linux or ../lib/native). It is linked with that flavour's
+# entry stub user/lib/FLAVOUR/start.S and shipped in the initramfs as
+# /bin/NAME.
 USER_PROGRAMS := hello fstest mmtest cat ls touch mkdir
 USER_ELFS := $(patsubst %,$(BUILD)/user/%.elf,$(USER_PROGRAMS))
-USER_LIB_SOURCES := $(shell find user/lib -name '*.ign' -o -name '*.toml')
-USER_START := $(BUILD)/user/start.o
+USER_LIB_SOURCES := $(shell find user/lib -name '*.ign' -o -name '*.toml' -o -name '*.S')
+USER_STARTS := $(BUILD)/user/start-linux.o $(BUILD)/user/start-native.o
+
+# The library flavour of program $(1): native when its std_path names it.
+flavour = $(if $(shell grep -s 'lib/native' user/$(1)/ignis.toml),native,linux)
 
 # The initramfs: the files under initramfs/ plus the user programs in /bin,
 # packed as a ustar archive that Limine loads as the module `initramfs`.
@@ -94,17 +99,18 @@ $(IGNIS_OBJECT): $(IGNIS_SOURCES) ignis.toml
 
 user: $(USER_ELFS)
 
-# The entry stub every user program starts in (`_start`).
-$(USER_START): user/lib/start.S
+# The entry stub of a library flavour (`_start`).
+$(BUILD)/user/start-%.o: user/lib/%/start.S
 	@mkdir -p $(dir $@)
 	$(CLANG) --target=x86_64-unknown-none -fno-pic -fno-pie -c -o $@ $<
 
 # One user program: compile its Ignis project, then link its object after the
-# entry stub. The second expansion lists the program's own sources.
+# entry stub of its flavour. The second expansion lists the program's own
+# sources.
 .SECONDEXPANSION:
-$(BUILD)/user/%.elf: $$(shell find user/$$* -name '*.ign' -o -name '*.toml') $(USER_LIB_SOURCES) $(USER_START) user/user.ld
+$(BUILD)/user/%.elf: $$(shell find user/$$* -name '*.ign' -o -name '*.toml') $(USER_LIB_SOURCES) $(USER_STARTS) user/user.ld
 	cd user/$* && $(IGNIS) build
-	$(LD) $(USER_LDFLAGS) -o $@ $(USER_START) $(BUILD)/user/$*/user/obj/$*.o
+	$(LD) $(USER_LDFLAGS) -o $@ $(BUILD)/user/start-$(call flavour,$*).o $(BUILD)/user/$*/user/obj/$*.o
 
 # Packs initramfs/ and the user programs (as /bin/NAME) into the archive.
 $(INITRAMFS): $(INITRAMFS_FILES) $(USER_ELFS)

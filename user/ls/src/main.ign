@@ -13,38 +13,19 @@
 //! | more than one path    | each directory under a `PATH:` heading, a blank line between them | 0 |
 //! | a path that fails     | `ls: cannot access 'PATH': REASON` on standard error | 2      |
 //!
-//! The names come from `getdents64`, read in 512-byte batches. Each record is
-//! a `struct linux_dirent64`: the name starts at byte 19 and the record
-//! length is the 2 bytes at offset 16. Status 2 for a missing path is GNU
-//! ls's "serious trouble".
+//! The names come from `Sys::readEntry`, which every flavour of the library
+//! implements on its own system calls and which leaves out `.` and `..`.
+//! Status 2 for a missing path is GNU ls's "serious trouble".
 
 import Args from "std::args";
 import Io from "std::io";
 import Sys from "std::sys";
 
-/// What the listing shares.
+/// The listing's buffer.
 record Ls {
-  /// Directory records from `getdents64`.
-  static mut buffer: u8[512];
-
-  /// A `struct stat`.
-  static mut stat: u8[144];
+  /// The name of the current entry, NUL-terminated.
+  static mut name: u8[256];
 }
-
-/// Size of `Ls::buffer`.
-const BUFFER_SIZE: u64 = 512;
-
-/// The file type bits of `st_mode` (offset 24 of `struct stat`).
-const MODE_TYPE_MASK: u32 = 0xF000;
-
-/// `S_IFDIR`.
-const MODE_DIRECTORY: u32 = 0x4000;
-
-/// Offset of `d_reclen` in a record.
-const RECORD_LENGTH_OFFSET: u64 = 16;
-
-/// Offset of `d_name` in a record.
-const RECORD_NAME_OFFSET: u64 = 19;
 
 /// Prints `ls: cannot access 'PATH': REASON` on standard error.
 function report(path: *u8, result: i64): void {
@@ -55,41 +36,21 @@ function report(path: *u8, result: i64): void {
   Io::error("\n");
 }
 
-/// True when the NUL-terminated `name` is `.` or `..`.
-function isDotEntry(name: *u8): boolean {
-  if (*name != 0x2E) {
-    return false;
-  }
-
-  return *(name + 1) == 0 || (*(name + 1) == 0x2E && *(name + 2) == 0);
-}
-
-/// Prints every entry of the open directory `descriptor` but `.` and `..`.
-/// Returns 0, or the negated errno of a failed read.
+/// Prints every entry of the open directory `descriptor`. Returns 0, or the
+/// negated error code of a failed read.
 function listEntries(descriptor: u64): i64 {
-  let buffer: *mut u8 = &mut Ls::buffer as *mut u8;
+  let name: *mut u8 = &mut Ls::name as *mut u8;
+  let mut kind: u64 = 0;
 
   while (true) {
-    let total: i64 = Sys::readDirectory(descriptor, buffer, BUFFER_SIZE);
+    let length: i64 = Sys::readEntry(descriptor, name, &mut kind as *mut u64);
 
-    if (total <= 0) {
-      return total;
+    if (length <= 0) {
+      return length;
     }
 
-    let mut offset: u64 = 0;
-
-    while (offset < total as u64) {
-      let entry: *mut u8 = buffer + offset;
-      let length: u64 = (*(entry + RECORD_LENGTH_OFFSET) as u64) | ((*(entry + RECORD_LENGTH_OFFSET + 1) as u64) << 8);
-      let name: *u8 = (entry + RECORD_NAME_OFFSET) as *u8;
-
-      if (!isDotEntry(name)) {
-        Io::printString(name);
-        Io::print("\n");
-      }
-
-      offset += length;
-    }
+    Io::printBytes(name as *u8, length as u64);
+    Io::print("\n");
   }
 
   return 0;
@@ -98,17 +59,15 @@ function listEntries(descriptor: u64): i64 {
 /// Lists one path. With `heading`, a directory is listed under `PATH:`.
 /// Returns true on success.
 function listPath(path: *u8, heading: boolean): boolean {
-  let stat: *mut u8 = &mut Ls::stat as *mut u8;
-  let described: i64 = Sys::statAt(Sys::AT_FDCWD, path, stat, 0);
+  let mut info: Sys::FileInfo = Sys::FileInfo { kind: 0, size: 0, id: 0, mode: 0 };
+  let described: i64 = Sys::infoAt(path, &mut info as *mut Sys::FileInfo);
 
   if (described < 0) {
     report(path, described);
     return false;
   }
 
-  let mode: u32 = *@pointerFromInteger<*u32>(@integerFromPointer(stat) + 24);
-
-  if ((mode & MODE_TYPE_MASK) != MODE_DIRECTORY) {
+  if (info.kind != Sys::KIND_DIRECTORY) {
     Io::printString(path);
     Io::print("\n");
     return true;

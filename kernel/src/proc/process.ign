@@ -264,7 +264,7 @@ namespace Proc::Process {
   /// ```
   ///
   /// Unlike a function entry, nothing looks like a return address: the
-  /// program's `_start` (`user/lib/start.S`) reads argc at the stack
+  /// program's `_start` (`user/lib/linux/start.S`) reads argc at the stack
   /// pointer. `startElf` keeps the arguments small enough for the two top
   /// stack pages.
   function buildStack(root: u64, strings: *u8, stringBytes: u64, count: u64, entry: u64): u64 {

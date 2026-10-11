@@ -44,7 +44,7 @@ The build also needs an Ignis compiler with freestanding support (Ignis `main` f
 | Target | What it does |
 |---|---|
 | `kernel` | Builds `build/kernel.elf` |
-| `user` | Builds the user programs `build/user/NAME.elf` from `user/NAME`, `user/lib` and the entry stub `user/lib/start.S` |
+| `user` | Builds the user programs `build/user/NAME.elf` from `user/NAME`, `user/lib` and the entry stub `user/lib/linux/start.S` |
 | `image` | Builds `build/ignios.img`, a FAT32 EFI system partition with Limine, the kernel and the initramfs |
 | `run` | Boots in QEMU with the serial console on stdio |
 | `run-headless` | Boots without a display and checks the banner, the prompt and the lines of `hello` in `build/serial.log` |
@@ -58,7 +58,7 @@ The build also needs an Ignis compiler with freestanding support (Ignis `main` f
 
 Ignis compiles the whole kernel to one C unit, which clang compiles for `x86_64-unknown-none` with kernel flags (no red zone, no SSE in the kernel, `-mcmodel=kernel`). The few routines that cannot be written in Ignis are small `.S` files under `kernel/src/arch/x86_64/`: interrupt entry stubs, the code segment reload, the stack switch, the ring 3 entry and the `SYSCALL` stub, the per-CPU block, the fault probes, and the throwaway user programs of the boot self-tests. `ld.lld` links everything with `kernel/linker.ld`, and `mtools` writes the boot image. No cross GCC is involved.
 
-User programs are Ignis projects under `user/` built with `std = false` and the small user standard library in `user/lib` (`std::sys` wraps the system calls in inline asm, `std::io` prints, `std::args` reads argv, `std::alloc` is a heap on `mmap`). The Makefile links each one after the entry stub `user/lib/start.S` with `user/user.ld` into a static ELF64 at `0x400000` and packs it into the initramfs as `/bin/NAME`. The kernel runs `hello one two` at boot, before the keyboard line, and `run hello` at the prompt runs it again; `run PROGRAM ARG...` passes arguments.
+User programs are Ignis projects under `user/` built with `std = false` and the small user standard library in `user/lib`, shared code in `common/` and one `sys` per system call ABI in `linux/` (`std::sys` wraps the system calls in inline asm, `std::io` prints, `std::args` reads argv, `std::alloc` is a heap on `mmap`). The Makefile links each one after the entry stub `user/lib/linux/start.S` with `user/user.ld` into a static ELF64 at `0x400000` and packs it into the initramfs as `/bin/NAME`. The kernel runs `hello one two` at boot, before the keyboard line, and `run hello` at the prompt runs it again; `run PROGRAM ARG...` passes arguments.
 
 ## Layout
 

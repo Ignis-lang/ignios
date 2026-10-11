@@ -208,9 +208,9 @@ Docs 14 and 15.
 
 **`proc/memory.ign` and `syscall/linux/memory.ign`.** `mmap` and `munmap`. `Proc::Memory` keeps up to 32 regions per process, hands out addresses downwards from `0x7F0000000000`, allocates and zeroes every page at `mmap` time, and turns the protection into page table bits (W for write, NX unless execute, nothing mapped for `PROT_NONE`). `unmap` trims or splits regions and frees their pages; it never touches the ELF image or the stack. The Linux side checks the arguments (the header has the table), copies a file for a private file mapping, and refuses `MAP_SHARED`, `MAP_FIXED` and write with execute. `user/mmtest` checks all of it from ring 3. Doc 20.
 
-**`user/lib/alloc.ign`.** `std::alloc`, the heap of user programs: first-fit over 64 KiB arenas from `mmap`, an address-ordered free list that merges neighbours, and a mapping of its own for a block over 16 KiB, given back with `munmap`. It also defines the compiler's `@allocHandler` and `@freeHandler`, so closures that capture values work in a program that imports it. The header draws both block layouts.
+**`user/lib/common/alloc.ign`.** `std::alloc`, the heap of user programs: first-fit over 64 KiB arenas from `mmap`, an address-ordered free list that merges neighbours, and a mapping of its own for a block over 16 KiB, given back with `munmap`. It also defines the compiler's `@allocHandler` and `@freeHandler`, so closures that capture values work in a program that imports it. The header draws both block layouts.
 
-**`user/`.** The user side. `lib/start.S` is `_start`, the entry point of every program: it reads argc and argv from the initial stack and calls the program's `main`, because a compiled function cannot start on a stack that holds no return address. `lib/sys.ign` wraps the `syscall` instruction, `lib/io.ign` prints, `lib/args.ign` reads argv, and `hello/src/main.ign` is the first program. `user/user.ld` places programs at `0x400000`.
+**`user/`.** The user side. `lib/linux/start.S` is `_start`, the entry point of every program: it reads argc and argv from the initial stack and calls the program's `main`, because a compiled function cannot start on a stack that holds no return address. `lib/linux/sys.ign` wraps the `syscall` instruction and offers a portable layer (`Sys::FileInfo`, `info`, `infoAt`, `readEntry`) over the Linux structures, `lib/common/io.ign` prints, `lib/common/args.ign` reads argv, and `hello/src/main.ign` is the first program. `user/user.ld` places programs at `0x400000`.
 
 ## Part 10. Files
 
@@ -230,7 +230,7 @@ Doc 19.
 
 **`user/fstest/`.** A ring 3 program that checks each call and each error the way a Linux program sees them, and exits with the number of the first check that failed. The table in its header lists the checks.
 
-**`user/cat/`, `user/ls/`, `user/touch/` and `user/mkdir/`.** The commands, each one a short Ignis program on `std::sys`. Each header has a table of what it does in each case and the exact error line, in the format of GNU coreutils (`ls: cannot access '/nope': No such file or directory`). `cat` maps a regular file with `mmap` and writes it out, 64 KiB per call at most, and falls back to `read` for anything else; `ls` reads `struct linux_dirent64` records and hides `.` and `..`; `touch` opens with `O_CREAT | O_RDONLY` and takes `-EISDIR` (an existing directory) as success, as GNU touch does. `Sys::errorText` in `user/lib/sys.ign` is their `strerror`.
+**`user/cat/`, `user/ls/`, `user/touch/` and `user/mkdir/`.** The commands, each one a short Ignis program on `std::sys`. Each header has a table of what it does in each case and the exact error line, in the format of GNU coreutils (`ls: cannot access '/nope': No such file or directory`). `cat` maps a regular file with `mmap` and writes it out, 64 KiB per call at most, and falls back to `read` for anything else; `ls` lists with `Sys::readEntry`, which hides `.` and `..`; `touch` opens with `O_CREAT | O_RDONLY` and takes `-EISDIR` (an existing directory) as success, as GNU touch does. `Sys::errorText` in `user/lib/linux/sys.ign` is their `strerror`.
 
 ## Part 11. Boot self-tests
 
@@ -595,7 +595,7 @@ elf: PT_LOAD 0x0000000000401000 file 187 mem 187 r--
 elf: PT_LOAD 0x0000000000402000 file 8 mem 16 rw-
 elf: 3 segments, 3 pages, entry 0x0000000000400000, stack pointer 0x00007fffffffef90, argc 3
 ```
-`Tests::User::runHello` ran the line `hello one two`, so `Proc::Programs::run` looked up `/bin/hello` in the file tree and `Proc::Process::startElf` loaded it. One line per segment: address, bytes copied from the file, bytes in memory, permissions. The data segment has 8 file bytes and 16 memory bytes, so the last 8 are zero (`.bss`). The last line is the summary. The entry is `_start` of `user/lib/start.S`, linked first. The stack pointer is the address of argc: the 14 bytes of `hello\0one\0two\0` rounded up to 16 below the top, then 12 words (argc, three argv entries, two zeros, three auxiliary pairs), rounded down to 16. Doc 15.
+`Tests::User::runHello` ran the line `hello one two`, so `Proc::Programs::run` looked up `/bin/hello` in the file tree and `Proc::Process::startElf` loaded it. One line per segment: address, bytes copied from the file, bytes in memory, permissions. The data segment has 8 file bytes and 16 memory bytes, so the last 8 are zero (`.bss`). The last line is the summary. The entry is `_start` of `user/lib/linux/start.S`, linked first. The stack pointer is the address of argc: the 14 bytes of `hello\0one\0two\0` rounded up to 16 below the top, then 12 words (argc, three argv entries, two zeros, three auxiliary pairs), rounded down to 16. Doc 15.
 
 ```text
 argv: hello one two

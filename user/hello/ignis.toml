@@ -9,7 +9,7 @@ description = "The first IgniOS user program"
 # not the Ignis one.
 [ignis]
 std = false
-std_path = "../lib"
+std_path = "../lib/linux"
 
 [build]
 bin = false

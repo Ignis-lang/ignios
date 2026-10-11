@@ -36,8 +36,34 @@ export record Timespec {
   public nanoseconds: i64;
 }
 
+/// Scratch space of the portable calls.
+record LinuxSysState {
+  /// One `struct stat`.
+  static mut stat: u8[144];
+
+  /// One directory record of the longest name.
+  static mut entry: u8[280];
+}
+
 /// The system call wrappers.
 export namespace Sys {
+  /// What `Sys::info` and `Sys::infoAt` report about a file, the same in every
+  /// flavour of the library.
+  @cLayout
+  record FileInfo {
+    /// `Sys::KIND_FILE`, `Sys::KIND_DIRECTORY` or `Sys::KIND_DEVICE`.
+    public kind: u64;
+
+    /// The size in bytes; 0 for a directory or a device.
+    public size: u64;
+
+    /// A number unique to the file.
+    public id: u64;
+
+    /// The permission bits.
+    public mode: u64;
+  }
+
   /// Linux system call number 0.
   const READ: u64 = 0;
 
@@ -340,6 +366,106 @@ export namespace Sys {
   /// `munmap(addr, length)`: 0 or -errno.
   function munmap(address: u64, length: u64): i64 {
     return call2(MUNMAP, address, length);
+  }
+
+  /// A regular file, in `FileInfo::kind`.
+  const KIND_FILE: u64 = 1;
+
+  /// A directory.
+  const KIND_DIRECTORY: u64 = 2;
+
+  /// A device (the console).
+  const KIND_DEVICE: u64 = 3;
+
+  /// The file type bits of `st_mode`.
+  const S_IFMT: u64 = 0xF000;
+
+  /// `S_IFDIR`.
+  const S_IFDIR: u64 = 0x4000;
+
+  /// `S_IFCHR`.
+  const S_IFCHR: u64 = 0x2000;
+
+  /// Describes the file open as `descriptor`: 0 or -errno.
+  function info(descriptor: u64, result: *mut Sys::FileInfo): i64 {
+    let stat: *mut u8 = &mut LinuxSysState::stat as *mut u8;
+    let status: i64 = fstat(descriptor, stat);
+
+    if (status == 0) {
+      fillInfo(stat, result);
+    }
+
+    return status;
+  }
+
+  /// Describes the file at the NUL-terminated `path`: 0 or -errno.
+  function infoAt(path: *u8, result: *mut Sys::FileInfo): i64 {
+    let stat: *mut u8 = &mut LinuxSysState::stat as *mut u8;
+    let status: i64 = statAt(AT_FDCWD, path, stat, 0);
+
+    if (status == 0) {
+      fillInfo(stat, result);
+    }
+
+    return status;
+  }
+
+  /// Reads the next entry of the open directory `descriptor` other than `.`
+  /// and `..`: writes its name, NUL-terminated, to `name` (which holds 256
+  /// bytes) and its kind to `kind`, and returns the name length. Returns 0
+  /// after the last entry, -errno on an error. Uses one `getdents64` per
+  /// entry: it asks for room for one record, and when the kernel returned
+  /// more, moves the directory offset back to the second one with `lseek`.
+  function readEntry(descriptor: u64, name: *mut u8, kind: *mut u64): i64 {
+    let entry: *mut u8 = &mut LinuxSysState::entry as *mut u8;
+
+    while (true) {
+      let total: i64 = readDirectory(descriptor, entry, 280);
+
+      if (total <= 0) {
+        return total;
+      }
+
+      let length: u64 = (*(entry + 16) as u64) | ((*(entry + 17) as u64) << 8);
+      let next: u64 = *@pointerFromInteger<*u64>(@integerFromPointer(entry) + 8);
+
+      if ((total as u64) > length) {
+        seek(descriptor, next as i64, SEEK_SET);
+      }
+
+      let entryName: *u8 = (entry + 19) as *u8;
+      let mut nameLength: u64 = 0;
+
+      while (*(entryName + nameLength) != 0) {
+        *(name + nameLength) = *(entryName + nameLength);
+        nameLength += 1;
+      }
+
+      *(name + nameLength) = 0;
+
+      let isDot: boolean = nameLength == 1 && *entryName == 0x2E;
+      let isDotDot: boolean = nameLength == 2 && *entryName == 0x2E && *(entryName + 1) == 0x2E;
+
+      if (!isDot && !isDotDot) {
+        let typeByte: u8 = *(entry + 18);
+
+        *kind = typeByte == 4 ? KIND_DIRECTORY : (typeByte == 2 ? KIND_DEVICE : KIND_FILE);
+        return nameLength as i64;
+      }
+    }
+
+    return 0;
+  }
+
+  /// Fills `result` from a `struct stat`.
+  function fillInfo(stat: *mut u8, result: *mut Sys::FileInfo): void {
+    let mode: u64 = *@pointerFromInteger<*u32>(@integerFromPointer(stat) + 24) as u64;
+    let typeBits: u64 = mode & S_IFMT;
+
+    (*result).kind = typeBits == S_IFDIR ? KIND_DIRECTORY : (typeBits == S_IFCHR ? KIND_DEVICE : KIND_FILE);
+    (*result).size = *@pointerFromInteger<*u64>(@integerFromPointer(stat) + 48);
+    (*result).id = *@pointerFromInteger<*u64>(@integerFromPointer(stat) + 8);
+    (*result).mode = mode & 0x1FF;
   }
 
   /// the errors the file calls return.

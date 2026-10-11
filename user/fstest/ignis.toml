@@ -9,7 +9,7 @@ description = "Ring 3 checks of the file system calls"
 # not the Ignis one.
 [ignis]
 std = false
-std_path = "../lib"
+std_path = "../lib/linux"
 
 [build]
 bin = false
