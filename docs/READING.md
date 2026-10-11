@@ -48,7 +48,7 @@ Each subsystem is a directory under `kernel/src/` with a `mod.ign` facade. The f
 | `syscall/` | `Syscall` | `@syscall` | Arch, Drivers, Mm, Proc, Sched, Time | `Operation`, `Linux` |
 | `trap/` | `Trap` | `@trap` | Apic, Arch, Drivers, Proc, Sched, Time | `Exception`, `Setup`, the dispatcher |
 | `shell/` | `Shell` | `@shell` | Arch, Drivers, Lib, Proc, Sched, Time | `Terminal`, `Commands`, `ThreadCommands` |
-| `tests/` | `Tests` | `@tests` | Arch, Boot, Drivers, Mm, Proc, Sched, Time | the boot self-tests |
+| `tests/` | `Tests` | `@tests` | Arch, Boot, Drivers, Mm, Proc, Sched, Time, Trap | the boot self-tests |
 
 `main.ign` imports every facade and `panic.ign`. The compiler rejects an import cycle, so the table is a layering: a subsystem imports only rows above it. A few places in it need a reason, because a plain layering would put them elsewhere.
 
@@ -127,7 +127,7 @@ Read `gdt.ign` before `idt.ign`, because the IDT gates name a GDT selector and t
 
 **`arch/x86_64/interrupt_asm.S`.** One thunk per vector, then one common stub. The header draws what the stack looks like when the dispatcher runs, which is the `Arch::InterruptFrame` record of `interrupt_frame.ign`. Notice that the thunk pushes a dummy error code for the vectors where the CPU pushes none, so the frame has one shape. Doc 04.
 
-**`trap/dispatch.ign`, `trap/exception.ign` and `trap/setup.ign`.** `Trap::dispatch` is the one place every vector arrives. The header diagram shows the routing. `exception.ign` has the table of exceptions: read `killUserProcess` and `isUserFault` for the rule that a fault in ring 3 kills the process and a fault in ring 0 halts the machine. `setup.ign` has the boot steps that install the GDT, the IDT, the x87 and SSE units, SMEP and SMAP and the `SYSCALL` registers and log what they did. `dispatch` starts with `clac`, because an interrupt from ring 3 keeps the user's AC flag, and asks `Arch::Probe::recover` before it treats a ring 0 fault as fatal. Doc 04.
+**`trap/dispatch.ign`, `trap/exception.ign` and `trap/setup.ign`.** `Trap::dispatch` is the one place every vector arrives. The header diagram shows the routing. `exception.ign` has the table of exceptions: read `killUserProcess` and `isUserFault` for the rule that a fault in ring 3 kills the process and a fault in ring 0 halts the machine. `setup.ign` has the boot steps that install the GDT, the IDT, the x87 and SSE units, SMEP and SMAP and the `SYSCALL` registers and log what they did. `dispatch` starts with `clac`, because an interrupt from ring 3 keeps the user's AC flag, counts the entries that came with AC set so `Tests::User` can prove the `clac` works, and asks `Arch::Probe::recover` before it treats a ring 0 fault as fatal. Doc 04.
 
 **`arch/x86_64/fpu.ign`.** Turns on the x87 and SSE units (CR0 and CR4 bits in the header table) and saves and restores them with `fxsave64` and `fxrstor64`. The scheduler calls `save` and `restore` on every switch, so each thread has its own vector and floating point registers. The header explains why the switch is eager and not lazy. Doc 16.
 
@@ -207,7 +207,7 @@ Docs 14 and 15.
 
 ## Part 10. Boot self-tests
 
-**`tests/`.** One file per check, run by `kmain` where the subsystem is ready. Each prints one line and panics on the first violation, so a boot that continues has passed it. The tests use only the public functions of the subsystems. `pmm.ign`, `vmm.ign`, `heap.ign`, `address_space.ign`, `timer.ign` and `context.ign` check the primitives, `address_space.ign` including a 2 MiB user page. `protection.ign` checks that SMAP and SMEP fault. `scheduler.ign` runs round-robin order, sleeping, a full table, one address space per thread and preemption of threads that never yield. `user.ign` and `arch/x86_64/user_test_asm.S` hold fifteen throwaway ring 3 programs. Six behave (exit, registers, spin, system calls, the x87 and SSE check that runs as two processes, and a 200 ms nap that `wait` must block on) and nine do something forbidden. The kernel must kill each of the nine with the right status. `cpu_local.ign` runs last and checks that every way in and out of ring 3 left the GS bases balanced.
+**`tests/`.** One file per check, run by `kmain` where the subsystem is ready. Each prints one line and panics on the first violation, so a boot that continues has passed it. The tests use only the public functions of the subsystems. `pmm.ign`, `vmm.ign`, `heap.ign`, `address_space.ign`, `timer.ign` and `context.ign` check the primitives, `address_space.ign` including a 2 MiB user page. `protection.ign` checks that SMAP and SMEP fault. `scheduler.ign` runs round-robin order, sleeping, a full table, one address space per thread and preemption of threads that never yield. `user.ign` and `arch/x86_64/user_test_asm.S` hold sixteen throwaway ring 3 programs. Seven behave (exit, registers, spin, a spin with RFLAGS.AC set, system calls, the x87 and SSE check that runs as two processes, and a 200 ms nap that `wait` must block on) and nine do something forbidden. The kernel must kill each of the nine with the right status. `cpu_local.ign` runs last and checks that every way in and out of ring 3 left the GS bases balanced.
 
 ## Part 11. Scripts
 
@@ -463,74 +463,80 @@ user: 8 timer ticks passed while it ran in ring 3 and every one returned by iret
 Program 2 counted down 2^27 in ring 3. The number of ticks varies (a few). Each timer interrupt entered the kernel on `TSS.RSP0` and came back by `iretq`.
 
 ```text
-hello from a ring 3 test program
-hello from a ring 3 test program
 process 4 exited with status 0
+user: 18 interrupts from ring 3 with RFLAGS.AC set ran their handlers with AC clear
+```
+`Tests::User::runAccessFlag` ran program 15. It set RFLAGS.AC with `popfq` and counted down 2^27 so timer interrupts arrived while AC was set. `Trap::dispatch` starts with `clac` and counts, for each entry, whether the saved RFLAGS from ring 3 had AC set and whether AC is still set after the `clac`. The first count must be at least one, the second must stay 0, and the program exits with 0 only if `iretq` gave it AC back. The number varies. Without the `clac`, a user program could run every interrupt handler with SMAP off. Doc 17.
+
+```text
+hello from a ring 3 test program
+hello from a ring 3 test program
+process 5 exited with status 0
 user: write, getpid, sched_yield, nanosleep, -ENOSYS, -EFAULT, -EBADF and -EINVAL behave as on Linux
 ```
 Program 3 wrote its message twice, once to descriptor 1 and once to descriptor 2 (both go to the console), and checked every system call and error value. Doc 15.
 
 ```text
-process 5 exited with status 0
 process 6 exited with status 0
+process 7 exited with status 0
 user: two processes kept their own xmm0-xmm15, MXCSR and x87 control word across 50 yields and 6 preemptions
 ```
 `Tests::User::runFpu` started program 13 twice. Each copy loaded a pattern made from its pid into the sixteen XMM registers, the MXCSR rounding bits and the x87 control word, yielded to the other 50 times and checked everything after each yield, then spun 2^29 times so the timer had to preempt it, and checked again. The number of preemptions varies, and the test requires at least one. Doc 16.
 
 ```text
-process 7 exited with status 42
-process 8 exited with status 5
+process 8 exited with status 42
+process 9 exited with status 5
 user: wait blocked until the process was gone, 6 switches for a 200 ms process, none for one that had already ended
 ```
 `Tests::User::runWait`. Program 0 and then program 14 were started. Program 14 slept 200 ms (20 ticks) with `nanosleep` and exited with 5. Waiting for it cost a handful of switches, where waking once per tick would cost about 40. Program 0 was ahead in the run queue, so it had already ended and been cleaned up by then, and the wait for it returned 42 without blocking. Doc 13.
 
 ```text
-process 9 faulted: #PF Page Fault at rip 0x0000000000400000, error 0x0000000000000006, address 0x0000000000000000
-process 9 killed, status 139
+process 10 faulted: #PF Page Fault at rip 0x0000000000400000, error 0x0000000000000006, address 0x0000000000000000
+process 10 killed, status 139
 ```
 Program 4 wrote to address 0. Error code `0x6` is write (bit 1) and user (bit 2) with the page not present (bit 0 clear). Status 139 is 128 + 11, SIGSEGV. `Trap::Exception::killUserProcess` printed the first line. Doc 04.
 
 ```text
-process 10 faulted: #GP General Protection Fault at rip 0x0000000000400000, error 0x0000000000000000
-process 10 killed, status 139
 process 11 faulted: #GP General Protection Fault at rip 0x0000000000400000, error 0x0000000000000000
 process 11 killed, status 139
+process 12 faulted: #GP General Protection Fault at rip 0x0000000000400000, error 0x0000000000000000
+process 12 killed, status 139
 ```
 Programs 5 and 6 ran `hlt` and `cli` at their first byte. Both are privileged, so ring 3 gets a general protection fault.
 
 ```text
-process 12 faulted: #UD Invalid Opcode at rip 0x0000000000400000
-process 12 killed, status 132
+process 13 faulted: #UD Invalid Opcode at rip 0x0000000000400000
+process 13 killed, status 132
 ```
 Program 7 ran `ud2`. #UD has no error code, so none is printed. 132 is 128 + 4, SIGILL.
 
 ```text
-process 13 faulted: #PF Page Fault at rip 0x000000000040000a, error 0x0000000000000005, address 0xffff800000000000
-process 13 killed, status 139
+process 14 faulted: #PF Page Fault at rip 0x000000000040000a, error 0x0000000000000005, address 0xffff800000000000
+process 14 killed, status 139
 ```
 Program 8 read kernel memory. The address is mapped, but without the user bit. Error `0x5` is user (bit 2) and protection violation (bit 0). `rip` is `0x40000a` because the load follows a 10-byte `mov`.
 
 ```text
-process 14 faulted: #GP General Protection Fault at rip 0x0000000000400006, error 0x0000000000000000
-process 14 killed, status 139
+process 15 faulted: #GP General Protection Fault at rip 0x0000000000400006, error 0x0000000000000000
+process 15 killed, status 139
 ```
 Program 9 executed `out dx, al` to port `0x3F8`. The TSS has no I/O permission bitmap, so ring 3 may not touch any port.
 
 ```text
-process 15 faulted: #PF Page Fault at rip 0x0000000000400007, error 0x0000000000000007, address 0x0000000000400007
-process 15 killed, status 139
+process 16 faulted: #PF Page Fault at rip 0x0000000000400007, error 0x0000000000000007, address 0x0000000000400007
+process 16 killed, status 139
 ```
 Program 10 wrote to its own code page. Error `0x7` is write, user and protection violation. The page is read and execute, so the write fails.
 
 ```text
-process 16 faulted: #PF Page Fault at rip 0x00007fffffffeff8, error 0x0000000000000015, address 0x00007fffffffeff8
-process 16 killed, status 139
+process 17 faulted: #PF Page Fault at rip 0x00007fffffffeff8, error 0x0000000000000015, address 0x00007fffffffeff8
+process 17 killed, status 139
 ```
 Program 11 jumped to its stack. The stack pointer starts at the stack top minus 8, `0x7FFFFFFFEFF8`. Error `0x15` is instruction fetch (bit 4), user (bit 2) and protection violation (bit 0): the stack is no-execute.
 
 ```text
-process 17 faulted: #DE Divide Error at rip 0x0000000000400009
-process 17 killed, status 136
+process 18 faulted: #DE Divide Error at rip 0x0000000000400009
+process 18 killed, status 136
 ```
 Program 12 divided by zero. 136 is 128 + 8, SIGFPE.
 
@@ -550,7 +556,7 @@ elf: 3 segments, 3 pages, entry 0x0000000000400000, stack top 0x00007ffffffff000
 `Proc::Process::startElf` loaded `hello.elf`. One line per segment: address, bytes copied from the file, bytes in memory, permissions. The data segment has 8 file bytes and 16 memory bytes, so the last 8 are zero (`.bss`). The last line is the summary. Doc 15.
 
 ```text
-hello from user mode, pid 18
+hello from user mode, pid 19
 data 42, bss 0 then 1
 i64 minimum = -9223372036854775808
 write(1, 0x1, 5) = -14
@@ -559,10 +565,10 @@ syscall 9999 = -38
 sleep(0.05 s) = 0
 yield() = 0
 goodbye from user mode
-process 18 exited with status 0
+process 19 exited with status 0
 user: hello from a static ELF64 module loaded by Limine ran and exited with status 0
 ```
-The output of `user/hello/src/main.ign`. It is process 18, after the 17 test processes. `data 42` shows `.data` was loaded (41 plus 1), `bss 0 then 1` shows `.bss` was zeroed. The i64 minimum line shows that `Io::printNumber` negates in `u64`, where -2^63 has a magnitude; `make run-headless` fails if it is wrong. The three negative results are `-EFAULT`, `-EBADF` and `-ENOSYS`.
+The output of `user/hello/src/main.ign`. It is process 19, after the 18 test processes. `data 42` shows `.data` was loaded (41 plus 1), `bss 0 then 1` shows `.bss` was zeroed. The i64 minimum line shows that `Io::printNumber` negates in `u64`, where -2^63 has a magnitude; `make run-headless` fails if it is wrong. The three negative results are `-EFAULT`, `-EBADF` and `-ENOSYS`.
 
 ```text
 cpu local: self-test ok, after ring 3 the kernel GS base is the per-CPU block and the user one is 0

@@ -17,14 +17,16 @@
 //! | `Tests::Timer`        | `timer.ign`         | ticks arrive                                               |
 //! | `Tests::Context`      | `context.ign`       | the stack switch, the argument, alignment, registers       |
 //! | `Tests::Scheduler`    | `scheduler.ign`     | round-robin, sleep, slot reuse, CR3 per thread, preemption |
-//! | `Tests::User`         | `user.ign`          | ring 3, `SYSCALL`, process isolation, an ELF module        |
+//! | `Tests::User`         | `user.ign`          | ring 3, `SYSCALL`, `clac` on entry, process isolation, an ELF module |
 //! | `Tests::CpuLocal`     | `cpu_local.ign`     | the GS bases are balanced after every way in and out of ring 3 |
 //!
 //! ## Dependencies
 //!
 //! `Tests` may import every other subsystem, and nothing imports it except
-//! `main`. The production code has no test code in it: the tests use only the
-//! public functions of the subsystems.
+//! `main`. The tests use only the public functions of the subsystems. The one
+//! hook in production code is `Trap::dispatch` counting the entries that came
+//! with RFLAGS.AC set, a few instructions per interrupt, because no public
+//! function can see the flags a handler ran with.
 //!
 //! The ring 3 programs that `Tests::User` runs are assembled from
 //! `arch/x86_64/user_test_asm.S`, next to the other assembly files.

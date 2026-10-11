@@ -28,6 +28,7 @@
 //! `IA32_FMASK`, but an interrupt or exception from ring 3 keeps the user's
 //! RFLAGS, so `Trap::dispatch` starts with `forbidUserAccess`: otherwise a
 //! user program could set AC and run every interrupt handler with SMAP off.
+//! `Tests::User::runAccessFlag` checks it from a ring 3 program that sets AC.
 //!
 //! Each feature is enabled only when CPUID reports it: setting a CR4 bit the
 //! processor does not have raises `#GP`, and so do `stac` and `clac`

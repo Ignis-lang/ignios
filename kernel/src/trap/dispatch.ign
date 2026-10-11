@@ -21,6 +21,12 @@
 //!                                                 console, halt the machine
 //! ```
 //!
+//! Before any of that, `dispatch` clears RFLAGS.AC with
+//! `Arch::Protection::forbidUserAccess`: an interrupt from ring 3 keeps the
+//! user's RFLAGS, and a user-set AC would run the handler with SMAP off.
+//! `countAccessFlag` then counts entries from ring 3 with AC set and entries
+//! that still have it, so `Tests::User` can prove the `clac` is there.
+//!
 //! A CPU exception in the kernel is fatal, and one taken in ring 3 kills only
 //! the process. `Trap::Exception` (`exception.ign`) holds the rule and the
 //! report.
@@ -41,8 +47,25 @@ import Sched from "@sched";
 import Time from "@time";
 import _ from "./exception";
 
+/// What `Trap::dispatch` saw of RFLAGS.AC, for `Tests::User`.
+record TrapState {
+  /// Entries from ring 3 whose saved RFLAGS had AC set.
+  static mut userEntriesWithAccessFlag: u64 = 0;
+
+  /// Entries that still had AC set after `forbidUserAccess`. Stays 0 while
+  /// SMAP is on.
+  static mut entriesWithAccessLeftOpen: u64 = 0;
+}
+
 /// Interrupt vector numbers and the dispatcher.
 namespace Trap {
+  /// RFLAGS bit 18 (AC). With SMAP on, ring 0 may touch user pages while it
+  /// is set.
+  const FLAG_ACCESS_CHECK: u64 = 0x40000;
+
+  /// Requested privilege level bits of a code segment selector: 3 is ring 3.
+  const SELECTOR_RING_MASK: u64 = 3;
+
   /// First vector of the remapped 8259 range, `0x20`.
   const FIRST_IRQ_VECTOR: u64 = 32;
 
@@ -65,6 +88,7 @@ namespace Trap {
     // An interrupt from ring 3 keeps the user's RFLAGS, and with them a
     // user-set AC flag that would turn SMAP off for this handler.
     Arch::Protection::forbidUserAccess();
+    countAccessFlag(frame);
 
     let vector: u64 = (*frame).vector;
 
@@ -113,5 +137,30 @@ namespace Trap {
     }
 
     Arch::Pic::endOfInterrupt(line);
+  }
+
+  /// Counts, for `Tests::User`, an entry from ring 3 with AC set in the saved
+  /// RFLAGS, and an entry that still runs with AC set after
+  /// `forbidUserAccess`. A few instructions per interrupt.
+  function countAccessFlag(frame: *mut Arch::InterruptFrame): void {
+    if (((*frame).cs & SELECTOR_RING_MASK) == SELECTOR_RING_MASK && ((*frame).rflags & FLAG_ACCESS_CHECK) != 0) {
+      TrapState::userEntriesWithAccessFlag += 1;
+    }
+
+    if ((Arch::Cpu::readFlags() & FLAG_ACCESS_CHECK) != 0) {
+      TrapState::entriesWithAccessLeftOpen += 1;
+    }
+  }
+
+  /// Interrupts and exceptions taken from ring 3 while the program had
+  /// RFLAGS.AC set.
+  function userEntriesWithAccessFlag(): u64 {
+    return TrapState::userEntriesWithAccessFlag;
+  }
+
+  /// Entries that ran past `forbidUserAccess` with RFLAGS.AC still set. Any
+  /// value other than 0 with SMAP on means a handler ran with SMAP off.
+  function entriesWithAccessLeftOpen(): u64 {
+    return TrapState::entriesWithAccessLeftOpen;
   }
 }

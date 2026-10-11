@@ -14,6 +14,7 @@
 //! | exit(42)          | `iretq` to ring 3, `SYSCALL` in, status delivered by `wait` |
 //! | registers         | `SYSRET` returns `-ENOSYS` and preserves every register but RAX, RCX, R11 |
 //! | spin              | timer interrupts arrive while in ring 3 and return by `iretq` |
+//! | alignment check   | an interrupt from ring 3 with RFLAGS.AC set runs its handler with AC clear, and the program gets AC back |
 //! | syscalls          | `write`, `getpid`, `sched_yield`, `nanosleep` and their errors |
 //! | isolation (9 programs) | a fault or a forbidden instruction kills only that process, no frame leaks |
 //! | hello             | a real static ELF64 loaded from a Limine module        |
@@ -21,11 +22,13 @@
 //! `main.ign` calls `Tests::User::run` once, after the scheduler tests and before
 //! it enables the keyboard.
 
+import Arch from "@arch";
 import Drivers from "@drivers";
 import Mm from "@mm";
 import Proc from "@proc";
 import Sched from "@sched";
 import Time from "@time";
+import Trap from "@trap";
 
 /// Functions implemented in `user_test_asm.S`.
 extern UserTestAsm {
@@ -86,6 +89,11 @@ namespace Tests::User {
   /// Index 14: sleeps 200 ms, then exits with status 5.
   const NAP: u64 = 14;
 
+  /// Index 15: sets RFLAGS.AC and spins until timer interrupts arrive. Exits
+  /// with 0 when AC was still set at the end, 1 when it could not set it, 2
+  /// when it lost it.
+  const ALIGNMENT_SPIN: u64 = 15;
+
   /// The most thread switches a wait for `NAP` may cost: the waiter blocks
   /// once and is woken once, plus the switches of `NAP`, of the `EXIT`
   /// program that runs first and of the idle thread. Polling once per tick
@@ -137,11 +145,53 @@ namespace Tests::User {
     Drivers::Console::writeDecimal(ticks);
     Drivers::Console::writeLine(" timer ticks passed while it ran in ring 3 and every one returned by iretq");
 
+    runAccessFlag();
     runSyscalls();
     runFpu();
     runWait();
     runIsolation();
     runHello();
+  }
+
+  /// Runs `ALIGNMENT_SPIN` and checks, through the counters of
+  /// `Trap::dispatch`, that at least one interrupt arrived from ring 3 with
+  /// AC set and that no handler ran with AC still set. Without the `clac` at
+  /// the start of `Trap::dispatch` the second count is not 0. Skipped without
+  /// SMAP, where `clac` does not exist.
+  function runAccessFlag(): void {
+    if (!Arch::Protection::smapEnabled()) {
+      Drivers::Console::writeLine("user: alignment check flag skipped, no SMAP");
+      return;
+    }
+
+    let entriesBefore: u64 = Trap::userEntriesWithAccessFlag();
+    let openBefore: u64 = Trap::entriesWithAccessLeftOpen();
+    let status: u64 = runProgram(ALIGNMENT_SPIN);
+
+    if (status != 0) {
+      Drivers::Console::write("user test: alignment check program exited with ");
+      Drivers::Console::writeDecimal(status);
+      Drivers::Console::writeLine("");
+      @panic("user test: RFLAGS.AC was not set or not kept in ring 3");
+    }
+
+    let entries: u64 = Trap::userEntriesWithAccessFlag() - entriesBefore;
+    let open: u64 = Trap::entriesWithAccessLeftOpen() - openBefore;
+
+    if (entries == 0) {
+      @panic("user test: no interrupt arrived while ring 3 had RFLAGS.AC set");
+    }
+
+    if (open != 0) {
+      Drivers::Console::write("user test: handlers that ran with RFLAGS.AC set: ");
+      Drivers::Console::writeDecimal(open);
+      Drivers::Console::writeLine("");
+      @panic("user test: Trap::dispatch did not clear RFLAGS.AC");
+    }
+
+    Drivers::Console::write("user: ");
+    Drivers::Console::writeDecimal(entries);
+    Drivers::Console::writeLine(" interrupts from ring 3 with RFLAGS.AC set ran their handlers with AC clear");
   }
 
   /// Runs every program that does something a user program must not and

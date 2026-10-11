@@ -29,7 +29,8 @@
  *   11   jump to the stack     killed, SIGSEGV (139)
  *   12   divide by zero        killed, SIGFPE (136)
  *   13   fpu                   exit status 0, run as two processes at once
- *   14   nap                   exit status 5 after sleeping 200 ms */
+ *   14   nap                   exit status 5 after sleeping 200 ms
+ *   15   alignment check spin  exit status 0, timer ticks arrive with AC = 1 */
 
 .intel_syntax noprefix
 
@@ -476,6 +477,54 @@ user_test_nap_start:
     ud2
 user_test_nap_end:
 
+/* Index 15: sets RFLAGS.AC (bit 18, 0x40000), which ring 3 may change with
+ * popfq, and counts down 2^27 times so timer interrupts arrive while it is
+ * set. Trap::dispatch must clear AC before it runs any handler, or SMAP would
+ * be off for that handler. The interrupt returns by iretq with the saved user
+ * RFLAGS, so AC must still be set when the loop ends.
+ *
+ * Exit status: 0 when AC stayed set, 1 when popfq did not set it, 2 when it
+ * was lost while the program was interrupted. AC = 1 turns on alignment
+ * checking only when CR0.AM is also set, and the program makes no unaligned
+ * access either way, so it cannot raise #AC. */
+user_test_alignment_spin_start:
+    pushfq
+    or qword ptr [rsp], 0x40000
+    popfq
+    pushfq
+    pop rax
+    test eax, 0x40000
+    jz user_test_alignment_spin_unset
+
+    mov ecx, 0x8000000
+1:
+    dec ecx
+    jnz 1b
+
+    pushfq
+    pop rax
+    test eax, 0x40000
+    jz user_test_alignment_spin_lost
+
+    /* exit(0) */
+    xor edi, edi
+    mov eax, 60
+    syscall
+    ud2
+user_test_alignment_spin_unset:
+    /* exit(1) */
+    mov edi, 1
+    mov eax, 60
+    syscall
+    ud2
+user_test_alignment_spin_lost:
+    /* exit(2) */
+    mov edi, 2
+    mov eax, 60
+    syscall
+    ud2
+user_test_alignment_spin_end:
+
 ignis_user_test_table:
     .quad user_test_exit_start, user_test_exit_end
     .quad user_test_registers_start, user_test_registers_end
@@ -492,5 +541,6 @@ ignis_user_test_table:
     .quad user_test_divide_start, user_test_divide_end
     .quad user_test_fpu_start, user_test_fpu_end
     .quad user_test_nap_start, user_test_nap_end
+    .quad user_test_alignment_spin_start, user_test_alignment_spin_end
 
 .section .note.GNU-stack,"",@progbits
