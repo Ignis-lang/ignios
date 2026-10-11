@@ -1,7 +1,8 @@
 //!
 //! # Acpi
 //!
-//! Finds the MADT, the one ACPI table the interrupt setup needs, and parses it.
+//! Finds the MADT, which the interrupt setup needs, and the FADT and the S5
+//! sleep type, which powering off needs, and parses them.
 //!
 //! ## Overview
 //!
@@ -34,6 +35,7 @@
 //! | `Acpi::Rsdp`       | `rsdp.ign`  | the Root System Description Pointer                      |
 //! | `Acpi::Xsdt`       | `xsdt.ign`  | the XSDT or RSDT and the search for a table by signature |
 //! | `Acpi::Madt`       | `madt.ign`  | local APIC address, IOAPICs, interrupt source overrides  |
+//! | `Acpi::Fadt`       | `fadt.ign`  | the power-off and reset registers, the S5 sleep type     |
 //! | `Acpi::Table`      | `table.ign` | the table header, checksums and little-endian readers    |
 //!
 //! ## Dependencies
@@ -50,6 +52,7 @@
 
 import Boot from "@boot";
 import Drivers from "@drivers";
+import _ from "./fadt";
 import _ from "./madt";
 import _ from "./rsdp";
 import _ from "./table";
@@ -78,6 +81,7 @@ export namespace Acpi {
     }
 
     Madt::read(madt);
+    Fadt::read();
   }
 
   /// Prints the RSDP, the root table and the MADT contents.
@@ -98,6 +102,34 @@ export namespace Acpi {
     Drivers::Console::writeLine("");
 
     Madt::report();
+    reportPower();
+  }
+
+  /// Prints what `Acpi::Fadt` found for powering off and resetting.
+  function reportPower(): void {
+    Drivers::Console::write("acpi: power off ");
+
+    if (Fadt::canPowerOff()) {
+      Drivers::Console::write("through PM1a port ");
+      Drivers::Console::writeHex(Fadt::pm1aControl());
+      Drivers::Console::write(" with S5 sleep type ");
+      Drivers::Console::writeDecimal(Fadt::sleepTypeA());
+    } else {
+      Drivers::Console::write("not available");
+    }
+
+    Drivers::Console::write(", reset ");
+
+    if (Fadt::canReset()) {
+      Drivers::Console::write("through port ");
+      Drivers::Console::writeHex(Fadt::resetPort());
+      Drivers::Console::write(" value ");
+      Drivers::Console::writeDecimal(Fadt::resetValue());
+    } else {
+      Drivers::Console::write("through the 8042");
+    }
+
+    Drivers::Console::writeLine("");
   }
 
   /// Prints `count` characters starting at `base + offset`, for the OEM id.

@@ -1,0 +1,53 @@
+//!
+//! # Linux reboot
+//!
+//! `reboot(magic, magic2, cmd, arg)`, number 169, the call `reboot(8)` and
+//! `poweroff(8)` use.
+//!
+//! ## Overview
+//!
+//! | Argument | Accepted values                                           | Otherwise |
+//! |----------|-----------------------------------------------------------|-----------|
+//! | `magic`  | `LINUX_REBOOT_MAGIC1`, `0xFEE1DEAD`                        | `-EINVAL` |
+//! | `magic2` | `672274793`, `85072278`, `369367448` or `537993216` (Linus Torvalds's and his daughters' birthdays) | `-EINVAL` |
+//! | `cmd`    | `RESTART` `0x01234567`, `POWER_OFF` `0x4321FEDC`           | `-EINVAL` |
+//!
+//! Neither command returns on success. A machine that cannot power off
+//! returns `-ENOSYS`. Linux also requires `CAP_SYS_BOOT`; IgniOS has no
+//! users, so any process may call it.
+
+import Power from "@power";
+import _ from "./errno";
+
+/// The `reboot` handler.
+namespace Syscall::Linux {
+  /// `LINUX_REBOOT_MAGIC1`.
+  const REBOOT_MAGIC: u64 = 0xFEE1DEAD;
+
+  /// `LINUX_REBOOT_CMD_RESTART`.
+  const REBOOT_RESTART: u64 = 0x01234567;
+
+  /// `LINUX_REBOOT_CMD_POWER_OFF`.
+  const REBOOT_POWER_OFF: u64 = 0x4321FEDC;
+
+  /// `reboot(magic, magic2, cmd, arg)`.
+  function reboot(magic: u64, magic2: u64, command: u64): u64 {
+    let second: u64 = magic2 & 0xFFFFFFFF;
+
+    if ((magic & 0xFFFFFFFF) != REBOOT_MAGIC || (second != 672274793 && second != 85072278 && second != 369367448 && second != 537993216)) {
+      return Linux::failure(Linux::EINVAL);
+    }
+
+    if ((command & 0xFFFFFFFF) == REBOOT_RESTART) {
+      Power::reset();
+    }
+
+    if ((command & 0xFFFFFFFF) != REBOOT_POWER_OFF) {
+      return Linux::failure(Linux::EINVAL);
+    }
+
+    Power::powerOff();
+
+    return Linux::failure(Linux::ENOSYS);
+  }
+}

@@ -13,7 +13,8 @@
 #
 # Common targets: `make run` (window), `make run-headless` (serial log check),
 # `make keytest` (types keys and checks the echo), `make shelltest` (types a
-# session of cat, ls, touch and mkdir and checks the output), `make clean`.
+# session of cat, ls, touch and mkdir and checks the output), `make powertest`
+# (reboots, then shuts down), `make clean`.
 
 # The Ignis compiler. Override with `make IGNIS=/path/to/ignis`.
 IGNIS ?= ignis
@@ -40,7 +41,7 @@ IGNIS_OBJECT := $(BUILD)/ignis/user/obj/kernel.o
 # `std_path` (../lib/linux or ../lib/native). It is linked with that flavour's
 # entry stub user/lib/FLAVOUR/start.S and shipped in the initramfs as
 # /bin/NAME.
-USER_PROGRAMS := hello fstest mmtest nativetest cat ls touch mkdir
+USER_PROGRAMS := hello fstest mmtest nativetest cat ls touch mkdir reboot shutdown
 USER_ELFS := $(patsubst %,$(BUILD)/user/%.elf,$(USER_PROGRAMS))
 USER_LIB_SOURCES := $(shell find user/lib -name '*.ign' -o -name '*.toml' -o -name '*.S')
 USER_STARTS := $(BUILD)/user/start-linux.o $(BUILD)/user/start-native.o
@@ -71,15 +72,18 @@ LDFLAGS := -m elf_x86_64 -nostdlib -static --no-dynamic-linker \
 
 # q35 machine, KVM when available and software emulation otherwise, the `max`
 # CPU model (every feature the host or the emulator has, SMEP and SMAP among
-# them; the default qemu64 model has neither), 256 MiB of RAM, and QEMU exits
-# instead of resetting the machine (a triple fault ends the run instead of
-# rebooting in a loop).
+# them; the default qemu64 model has neither) and 256 MiB of RAM.
 # OVMF is attached as two pflash drives (firmware code read-only, variables
-# writable) and the boot image as a raw disk.
-QEMU_FLAGS := -machine q35,accel=kvm:tcg -cpu max -m 256M -no-reboot \
+# writable) and the boot image as a raw disk. `make run` and `make powertest`
+# use these, so `reboot` resets the machine.
+QEMU_MACHINE := -machine q35,accel=kvm:tcg -cpu max -m 256M \
 	-drive if=pflash,unit=0,format=raw,readonly=on,file=$(OVMF_CODE) \
 	-drive if=pflash,unit=1,format=raw,file=$(OVMF_VARS_COPY) \
 	-drive format=raw,file=$(IMAGE)
+
+# The automated runs add -no-reboot: QEMU exits instead of resetting, so a
+# triple fault ends the run instead of rebooting in a loop.
+QEMU_FLAGS := $(QEMU_MACHINE) -no-reboot
 
 # User program link flags, the same as the kernel's with `user/user.ld`.
 USER_LDFLAGS := -m elf_x86_64 -nostdlib -static --no-dynamic-linker \
@@ -87,7 +91,7 @@ USER_LDFLAGS := -m elf_x86_64 -nostdlib -static --no-dynamic-linker \
 
 # Targets that name an action, not a file. `make` with no target builds
 # `all`, the boot image.
-.PHONY: all kernel user esp image run run-headless screenshot keytest shelltest font clean
+.PHONY: all kernel user esp image run run-headless screenshot keytest shelltest powertest font clean
 
 all: image
 
@@ -164,7 +168,7 @@ $(OVMF_VARS_COPY):
 
 # Opens a QEMU window. The serial port is connected to the terminal.
 run: $(IMAGE) $(OVMF_VARS_COPY)
-	$(QEMU) $(QEMU_FLAGS) -serial stdio
+	$(QEMU) $(QEMU_MACHINE) -serial stdio
 
 # Boots without a display for HEADLESS_SECONDS, then checks the serial log:
 # the boot banner, the prompt, and the i64 minimum the hello program prints
@@ -205,6 +209,12 @@ keytest: $(IMAGE) $(OVMF_VARS_COPY)
 shelltest: $(IMAGE) $(OVMF_VARS_COPY)
 	scripts/shelltest.sh $(SERIAL_LOG) $(HEADLESS_SECONDS) -- \
 		$(QEMU) $(QEMU_FLAGS) -display none -serial file:$(SERIAL_LOG)
+
+# Boots without a display and without -no-reboot, types `reboot`, waits for
+# the second boot, types `shutdown` and checks that QEMU exits by itself.
+powertest: $(IMAGE) $(OVMF_VARS_COPY)
+	scripts/powertest.sh $(SERIAL_LOG) $(HEADLESS_SECONDS) -- \
+		$(QEMU) $(QEMU_MACHINE) -display none -serial file:$(SERIAL_LOG)
 
 # Regenerates the committed console font from the Spleen BDF in the devShell.
 font:

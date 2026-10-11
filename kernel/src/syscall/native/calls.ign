@@ -62,6 +62,10 @@
 //! descriptor, or `ANONYMOUS` (1) for zeroed memory. Every mapping is
 //! private.
 //!
+//! **Power** takes 1 to reset the machine and 2 to power it off; neither
+//! returns on success. Another action is `INVALID`, and a machine that cannot
+//! power off returns `NOT_SUPPORTED`.
+//!
 //! **Sleep** takes a plain count of nanoseconds, rounded up to whole timer
 //! ticks and capped at a million seconds.
 
@@ -69,6 +73,7 @@ import Arch from "@arch";
 import Fs from "@fs";
 import Lib from "@lib";
 import Mm from "@mm";
+import Power from "@power";
 import Proc from "@proc";
 import Sched from "@sched";
 import Time from "@time";
@@ -105,6 +110,12 @@ namespace Syscall::Native {
 
   /// Nanoseconds in one timer tick at `Time::Timer::FREQUENCY`.
   const NANOSECONDS_PER_TICK: u64 = 10000000;
+
+  /// `POWER` action: reset the machine.
+  const POWER_REBOOT: u64 = 1;
+
+  /// `POWER` action: power the machine off.
+  const POWER_OFF: u64 = 2;
 
   /// The longest sleep, in ticks: a million seconds.
   const MAX_SLEEP_TICKS: u64 = 100000000;
@@ -153,6 +164,19 @@ namespace Syscall::Native {
       Sched::Scheduler::yield();
     } else if (operation == Operation::SLEEP) {
       sleep(first);
+    } else if (operation == Operation::POWER) {
+      if (first == POWER_REBOOT) {
+        Power::reset();
+      }
+
+      if (first != POWER_OFF) {
+        finish(frame, Native::INVALID, 0);
+        return;
+      }
+
+      Power::powerOff();
+      finish(frame, Native::NOT_SUPPORTED, 0);
+      return;
     } else {
       finish(frame, Native::NOT_SUPPORTED, 0);
       return;

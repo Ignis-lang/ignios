@@ -32,6 +32,7 @@
 //! | 12     | `PROCESS_ID`     |                                             | the process id |
 //! | 13     | `YIELD`          |                                             | 0              |
 //! | 14     | `SLEEP`          | nanoseconds                                 | 0              |
+//! | 15     | `POWER`          | action: 1 reboot, 2 power off               | (no return on success) |
 //!
 //! Paths are a pointer and a length, not NUL-terminated strings. The
 //! directory argument is a descriptor open on a directory, or `ROOT` (all
@@ -95,6 +96,9 @@ namespace Syscall::Native {
   /// Sleep for a number of nanoseconds.
   const NUMBER_SLEEP: u64 = 14;
 
+  /// Reboot or power off.
+  const NUMBER_POWER: u64 = 15;
+
   /// Fills the table.
   function initialize(): void {
     let table: *mut u8 = tableBase();
@@ -114,6 +118,7 @@ namespace Syscall::Native {
     *(table + NUMBER_PROCESS_ID) = Operation::GET_PID;
     *(table + NUMBER_YIELD) = Operation::YIELD;
     *(table + NUMBER_SLEEP) = Operation::SLEEP;
+    *(table + NUMBER_POWER) = Operation::POWER;
   }
 
   /// The first byte of the table.

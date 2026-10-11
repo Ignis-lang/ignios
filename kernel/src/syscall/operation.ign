@@ -64,4 +64,7 @@ namespace Syscall::Operation {
 
   /// Remove mapped memory.
   const UNMAP: u8 = 15;
+
+  /// Power the machine off or reset it.
+  const POWER: u8 = 16;
 }

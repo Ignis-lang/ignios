@@ -40,14 +40,15 @@ Each subsystem is a directory under `kernel/src/` with a `mod.ign` facade. The f
 | `arch/` | `Arch` | `@arch` | nothing | `Cpu`, `Port`, `Gdt`, `Idt`, `Pic`, `Pit`, `Context`, `UserMode`, `InterruptFrame`, all `.S` files |
 | `boot/` | `Boot` | `@boot` | nothing | `Limine`, `Hhdm` |
 | `drivers/` | `Drivers` | `@drivers` | Arch, Boot, Lib | `Serial`, `Console`, `Color`, `Font`, `Ps2`, `Keyboard` |
-| `acpi/` | `Acpi` | `@acpi` | Boot, Drivers | `Rsdp`, `Xsdt`, `Madt`, `Table` |
+| `acpi/` | `Acpi` | `@acpi` | Boot, Drivers | `Rsdp`, `Xsdt`, `Madt`, `Fadt`, `Table` |
 | `mm/` | `Mm` | `@mm` | Arch, Boot, Drivers, Lib | `Pmm`, `Vmm`, `AddressSpace`, `Heap`, `Modules` |
 | `fs/` | `Fs` | `@fs` | Drivers, Lib, Mm | `Tar`, `Initramfs`, `Vfs`, `Files` |
 | `apic/` | `Apic` | `@apic` | Acpi, Arch, Drivers, Mm | `Lapic`, `Ioapic` |
 | `time/` | `Time` | `@time` | Apic, Arch, Drivers | `Timer` |
 | `sched/` | `Sched` | `@sched` | Arch, Mm, Time | `Thread`, `Scheduler` |
 | `proc/` | `Proc` | `@proc` | Arch, Boot, Drivers, Fs, Lib, Mm, Sched | `Process`, `Elf`, `Programs`, `Memory` |
-| `syscall/` | `Syscall` | `@syscall` | Arch, Drivers, Fs, Lib, Mm, Proc, Sched, Time | `Operation`, `Core`, `Linux`, `Native` |
+| `power/` | `Power` | `@power` | Acpi, Arch, Drivers | power off and reset |
+| `syscall/` | `Syscall` | `@syscall` | Arch, Drivers, Fs, Lib, Mm, Power, Proc, Sched, Time | `Operation`, `Core`, `Linux`, `Native` |
 | `trap/` | `Trap` | `@trap` | Apic, Arch, Drivers, Proc, Sched, Time | `Exception`, `Setup`, the dispatcher |
 | `shell/` | `Shell` | `@shell` | Arch, Drivers, Lib, Proc, Sched, Time | `Terminal`, `Commands`, `ThreadCommands` |
 | `tests/` | `Tests` | `@tests` | Arch, Boot, Drivers, Fs, Lib, Mm, Proc, Sched, Time, Trap | the boot self-tests |
@@ -68,7 +69,7 @@ Each subsystem is a directory under `kernel/src/` with a `mod.ign` facade. The f
 | 3 | Serial port, console and library | `lib/mod.ign`, `lib/format.ign`, `lib/mem.ign`, `arch/x86_64/io.ign`, `drivers/serial.ign`, `drivers/font.ign`, `drivers/font_8x16.ign`, `drivers/console.ign` |
 | 4 | CPU tables and interrupts | `arch/x86_64/cpu.ign`, `gdt.ign`, `gdt_asm.S`, `idt.ign`, `interrupt_frame.ign`, `interrupt_asm.S`, `trap/dispatch.ign`, `trap/exception.ign`, `trap/setup.ign` |
 | 5 | Memory | `boot/hhdm.ign`, `mm/pmm.ign`, `mm/vmm.ign`, `mm/heap.ign`, `mm/address_space.ign` |
-| 6 | ACPI, APIC and the timer | `acpi/*.ign`, `arch/x86_64/pic.ign`, `apic/lapic.ign`, `apic/ioapic.ign`, `arch/x86_64/pit.ign`, `time/timer.ign` |
+| 6 | ACPI, APIC, the timer and power | `acpi/*.ign`, `power/mod.ign`, `arch/x86_64/pic.ign`, `apic/lapic.ign`, `apic/ioapic.ign`, `arch/x86_64/pit.ign`, `time/timer.ign` |
 | 7 | Keyboard | `drivers/ps2.ign`, `lib/scancode_queue.ign`, `drivers/keyboard.ign` |
 | 8 | Threads, scheduling and the shell | `arch/x86_64/context.ign`, `context_asm.S`, `sched/thread.ign`, `sched/scheduler.ign`, `shell/*.ign` |
 | 9 | User mode | `arch/x86_64/usermode.ign`, `usermode_asm.S`, `proc/process.ign`, `syscall/*.ign`, `proc/elf.ign`, `mm/modules.ign`, `proc/programs.ign`, `user/` |
@@ -166,6 +167,8 @@ Docs 05 and 12.
 
 **`time/timer.ign`.** Measures the APIC timer against the PIT for 50 ms, derives the initial count for 100 Hz, and starts the timer in periodic mode. The interrupt handler only increments a counter. The header shows the calibration arithmetic with the numbers from a real run.
 
+**`acpi/fadt.ign` and `power/mod.ign`.** Turning the machine off and resetting it. `Acpi::Fadt` reads the PM1 control ports, the SMI command port and the reset register from the FADT, and finds the S5 sleep type by looking for the AML encoding of `Name (_S5_, Package {...})` in the DSDT; the header draws the bytes. `Power` puts the chipset in ACPI mode when it is not, writes `SLP_TYP` and `SLP_EN`, and resets through the FADT register or the 8042. The native `POWER` call and Linux `reboot(2)` reach them; `make powertest` checks both. `make run` boots without `-no-reboot`, so `reboot` boots again instead of ending QEMU.
+
 ## Part 7. Keyboard
 
 Doc 06. `kmain` enables the keyboard last, but the path it uses runs through the IOAPIC route set up in part 6.
@@ -188,7 +191,7 @@ Doc 13.
 
 **`shell/terminal.ign`.** The terminal loop the boot thread becomes. It is the clearest example of the `cli`, check, `sti; hlt` pattern that avoids a lost wakeup: the queue is tested with interrupts off so a key cannot arrive between the test and the sleep.
 
-**`shell/commands.ign` and `shell/thread_commands.ign`.** The commands: `uptime`, `ps`, `threads` and `run PROGRAM [ARG...]`. Any other line that is not blank runs as a program, so `cat /etc/motd` is `run cat /etc/motd`.
+**`shell/commands.ign` and `shell/thread_commands.ign`.** The commands: `uptime`, `ps`, `threads` and `run PROGRAM [ARG...]`. `reboot` and `shutdown` are programs in `/bin`. Any other line that is not blank runs as a program, so `cat /etc/motd` is `run cat /etc/motd`.
 
 ## Part 9. User mode
 
@@ -240,7 +243,7 @@ Doc 19.
 
 ## Part 12. Scripts
 
-**`scripts/keytest.sh`, `scripts/shelltest.sh` and `scripts/screenshot.sh`.** Boot QEMU headless, wait for the prompt on the serial log, and drive the QEMU monitor (`sendkey`, `screendump`). `keytest.sh` also checks the echo. `shelltest.sh` types one command at a time, waits for the next prompt, and compares what each command printed, line for line, with the session in the script. **`scripts/gen-font.py`** regenerates `drivers/font_8x16.ign` from the Spleen BDF file. **`flake.nix`** provides the toolchain.
+**`scripts/keytest.sh`, `scripts/shelltest.sh`, `scripts/powertest.sh` and `scripts/screenshot.sh`.** Boot QEMU headless, wait for the prompt on the serial log, and drive the QEMU monitor (`sendkey`, `screendump`). `keytest.sh` also checks the echo. `shelltest.sh` types one command at a time, waits for the next prompt, and compares what each command printed, line for line, with the session in the script. `powertest.sh` runs QEMU without `-no-reboot`, types `reboot`, waits for the second boot, types `shutdown`, and requires QEMU to exit by itself. **`scripts/gen-font.py`** regenerates `drivers/font_8x16.ign` from the Spleen BDF file. **`flake.nix`** provides the toolchain.
 
 ---
 
@@ -369,9 +372,9 @@ vmm: self-test ok
 `Tests::Vmm::run` mapped a frame at a test address, wrote through it, read it through the direct map, and unmapped it.
 
 ```text
-modules: initramfs is /initramfs.tar, 133120 bytes at 0xffff80000a0c0000
+modules: initramfs is /initramfs.tar, 153600 bytes at 0xffff80000a0b9000
 ```
-The Limine module from `boot/limine.conf`. `initramfs` is the `module_string`, `/initramfs.tar` the path. `Mm::Modules::initialize` mapped its pages read only. The address is in the direct map, so the file sits at physical `0x0a0c0000`. Doc 15.
+The Limine module from `boot/limine.conf`. `initramfs` is the `module_string`, `/initramfs.tar` the path. `Mm::Modules::initialize` mapped its pages read only. The address is in the direct map, so the file sits at physical `0xa0b9000`. Doc 15.
 
 ```text
 heap: self-test ok, 1092 KiB mapped, 0 bytes in use
@@ -379,16 +382,16 @@ heap: self-test ok, 1092 KiB mapped, 0 bytes in use
 `Tests::Heap::run` checked alignment, reuse, merging, growth (it allocates 1 MiB) and the compiler allocation handlers. 1092 KiB of heap pages stayed mapped and every block was freed. Doc 10.
 
 ```text
-initramfs: 133120 bytes, 9 files with 114483 bytes of data, 3 directories
+initramfs: 153600 bytes, 11 files with 133235 bytes of data, 3 directories
 initramfs: self-test ok, 6 malformed headers refused, 2 valid ones read, etc/motd read back
 ```
-`Fs::Initramfs::initialize` walked the archive: `etc/motd` and the eight programs in `bin` (`cat`, `fstest`, `hello`, `ls`, `mkdir`, `mmtest`, `nativetest`, `touch`) are the files, and `.`, `bin` and `etc` the directories. The size is a multiple of 10240 bytes because tar pads the archive to whole records. `Tests::Initramfs::run` then fed the reader one broken header per error code (checksum, magic, a non-octal number, a `..` path, a symbolic link, data past the end), a file and a directory with a prefix, and compared `etc/motd` with the text it should hold.
+`Fs::Initramfs::initialize` walked the archive: `etc/motd` and the ten programs in `bin` (`cat`, `fstest`, `hello`, `ls`, `mkdir`, `mmtest`, `nativetest`, `reboot`, `shutdown`, `touch`) are the files, and `.`, `bin` and `etc` the directories. The size is a multiple of 10240 bytes because tar pads the archive to whole records. `Tests::Initramfs::run` then fed the reader one broken header per error code (checksum, magic, a non-octal number, a `..` path, a symbolic link, data past the end), a file and a directory with a prefix, and compared `etc/motd` with the text it should hold.
 
 ```text
-vfs: 14 nodes, 114483 bytes in files, seeded from the initramfs
+vfs: 16 nodes, 133235 bytes in files, seeded from the initramfs
 vfs: self-test ok, lookup, create, read, write, truncate, remove and copy on write
 ```
-`Fs::Vfs::initialize` built the tree: the root, `bin` with its eight programs, `etc` and `etc/motd` from the archive, then `dev` and the device node `dev/console`. The file bytes are the same 114483 as in the archive, because nothing was copied. `Tests::Vfs::run` checked every path rule, created, wrote, read, truncated and removed a test directory `/t` and checked that the heap returned to where it was, then wrote to `/etc/motd` to check that the write copied the file and left the archive alone.
+`Fs::Vfs::initialize` built the tree: the root, `bin` with its ten programs, `etc` and `etc/motd` from the archive, then `dev` and the device node `dev/console`. The file bytes are the same 133235 as in the archive, because nothing was copied. `Tests::Vfs::run` checked every path rule, created, wrote, read, truncated and removed a test directory `/t` and checked that the heap returned to where it was, then wrote to `/etc/motd` to check that the write copied the file and left the archive alone.
 
 ```text
 address space: self-test ok, private user half, shared kernel half, frames returned
@@ -431,6 +434,11 @@ madt: override ISA IRQ 10 -> GSI 10, active high, level
 madt: override ISA IRQ 11 -> GSI 11, active high, level
 ```
 The interrupt source overrides. The legacy timer IRQ 0 is wired to GSI 2. IRQs 5, 9, 10 and 11 are level triggered. IRQ 1 (the keyboard) has no override, so it stays GSI 1 with ISA defaults. Doc 12.
+
+```text
+acpi: power off through PM1a port 0x0000000000000604 with S5 sleep type 0, reset through port 0x0000000000000cf9 value 15
+```
+`Acpi::Fadt::read` found the FADT and, in the DSDT, the `\_S5` package. Powering off writes sleep type 0 with `SLP_EN` to the PM1a control port `0x604` (`Power::powerOff`). Resetting writes `0x0F` to `0xCF9`, the reset control register of the q35 chipset that the FADT names (`Power::reset`). The `shutdown` and `reboot` programs use them.
 
 ```text
 lapic: base 0x00000000fee00000, id 0, version 0x0000000000050014, msr enabled 1, svr enabled 1, LINT0 masked, LINT1 NMI

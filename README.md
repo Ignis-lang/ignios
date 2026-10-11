@@ -22,7 +22,7 @@ Early, and only tested in QEMU with OVMF.
 | Memory | Bitmap frame allocator over the Limine memory map (4 KiB frames and 2 MiB runs, frees of unmanaged frames rejected); own 4-level page tables (kernel image per segment with W^X, direct map with 2 MiB pages, write-combining framebuffer, NX and write protection on); kernel heap in the higher half behind the compiler's allocation handlers |
 | User mode | Per-process address spaces (own PML4, shared kernel half, U/S pages, frames freed on exit); ring 3 entered with `iretq`, left through `SYSCALL`/`SYSRET` or an interrupt (TSS.RSP0 follows the running thread); a Linux x86_64 syscall subset (`read`, `write`, `openat`, `close`, `lseek`, `fstat`, `newfstatat`, `getdents64`, `mkdirat`, `mmap`, `munmap`, `exit`, `exit_group`, `getpid`, `sched_yield`, `nanosleep`, `-ENOSYS` for the rest) behind a per-process ABI table; every user pointer validated before use; a static ELF64 loader that starts programs from the file tree with argc and argv; a fault, privileged instruction or undefined instruction in ring 3 kills only that process; waiting for a process blocks until it is gone |
 | Files | A ustar initramfs loaded by Limine and checked at boot; an in-memory file tree seeded from it with copy on write, `/dev/console`, path rules as on Linux; per-process descriptor tables (16 descriptors, 0 to 2 on the console); nothing is saved across reboots |
-| Commands | `cat`, `ls`, `touch` and `mkdir` in `/bin`, written in Ignis on the Linux system calls; any line at the prompt that is not a built-in runs as a program |
+| Commands | `cat`, `ls`, `touch`, `mkdir`, `reboot` and `shutdown` in `/bin`, written in Ignis on the native IgniOS ABI; any line at the prompt that is not a built-in runs as a program |
 | Memory mappings | `mmap` of anonymous memory and private copies of files, `munmap` that trims and splits regions, `PROT_READ`/`PROT_WRITE`/`PROT_EXEC`/`PROT_NONE` enforced by the page tables, write with execute refused; up to 32 regions per process; `std::alloc`, a user heap on `mmap` behind the compiler's allocation hooks; `cat` reads files through `mmap` |
 | Native ABI | A second system call ABI next to Linux, chosen per program by an `IgniOS` ELF note: own call numbers (15 calls: files, directories, memory, scheduling), the status in RAX and the value in RDX, a published table of status codes, paths as pointer and length; both ABIs share descriptors and the checked transfers of `Syscall::Core`; `hello`, `cat`, `ls`, `touch` and `mkdir` are native programs, `fstest` and `mmtest` keep testing the Linux layer |
 | Next | `unlink`, `rmdir` and a current directory; a writable console input for programs |
@@ -43,7 +43,7 @@ direnv allow
 make run
 ```
 
-QEMU opens a window. Click it to give it the keyboard and type at the prompt: `ls /`, `cat /etc/motd`, `mkdir /tmp`, `touch /tmp/a`, `ls /tmp`. The programs are in `/bin`, and the files you create live in memory until the next boot. The terminal shows the serial log.
+QEMU opens a window. Click it to give it the keyboard and type at the prompt: `ls /`, `cat /etc/motd`, `mkdir /tmp`, `touch /tmp/a`, `ls /tmp`. `reboot` boots the machine again and `shutdown` powers it off, which closes QEMU. The programs are in `/bin`, and the files you create live in memory until the next boot. The terminal shows the serial log.
 
 The build also needs an Ignis compiler with freestanding support (Ignis `main` from October 2026 or later). The Makefile uses the `ignis` on your `PATH`; point elsewhere with `make IGNIS=/path/to/ignis`.
 
@@ -59,6 +59,7 @@ The build also needs an Ignis compiler with freestanding support (Ignis `main` f
 | `screenshot` | Boots headless and saves the screen to `build/screen.png` |
 | `keytest` | Types keys through the QEMU monitor and checks the echo |
 | `shelltest` | Types a session of `cat`, `ls`, `touch` and `mkdir`, their errors included, and checks every line they print |
+| `powertest` | Types `reboot`, waits for the second boot, types `shutdown` and checks that QEMU exits by itself |
 | `font` | Regenerates `kernel/src/drivers/font_8x16.ign` from the Spleen package |
 | `clean` | Removes `build/` |
 
@@ -80,13 +81,14 @@ The kernel is split into subsystems. Each one is a directory under `kernel/src/`
 | `kernel/src/arch/` | `Arch` | `@arch` | CPU instructions, port I/O, GDT, IDT, PIC, PIT, context switch, ring 3 entry, the interrupt frame, x87/SSE state, SMEP/SMAP and fault probes, per-CPU data, all `.S` files (in `arch/x86_64/`) |
 | `kernel/src/boot/` | `Boot` | `@boot` | Limine requests and responses, the higher half direct map |
 | `kernel/src/drivers/` | `Drivers` | `@drivers` | COM1, the framebuffer console and its font, the PS/2 controller, the keyboard decoder |
-| `kernel/src/acpi/` | `Acpi` | `@acpi` | RSDP, XSDT/RSDT and MADT parsing |
+| `kernel/src/acpi/` | `Acpi` | `@acpi` | RSDP, XSDT/RSDT, MADT and FADT parsing, the S5 sleep type |
 | `kernel/src/mm/` | `Mm` | `@mm` | physical frames, page tables, address spaces, the kernel heap, Limine modules |
 | `kernel/src/fs/` | `Fs` | `@fs` | the initramfs (ustar) and the in-memory file tree |
 | `kernel/src/apic/` | `Apic` | `@apic` | local APIC and IOAPIC |
 | `kernel/src/time/` | `Time` | `@time` | APIC timer calibration, the tick counter, uptime |
 | `kernel/src/sched/` | `Sched` | `@sched` | the thread table and stacks, the run queue, sleep and timer preemption |
 | `kernel/src/proc/` | `Proc` | `@proc` | process table, ELF loader, running a program from a path with arguments |
+| `kernel/src/power/` | `Power` | `@power` | ACPI power-off (S5) and reset |
 | `kernel/src/syscall/` | `Syscall` | `@syscall` | dispatch, the kernel operations, the Linux ABI table and handlers |
 | `kernel/src/trap/` | `Trap` | `@trap` | the interrupt dispatcher, exception reports, GDT/IDT/`SYSCALL` setup with their log lines |
 | `kernel/src/shell/` | `Shell` | `@shell` | the terminal loop and its commands |
@@ -101,6 +103,7 @@ kernel/linker.ld               higher-half layout
 user/lib/                      the user standard library (entry stub, syscalls, text output, argv)
 user/hello/                    the first user program
 user/cat, ls, touch, mkdir/    the commands
+user/reboot, shutdown/         reset and power off
 user/fstest/                   ring 3 checks of the file system calls
 user/mmtest/                   ring 3 checks of mmap, munmap and std::alloc
 user/nativetest/               ring 3 checks of the native ABI

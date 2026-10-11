@@ -27,7 +27,7 @@
 //!
 //! The Linux files: `table.ign` (numbers and the table), `errno.ign` (errno
 //! values, `failure` and `errorFor`), `files.ign` (the file calls),
-//! `memory.ign` (`mmap` and `munmap`) and `nanosleep.ign`.
+//! `memory.ign` (`mmap` and `munmap`), `nanosleep.ign` and `reboot.ign`.
 //!
 //! ## Dependencies
 //!
@@ -41,6 +41,7 @@
 //! | `Drivers` | `badReturn` prints on the console                      |
 //! | `Fs`      | descriptors, open files and the file tree              |
 //! | `Lib`     | `memset` and `memcpy` for `struct stat` and dirents    |
+//! | `Power`   | `reboot(2)` and the native `POWER` call                 |
 //!
 //! `main` calls `Syscall::initialize`. The assembly entry stub in
 //! `arch/x86_64/usermode_asm.S` calls `dispatch` and `badReturn` by their
@@ -53,6 +54,7 @@ import _ from "./linux/errno";
 import _ from "./linux/files";
 import _ from "./linux/memory";
 import _ from "./linux/nanosleep";
+import _ from "./linux/reboot";
 import _ from "./linux/table";
 import _ from "./native/calls";
 import _ from "./native/status";

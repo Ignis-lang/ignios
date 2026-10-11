@@ -40,4 +40,15 @@ namespace Arch::Port {
   function writeByte(port: u16, value: u8): void {
     asm (port in dx, value in al) { out {port}, {value} }
   }
+
+  /// Reads 16 bits from `port` (`in ax, dx`), for registers such as the ACPI
+  /// PM1 control block.
+  function readWord(port: u16): u16 {
+    return asm (port in dx) -> (value: u16 in ax) { in {value}, {port} };
+  }
+
+  /// Writes 16 bits to `port` (`out dx, ax`).
+  function writeWord(port: u16, value: u16): void {
+    asm (port in dx, value in ax) { out {port}, {value} }
+  }
 }

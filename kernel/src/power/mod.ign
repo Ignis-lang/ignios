@@ -1,0 +1,143 @@
+//!
+//! # Power
+//!
+//! Turning the machine off and resetting it.
+//!
+//! ## Overview
+//!
+//! | Action      | How                                                                    |
+//! |-------------|------------------------------------------------------------------------|
+//! | power off   | ACPI sleep state S5: write `SLP_TYP << 10 \| SLP_EN` to PM1a (and PM1b) |
+//! | reset       | the FADT reset register; else the 8042 reset line (command `0xFE` to port `0x64`) |
+//!
+//! Both first print a line and turn interrupts off. Nothing needs saving: the
+//! files live in memory and are lost either way.
+//!
+//! Before S5 the chipset must be in ACPI mode (PM1a bit 0, `SCI_EN`). Firmware
+//! may leave it in legacy mode; then the kernel writes `ACPI_ENABLE` to the
+//! SMI command port and waits for `SCI_EN`, as the ACPI specification
+//! describes ("Legacy/ACPI Select and the SCI Interrupt").
+//!
+//! `powerOff` returns false when the machine offers no way to power off, or
+//! when it is still running after the write. `reset` does not return: when
+//! every method fails it halts.
+//!
+//! ## Public API
+//!
+//! | Name              | Purpose                                   |
+//! |-------------------|-------------------------------------------|
+//! | `Power::powerOff` | enters S5; returns only on failure        |
+//! | `Power::reset`    | resets the machine; never returns         |
+//!
+//! ## Dependencies
+//!
+//! | Imports   | Why                                     |
+//! |-----------|-----------------------------------------|
+//! | `Acpi`    | the FADT registers and the S5 sleep type |
+//! | `Arch`    | port I/O, interrupt flag, halt           |
+//! | `Drivers` | the last line on the console             |
+
+import Acpi from "@acpi";
+import Arch from "@arch";
+import Drivers from "@drivers";
+
+/// The power API.
+export namespace Power {
+  /// PM1 control: `SCI_EN`, bit 0.
+  const SCI_ENABLE: u16 = 0x1;
+
+  /// PM1 control: `SLP_EN`, bit 13.
+  const SLEEP_ENABLE: u16 = 0x2000;
+
+  /// PM1 control: `SLP_TYP` starts at bit 10.
+  const SLEEP_TYPE_SHIFT: u16 = 10;
+
+  /// PM1 control: the three `SLP_TYP` bits.
+  const SLEEP_TYPE_MASK: u16 = 0x1C00;
+
+  /// How many times to read `SCI_EN` after asking for ACPI mode.
+  const ENABLE_POLLS: u64 = 1000000;
+
+  /// The 8042 command port.
+  const KEYBOARD_COMMAND: u16 = 0x64;
+
+  /// The 8042 command that pulses the CPU reset line.
+  const KEYBOARD_RESET: u8 = 0xFE;
+
+  /// Enters ACPI S5. Returns false when the machine has no S5, cannot be put
+  /// in ACPI mode, or did not turn off.
+  function powerOff(): boolean {
+    if (!Acpi::Fadt::canPowerOff()) {
+      return false;
+    }
+
+    Drivers::Console::writeLine("power: shutting down");
+
+    let saved: u64 = Arch::Cpu::saveAndDisableInterrupts();
+    let control: u16 = Acpi::Fadt::pm1aControl() as u16;
+
+    if (!enableAcpi(control)) {
+      Arch::Cpu::restoreInterrupts(saved);
+      return false;
+    }
+
+    writeSleep(control, Acpi::Fadt::sleepTypeA());
+
+    if (Acpi::Fadt::pm1bControl() != 0) {
+      writeSleep(Acpi::Fadt::pm1bControl() as u16, Acpi::Fadt::sleepTypeB());
+    }
+
+    Arch::Cpu::restoreInterrupts(saved);
+
+    return false;
+  }
+
+  /// Resets the machine. Never returns.
+  function reset(): never {
+    Drivers::Console::writeLine("power: rebooting");
+    Arch::Cpu::disableInterrupts();
+
+    if (Acpi::Fadt::canReset()) {
+      Arch::Port::writeByte(Acpi::Fadt::resetPort() as u16, Acpi::Fadt::resetValue() as u8);
+    }
+
+    Arch::Port::writeByte(KEYBOARD_COMMAND, KEYBOARD_RESET);
+    Drivers::Console::writeLine("power: reset failed, halting");
+    Arch::Cpu::haltForever();
+  }
+
+  /// Makes sure the chipset is in ACPI mode. Returns false when it does not
+  /// get there.
+  function enableAcpi(control: u16): boolean {
+    if ((Arch::Port::readWord(control) & SCI_ENABLE) != 0) {
+      return true;
+    }
+
+    if (Acpi::Fadt::smiCommand() == 0) {
+      return false;
+    }
+
+    Arch::Port::writeByte(Acpi::Fadt::smiCommand() as u16, Acpi::Fadt::acpiEnable() as u8);
+
+    let mut poll: u64 = 0;
+
+    while (poll < ENABLE_POLLS) {
+      if ((Arch::Port::readWord(control) & SCI_ENABLE) != 0) {
+        return true;
+      }
+
+      Arch::Cpu::pause();
+      poll += 1;
+    }
+
+    return false;
+  }
+
+  /// Writes `SLP_TYP = sleepType` and `SLP_EN` to the PM1 control port,
+  /// keeping its other bits.
+  function writeSleep(control: u16, sleepType: u64): void {
+    let current: u16 = Arch::Port::readWord(control) & ~SLEEP_TYPE_MASK;
+
+    Arch::Port::writeWord(control, current | (((sleepType as u16) << SLEEP_TYPE_SHIFT) & SLEEP_TYPE_MASK) | SLEEP_ENABLE);
+  }
+}

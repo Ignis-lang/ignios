@@ -64,6 +64,9 @@ namespace Syscall::Linux {
   /// `exit`, number 60.
   const NUMBER_EXIT: u64 = 60;
 
+  /// `reboot`, number 169.
+  const NUMBER_REBOOT: u64 = 169;
+
   /// `getdents64`, number 217.
   const NUMBER_GETDENTS64: u64 = 217;
 
@@ -91,6 +94,7 @@ namespace Syscall::Linux {
     *(table + NUMBER_MMAP) = Operation::MAP;
     *(table + NUMBER_MUNMAP) = Operation::UNMAP;
     *(table + NUMBER_GETDENTS64) = Operation::READ_DIRECTORY;
+    *(table + NUMBER_REBOOT) = Operation::POWER;
     *(table + NUMBER_OPENAT) = Operation::OPEN;
     *(table + NUMBER_MKDIRAT) = Operation::MAKE_DIRECTORY;
     *(table + NUMBER_NEWFSTATAT) = Operation::STAT_AT;

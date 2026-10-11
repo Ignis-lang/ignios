@@ -52,6 +52,7 @@ import _ from "./linux/errno";
 import _ from "./linux/files";
 import _ from "./linux/memory";
 import _ from "./linux/nanosleep";
+import _ from "./linux/reboot";
 import _ from "./linux/table";
 import _ from "./native/calls";
 import _ from "./native/status";
@@ -111,6 +112,8 @@ namespace Syscall {
       (*frame).rax = Linux::mmap(first, second, third, fourth, fifth, sixth);
     } else if (operation == Operation::UNMAP) {
       (*frame).rax = Linux::munmap(first, second);
+    } else if (operation == Operation::POWER) {
+      (*frame).rax = Linux::reboot(first, second, third);
     } else if (operation == Operation::GET_PID) {
       (*frame).rax = Proc::Process::currentId();
     } else if (operation == Operation::YIELD) {

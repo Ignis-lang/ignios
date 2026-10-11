@@ -68,6 +68,8 @@ ls
 mkdir
 mmtest
 nativetest
+reboot
+shutdown
 touch
 S0
 > mkdir /tmp

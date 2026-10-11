@@ -1,0 +1,298 @@
+//!
+//! # FADT and the S5 Sleep Type
+//!
+//! What the kernel needs to power the machine off and reset it: the
+//! registers the Fixed ACPI Description Table names, and the sleep type of
+//! state S5 that the DSDT defines.
+//!
+//! ## Overview
+//!
+//! ```text
+//!   root table ──"FACP"──► FADT ──DSDT / X_DSDT──► DSDT (AML bytecode)
+//!                            │                         │
+//!                            │ PM1a_CNT_BLK, SMI_CMD,  │ Name (_S5_, Package { SLP_TYPa, SLP_TYPb, ... })
+//!                            │ ACPI_ENABLE, RESET_REG  ▼
+//!                            ▼                    the value to write to SLP_TYP
+//!                        port numbers
+//! ```
+//!
+//! The FADT fields this file reads (ACPI 6.5, "Fixed ACPI Description Table"):
+//!
+//! | Offset | Size | Field          | Use                                           |
+//! |--------|------|----------------|-----------------------------------------------|
+//! | 40     | 4    | `DSDT`         | the DSDT, when `X_DSDT` is 0 or absent        |
+//! | 48     | 4    | `SMI_CMD`      | the port that switches the chipset to ACPI mode |
+//! | 52     | 1    | `ACPI_ENABLE`  | the value to write there                      |
+//! | 64     | 4    | `PM1a_CNT_BLK` | the PM1a control port: SLP_TYP and SLP_EN     |
+//! | 68     | 4    | `PM1b_CNT_BLK` | the PM1b control port, 0 when there is none   |
+//! | 112    | 4    | `Flags`        | bit 10 `RESET_REG_SUP`                        |
+//! | 116    | 12   | `RESET_REG`    | a Generic Address: byte 0 the space (1 = I/O), bytes 4-11 the address |
+//! | 128    | 1    | `RESET_VALUE`  | the value to write to `RESET_REG`             |
+//! | 140    | 8    | `X_DSDT`       | the 64-bit DSDT address                       |
+//!
+//! ## Finding `\_S5`
+//!
+//! The DSDT is AML, a bytecode the kernel does not interpret. `\_S5` is
+//! nearly always a plain package, so the kernel looks for its encoding:
+//!
+//! ```text
+//!   08            NameOp           (sometimes followed by `\`, 0x5C)
+//!   5F 53 35 5F   "_S5_"
+//!   12            PackageOp
+//!   nn [nn..]     PkgLength: 1 to 4 bytes, the count is bits 6-7 of the first, plus 1
+//!   nn            NumElements
+//!   0A vv | 00 | 01   SLP_TYPa: BytePrefix and a byte, or the constants Zero and One
+//! ```
+//!
+//! This is the approach of most small kernels; a full AML interpreter
+//! (ACPICA) would evaluate the object instead. When the encoding is not
+//! found, the kernel reports that it cannot power off.
+
+import Boot from "@boot";
+import _ from "./table";
+import _ from "./xsdt";
+
+/// What `Acpi::Fadt::read` found.
+record FadtState {
+  /// True when the FADT and a usable `\_S5` were found.
+  static mut canPowerOff: boolean = false;
+
+  /// True when the FADT names an I/O port reset register.
+  static mut canReset: boolean = false;
+
+  /// The PM1a control port.
+  static mut pm1aControl: u64 = 0;
+
+  /// The PM1b control port, 0 when there is none.
+  static mut pm1bControl: u64 = 0;
+
+  /// The SMI command port, 0 when the machine is always in ACPI mode.
+  static mut smiCommand: u64 = 0;
+
+  /// The value that switches to ACPI mode.
+  static mut acpiEnable: u64 = 0;
+
+  /// SLP_TYPa and SLP_TYPb of S5.
+  static mut sleepTypeA: u64 = 0;
+
+  /// SLP_TYPb of S5.
+  static mut sleepTypeB: u64 = 0;
+
+  /// The reset port and value.
+  static mut resetPort: u64 = 0;
+
+  /// The value to write to the reset port.
+  static mut resetValue: u64 = 0;
+}
+
+/// The FADT reader.
+namespace Acpi::Fadt {
+  /// "FACP" as a little-endian 32-bit integer: the FADT signature.
+  const SIGNATURE: u64 = 0x50434146;
+
+  /// Offset of `DSDT`.
+  const DSDT_OFFSET: u64 = 40;
+
+  /// Offset of `SMI_CMD`.
+  const SMI_COMMAND_OFFSET: u64 = 48;
+
+  /// Offset of `ACPI_ENABLE`.
+  const ACPI_ENABLE_OFFSET: u64 = 52;
+
+  /// Offset of `PM1a_CNT_BLK`.
+  const PM1A_CONTROL_OFFSET: u64 = 64;
+
+  /// Offset of `PM1b_CNT_BLK`.
+  const PM1B_CONTROL_OFFSET: u64 = 68;
+
+  /// Offset of `Flags`.
+  const FLAGS_OFFSET: u64 = 112;
+
+  /// Offset of `RESET_REG`.
+  const RESET_REGISTER_OFFSET: u64 = 116;
+
+  /// Offset of `RESET_VALUE`.
+  const RESET_VALUE_OFFSET: u64 = 128;
+
+  /// Offset of `X_DSDT`.
+  const X_DSDT_OFFSET: u64 = 140;
+
+  /// `Flags` bit 10: `RESET_REG` is valid.
+  const RESET_SUPPORTED: u32 = 0x400;
+
+  /// Generic Address space 1: system I/O.
+  const SPACE_IO: u8 = 1;
+
+  /// AML NameOp.
+  const NAME_OP: u8 = 0x08;
+
+  /// AML PackageOp.
+  const PACKAGE_OP: u8 = 0x12;
+
+  /// AML BytePrefix.
+  const BYTE_PREFIX: u8 = 0x0A;
+
+  /// AML ZeroOp.
+  const ZERO_OP: u8 = 0x00;
+
+  /// AML OneOp.
+  const ONE_OP: u8 = 0x01;
+
+  /// Finds the FADT and the S5 sleep type. Leaves both abilities off when
+  /// something is missing; never panics, since the machine runs without them.
+  function read(): void {
+    let fadt: *mut u8 = Acpi::Xsdt::findTable(SIGNATURE);
+
+    if (fadt == null || !Acpi::Table::isTableValid(fadt)) {
+      return;
+    }
+
+    let length: u64 = Acpi::Table::readU32(fadt, Acpi::Table::HEADER_LENGTH_OFFSET) as u64;
+
+    if (length < RESET_VALUE_OFFSET + 1) {
+      return;
+    }
+
+    FadtState::smiCommand = Acpi::Table::readU32(fadt, SMI_COMMAND_OFFSET) as u64;
+    FadtState::acpiEnable = Acpi::Table::readU8(fadt, ACPI_ENABLE_OFFSET) as u64;
+    FadtState::pm1aControl = Acpi::Table::readU32(fadt, PM1A_CONTROL_OFFSET) as u64;
+    FadtState::pm1bControl = Acpi::Table::readU32(fadt, PM1B_CONTROL_OFFSET) as u64;
+
+    let flags: u32 = Acpi::Table::readU32(fadt, FLAGS_OFFSET);
+    let resetAddress: u64 = Acpi::Table::readU64(fadt, RESET_REGISTER_OFFSET + 4);
+
+    if ((flags & RESET_SUPPORTED) != 0 && Acpi::Table::readU8(fadt, RESET_REGISTER_OFFSET) == SPACE_IO && resetAddress != 0 && resetAddress <= 0xFFFF) {
+      FadtState::resetPort = resetAddress;
+      FadtState::resetValue = Acpi::Table::readU8(fadt, RESET_VALUE_OFFSET) as u64;
+      FadtState::canReset = true;
+    }
+
+    let mut dsdtAddress: u64 = Acpi::Table::readU32(fadt, DSDT_OFFSET) as u64;
+
+    if (length >= X_DSDT_OFFSET + 8 && Acpi::Table::readU64(fadt, X_DSDT_OFFSET) != 0) {
+      dsdtAddress = Acpi::Table::readU64(fadt, X_DSDT_OFFSET);
+    }
+
+    if (dsdtAddress == 0 || FadtState::pm1aControl == 0 || FadtState::pm1aControl > 0xFFFF) {
+      return;
+    }
+
+    let dsdt: *mut u8 = Boot::Hhdm::toVirtual(dsdtAddress);
+
+    if (!Acpi::Table::isTableValid(dsdt)) {
+      return;
+    }
+
+    FadtState::canPowerOff = findSleepType(dsdt, Acpi::Table::readU32(dsdt, Acpi::Table::HEADER_LENGTH_OFFSET) as u64);
+  }
+
+  /// Looks for the `\_S5` package in the `length` bytes of the DSDT at
+  /// `dsdt` and stores SLP_TYPa and SLP_TYPb. Returns false when the
+  /// encoding is not the plain one described in the header.
+  function findSleepType(dsdt: *mut u8, length: u64): boolean {
+    let mut index: u64 = Acpi::Table::HEADER_SIZE + 1;
+
+    while (index + 12 <= length) {
+      let at: *mut u8 = dsdt + index;
+
+      if (*at == 0x5F && *(at + 1) == 0x53 && *(at + 2) == 0x35 && *(at + 3) == 0x5F) {
+        let before: u8 = *(at - 1);
+        let named: boolean = before == NAME_OP || (before == 0x5C && *(at - 2) == NAME_OP);
+
+        if (named && *(at + 4) == PACKAGE_OP) {
+          let lengthBytes: u64 = ((*(at + 5) >> 6) & 3) as u64 + 1;
+          let mut element: u64 = index + 5 + lengthBytes + 1;
+          let mut typeA: u64 = 0;
+          let mut typeB: u64 = 0;
+
+          if (!readElement(dsdt, length, &mut element as *mut u64, &mut typeA as *mut u64) || !readElement(dsdt, length, &mut element as *mut u64, &mut typeB as *mut u64)) {
+            return false;
+          }
+
+          FadtState::sleepTypeA = typeA;
+          FadtState::sleepTypeB = typeB;
+
+          return true;
+        }
+      }
+
+      index += 1;
+    }
+
+    return false;
+  }
+
+  /// Reads one integer package element at `*position` into `value` and
+  /// moves `*position` past it. Only BytePrefix, Zero and One are accepted.
+  function readElement(dsdt: *mut u8, length: u64, position: *mut u64, value: *mut u64): boolean {
+    if (*position + 2 > length) {
+      return false;
+    }
+
+    let op: u8 = *(dsdt + *position);
+
+    if (op == BYTE_PREFIX) {
+      *value = *(dsdt + *position + 1) as u64;
+      *position = *position + 2;
+      return true;
+    }
+
+    if (op == ZERO_OP || op == ONE_OP) {
+      *value = op as u64;
+      *position = *position + 1;
+      return true;
+    }
+
+    return false;
+  }
+
+  /// True when the kernel can power off through ACPI.
+  function canPowerOff(): boolean {
+    return FadtState::canPowerOff;
+  }
+
+  /// True when the FADT names an I/O reset register.
+  function canReset(): boolean {
+    return FadtState::canReset;
+  }
+
+  /// The PM1a control port.
+  function pm1aControl(): u64 {
+    return FadtState::pm1aControl;
+  }
+
+  /// The PM1b control port, 0 when there is none.
+  function pm1bControl(): u64 {
+    return FadtState::pm1bControl;
+  }
+
+  /// The SMI command port, 0 when the machine is always in ACPI mode.
+  function smiCommand(): u64 {
+    return FadtState::smiCommand;
+  }
+
+  /// The value that switches the chipset to ACPI mode.
+  function acpiEnable(): u64 {
+    return FadtState::acpiEnable;
+  }
+
+  /// SLP_TYPa of S5.
+  function sleepTypeA(): u64 {
+    return FadtState::sleepTypeA;
+  }
+
+  /// SLP_TYPb of S5.
+  function sleepTypeB(): u64 {
+    return FadtState::sleepTypeB;
+  }
+
+  /// The reset port.
+  function resetPort(): u64 {
+    return FadtState::resetPort;
+  }
+
+  /// The value to write to the reset port.
+  function resetValue(): u64 {
+    return FadtState::resetValue;
+  }
+}

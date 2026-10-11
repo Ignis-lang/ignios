@@ -116,6 +116,15 @@ export namespace Sys {
   /// Sleep for a number of nanoseconds.
   const SLEEP: u64 = 14;
 
+  /// Reboot or power off.
+  const POWER: u64 = 15;
+
+  /// `POWER` action: reset the machine.
+  const POWER_REBOOT: u64 = 1;
+
+  /// `POWER` action: power the machine off.
+  const POWER_OFF: u64 = 2;
+
   /// The directory argument meaning `/`.
   const ROOT: u64 = 0xFFFFFFFFFFFFFFFF;
 
@@ -481,6 +490,17 @@ export namespace Sys {
     }
 
     return portable(call1(SLEEP, (seconds as u64) * 1000000000 + (nanoseconds as u64)));
+  }
+
+  /// Resets the machine. Returns only on failure, with the negated status.
+  function reboot(): i64 {
+    return portable(call1(POWER, POWER_REBOOT));
+  }
+
+  /// Powers the machine off. Returns only on failure, with the negated
+  /// status: `NOT_SUPPORTED` when the machine has no ACPI power-off.
+  function powerOff(): i64 {
+    return portable(call1(POWER, POWER_OFF));
   }
 
   /// A call by number with no arguments, for tests.
