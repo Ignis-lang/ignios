@@ -19,7 +19,8 @@
 //! describes ("Legacy/ACPI Select and the SCI Interrupt").
 //!
 //! `powerOff` returns false when the machine offers no way to power off, or
-//! when it is still running after the write. `reset` does not return: when
+//! when it is still running a few seconds after the write; it waits that long
+//! because the chipset needs a moment to cut the power. `reset` does not return: when
 //! every method fails it halts.
 //!
 //! ## Public API
@@ -58,6 +59,16 @@ export namespace Power {
   /// How many times to read `SCI_EN` after asking for ACPI mode.
   const ENABLE_POLLS: u64 = 1000000;
 
+  /// How many `pause`s to wait for S5 before reporting a failure: a few
+  /// seconds on current processors.
+  const POWER_OFF_POLLS: u64 = 200000000;
+
+  /// The 8042 status bit that says its input buffer is full.
+  const KEYBOARD_INPUT_FULL: u8 = 0x2;
+
+  /// How many times to check that the 8042 is ready for a command.
+  const KEYBOARD_POLLS: u64 = 100000;
+
   /// The 8042 command port.
   const KEYBOARD_COMMAND: u16 = 0x64;
 
@@ -87,6 +98,15 @@ export namespace Power {
       writeSleep(Acpi::Fadt::pm1bControl() as u16, Acpi::Fadt::sleepTypeB());
     }
 
+    // Entering S5 takes the chipset a moment. Returning at once would hand a
+    // false failure back to the program while the machine is turning off.
+    let mut poll: u64 = 0;
+
+    while (poll < POWER_OFF_POLLS) {
+      Arch::Cpu::pause();
+      poll += 1;
+    }
+
     Arch::Cpu::restoreInterrupts(saved);
 
     return false;
@@ -99,6 +119,13 @@ export namespace Power {
 
     if (Acpi::Fadt::canReset()) {
       Arch::Port::writeByte(Acpi::Fadt::resetPort() as u16, Acpi::Fadt::resetValue() as u8);
+    }
+
+    let mut poll: u64 = 0;
+
+    while (poll < KEYBOARD_POLLS && (Arch::Port::readByte(KEYBOARD_COMMAND) & KEYBOARD_INPUT_FULL) != 0) {
+      Arch::Cpu::pause();
+      poll += 1;
     }
 
     Arch::Port::writeByte(KEYBOARD_COMMAND, KEYBOARD_RESET);

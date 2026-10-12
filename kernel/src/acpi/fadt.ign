@@ -173,6 +173,10 @@ namespace Acpi::Fadt {
       dsdtAddress = Acpi::Table::readU64(fadt, X_DSDT_OFFSET);
     }
 
+    if (FadtState::pm1bControl > 0xFFFF || FadtState::smiCommand > 0xFFFF) {
+      return;
+    }
+
     if (dsdtAddress == 0 || FadtState::pm1aControl == 0 || FadtState::pm1aControl > 0xFFFF) {
       return;
     }

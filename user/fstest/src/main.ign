@@ -23,6 +23,7 @@
 //! | 123-124 | a bad buffer is `-EFAULT` for `read`, `write`, `fstat`, `newfstatat`, `getdents64`; a 48-byte `getdents64` buffer takes `.` and `..` |
 //! | 125    | `O_CREAT` on an existing directory is `-EISDIR`                      |
 //! | 140-147 | `getcwd` is `/`, then `/fstest` after `chdir`; a relative `openat` and `mkdirat` start there; a current directory cannot be removed (`-EBUSY`); `chdir` to a file `-ENOTDIR`, to nothing `-ENOENT`; `getcwd` into 2 bytes `-ERANGE`, into a bad pointer `-EFAULT` |
+//! | 220-224 | `reboot` with a wrong first or second magic number, or an unknown command, is `-EINVAL`; `getcwd` into 1 byte `-ERANGE`, into 2 bytes 2; `unlinkat(".", AT_REMOVEDIR)` `-EINVAL`; `chdir("")` and `unlink("")` `-ENOENT` |
 //! | 130-138 | `unlinkat`: a file, then `-ENOENT`; a directory without `AT_REMOVEDIR` `-EISDIR`; a non-empty one `-ENOTEMPTY`; an open one `-EBUSY`, then 0 once closed; a file with `AT_REMOVEDIR` `-ENOTDIR`; `/` and an unknown flag `-EINVAL`; a file named with a trailing `/` `-ENOTDIR`; an open file `-EBUSY` |
 //!
 //! The exit status is the number of the first check that failed, 0 when all
@@ -394,6 +395,18 @@ function checkCurrentDirectory(): void {
   expect(Sys::changeDirectory("/" as *u8), 0, 147);
 }
 
+/// `reboot` refusals and edge cases of the directory calls.
+function checkLimits(): void {
+  expect(Sys::call4(169, 0xFEE1DEAE, 672274793, 0x4321FEDC, 0), 0 - Sys::EINVAL, 220);
+  expect(Sys::call4(169, 0xFEE1DEAD, 1, 0x4321FEDC, 0), 0 - Sys::EINVAL, 220);
+  expect(Sys::call4(169, 0xFEE1DEAD, 672274793, 0xCDEF0123, 0), 0 - Sys::EINVAL, 221);
+  expect(Sys::getcwd(buffer(), 1), 0 - Sys::ERANGE, 222);
+  expect(Sys::getcwd(buffer(), 2), 2, 222);
+  expect(Sys::unlinkAt(Sys::AT_FDCWD, "." as *u8, Sys::AT_REMOVEDIR), 0 - Sys::EINVAL, 223);
+  expect(Sys::changeDirectory("" as *u8), 0 - Sys::ENOENT, 224);
+  expect(Sys::unlink("" as *u8), 0 - Sys::ENOENT, 224);
+}
+
 /// `O_CREAT` on an existing directory is `-EISDIR`, as on Linux.
 function checkCreateDirectory(): void {
   expect(Sys::open("/etc" as *u8, Sys::O_CREAT | Sys::O_RDONLY, 0x1A4), 0 - Sys::EISDIR, 125);
@@ -419,6 +432,7 @@ function main(count: u64, values: *u64): u64 {
   checkCreateDirectory();
   checkRemove();
   checkCurrentDirectory();
+  checkLimits();
 
   Io::print("fstest: openat, read, write, lseek, close, fstat, newfstatat, getdents64 and mkdirat behave as on Linux\n");
 

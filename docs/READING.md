@@ -376,9 +376,9 @@ vmm: self-test ok
 `Tests::Vmm::run` mapped a frame at a test address, wrote through it, read it through the direct map, and unmapped it.
 
 ```text
-modules: initramfs is /initramfs.tar, 204800 bytes at 0xffff80000a0a9000
+modules: initramfs is /initramfs.tar, 204800 bytes at 0xffff80000a088000
 ```
-The Limine module from `boot/limine.conf`. `initramfs` is the `module_string`, `/initramfs.tar` the path. `Mm::Modules::initialize` mapped its pages read only. The address is in the direct map, so the file sits at physical `0xa0a9000`. Doc 15.
+The Limine module from `boot/limine.conf`. `initramfs` is the `module_string`, `/initramfs.tar` the path. `Mm::Modules::initialize` mapped its pages read only. The address is in the direct map, so the file sits at physical `0xa088000`. Doc 15.
 
 ```text
 heap: self-test ok, 1092 KiB mapped, 0 bytes in use

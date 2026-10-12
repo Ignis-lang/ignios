@@ -34,6 +34,7 @@
 //! | 100    | a path with a NUL byte in it (`/nt/x\0y`, length 7) is `INVALID`    |
 //! | 120-125 | `CURRENT_DIRECTORY` is `/`; `CHANGE_DIRECTORY` to `/nt`, then paths relative to `CURRENT` start there; the current directory is `BUSY`; a file is `NOT_DIRECTORY`; a buffer too small is `INVALID` |
 //! | 130-137 | `SPAWN` of `/bin/pwd` and `WAIT` for its status 0; a second `WAIT` is `NOT_FOUND`; waiting for itself is `INVALID`; a missing program `NOT_FOUND`, a directory `IS_DIRECTORY`, a text file `INVALID`; arguments that do not match their count `INVALID`; a bad argument pointer `BAD_ADDRESS`; the child starts in the parent's current directory (`rmdir sub` from `/nt` removes `/nt/sub`) |
+//! | 200-206 | `POWER` with an unknown action is `INVALID`; `WAIT` for an id that never existed is `NOT_FOUND`; an argument block with an empty string is accepted; a child's exit status 1 comes back; 7 children fill the process table, the 8th is refused, and after waiting starting works again; `CURRENT_DIRECTORY` into 1 byte; removing `.` or `/bin/..` is `INVALID` |
 //! | 110-115 | `UNLINK` and `REMOVE_DIRECTORY`: a file, then `NOT_FOUND`; a directory as a file `IS_DIRECTORY`; a non-empty directory `NOT_EMPTY`; an open one `BUSY`; a file as a directory `NOT_DIRECTORY`; relative to a directory descriptor |
 //!
 //! The exit status is the number of the first check that failed, 0 when all
@@ -380,6 +381,50 @@ function checkSpawn(): void {
   succeed(Sys::call3(Sys::CHANGE_DIRECTORY, Sys::ROOT, at("/"), 1), 137);
 }
 
+/// Edge cases of `POWER`, `SPAWN`, `WAIT` and the current directory.
+function checkLimits(): void {
+  expect(Sys::call1(Sys::POWER, 0), Sys::INVALID, 0, 200);
+  expect(Sys::call1(Sys::POWER, 3), Sys::INVALID, 0, 200);
+  expect(Sys::call1(Sys::WAIT, 123456), Sys::NOT_FOUND, 0, 201);
+
+  let empty: u64 = succeed(spawn("/bin/pwd", 8, "a\0", 3, 2), 202);
+
+  expect(Sys::call1(Sys::WAIT, empty), Sys::OK, 0, 202);
+
+  let failing: u64 = succeed(spawn("/bin/rmdir", 10, "rmdir\0nope", 11, 2), 203);
+
+  expect(Sys::call1(Sys::WAIT, failing), Sys::OK, 1, 203);
+
+  let children: *mut u64 = @pointerFromInteger<*mut u64>(buffer());
+  let mut started: u64 = 0;
+  let mut last: Sys::Result = Sys::Result { status: 0, value: 0 };
+
+  while (started < 12) {
+    last = spawn("/bin/pwd", 8, "pwd", 4, 1);
+
+    if (last.status != Sys::OK) {
+      break;
+    }
+
+    *@pointerFromInteger<*mut u64>(@integerFromPointer(children) + started * 8) = last.value;
+    started += 1;
+  }
+
+  require(started == 7 && last.status == Sys::INVALID, 204);
+
+  while (started > 0) {
+    started -= 1;
+    expect(Sys::call1(Sys::WAIT, *@pointerFromInteger<*u64>(@integerFromPointer(children) + started * 8)), Sys::OK, 0, 204);
+  }
+
+  let again: u64 = succeed(spawn("/bin/pwd", 8, "pwd", 4, 1), 204);
+
+  expect(Sys::call1(Sys::WAIT, again), Sys::OK, 0, 204);
+  expect(Sys::call2(Sys::CURRENT_DIRECTORY, buffer(), 1), Sys::OK, 1, 205);
+  expect(Sys::call3(Sys::UNLINK, 0xFFFFFFFFFFFFFFFE, at("."), 1), Sys::INVALID, 0, 206);
+  expect(Sys::call3(Sys::REMOVE_DIRECTORY, Sys::ROOT, at("/bin/.."), 7), Sys::INVALID, 0, 206);
+}
+
 /// `UNLINK` and `REMOVE_DIRECTORY`.
 function checkRemove(): void {
   let made: u64 = succeed(open("/nt/gone", 8, Sys::OPEN_WRITE | Sys::OPEN_CREATE), 110);
@@ -417,6 +462,7 @@ function main(count: u64, values: *u64): u64 {
   checkRemove();
   checkCurrentDirectory();
   checkSpawn();
+  checkLimits();
 
   Io::print("nativetest: every native call, its arguments and its status codes behave as specified\n");
 

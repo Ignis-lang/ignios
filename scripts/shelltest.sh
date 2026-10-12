@@ -25,8 +25,9 @@ shift 3
 
 # The session runs in /bin/sh, which the kernel starts after the boot: a
 # word without a slash is a program in /bin, `cd` and `exit` are built in.
-# The last entries end the shell with Ctrl+D and run one command in the
-# kernel terminal that takes over. An entry with `|` types more lines after the command,
+# The last entries end the shell with Ctrl+D, run one command in the kernel
+# terminal that takes over, start a second shell from it and end that one
+# with `exit 3`. An entry with `|` types more lines after the command,
 # for a program that reads the keyboard: each part is typed and followed by
 # Enter, and `^D` is Ctrl+D (the end of input).
 commands=(
@@ -66,6 +67,12 @@ commands=(
   "/bin/nope"
   "^D"
   "pwd"
+  "sh"
+  "mkdir /m"
+  "touch /m/x /m/y"
+  "rm /m/x /m/nope /m/y"
+  "rmdir /m"
+  "exit 3"
 )
 
 # What the serial log must show after the keyboard line. A line that starts
@@ -188,7 +195,19 @@ S0
 shell: /bin/sh ended, the kernel terminal takes over
 > pwd
 /
-S0'
+S0
+> sh
+> mkdir /m
+S0
+> touch /m/x /m/y
+S0
+> rm /m/x /m/nope /m/y
+rm: cannot remove '"'"'/m/nope'"'"': No such file or directory
+S1
+> rmdir /m
+S0
+> exit 3
+S3'
 
 # Waits until <serial-log> has at least $1 lines that start with the prompt.
 wait_for_prompts() {

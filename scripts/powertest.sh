@@ -87,6 +87,13 @@ for line in 'power: rebooting' 'power: shutting down'; do
   fi
 done
 
+# Nothing but blank lines may follow `power: shutting down`: the kernel must
+# not hand a failure back to `shutdown` while the machine turns off.
+if ! awk '{ sub(/\r$/, "") } /power: shutting down/ { seen = 1; next } seen && NF { exit 1 }' "$serial_log"; then
+  echo "powertest: output after 'power: shutting down': the power-off call returned" >&2
+  exit 1
+fi
+
 boots=$(grep -c 'IgniOS booting' "$serial_log") || boots=0
 
 if [ "$boots" -ne 2 ]; then

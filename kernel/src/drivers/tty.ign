@@ -33,7 +33,11 @@
 //! buffers.
 //!
 //! Only one reader edits a line at a time; another one waits until it is
-//! done.
+//! done. Each reader edits into a buffer of its own, so it cannot change a
+//! line another reader is still taking in pieces. Two programs reading the
+//! keyboard at once each get whole lines in turn; only when a reader's own
+//! new line arrives while another reader still holds a remainder, and the
+//! new line is longer than its buffer, is the rest of the new line dropped.
 
 import Arch from "@arch";
 import Lib from "@lib";
@@ -144,7 +148,19 @@ namespace Drivers::Tty {
     }
 
     if (TtyState::position >= TtyState::length) {
-      TtyState::length = readLine(&mut TtyState::line as *mut u8, LINE_CAPACITY);
+      // Edit into a buffer of this reader: another reader may wait in
+      // `readLine` meanwhile, and the shared line must not change under it.
+      let mut fresh: u8[256];
+      let length: u64 = readLine(&mut fresh as *mut u8, LINE_CAPACITY);
+
+      if (TtyState::position < TtyState::length) {
+        Lib::Mem::copy(buffer, (&mut fresh as *u8), length < count ? length : count);
+        *done = length < count ? length : count;
+        return;
+      }
+
+      Lib::Mem::copy(&mut TtyState::line as *mut u8, &mut fresh as *u8, length);
+      TtyState::length = length;
       TtyState::position = 0;
     }
 
