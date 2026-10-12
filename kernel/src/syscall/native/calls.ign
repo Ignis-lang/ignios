@@ -158,6 +158,8 @@ namespace Syscall::Native {
       status = map(first, second, third, fourth, fifth, valuePointer);
     } else if (operation == Operation::UNMAP) {
       status = Syscall::Core::unmap(first, second);
+    } else if (operation == Operation::UNLINK || operation == Operation::REMOVE_DIRECTORY) {
+      status = remove(first, second, third, operation == Operation::REMOVE_DIRECTORY);
     } else if (operation == Operation::GET_PID) {
       value = Proc::Process::currentId();
     } else if (operation == Operation::YIELD) {
@@ -313,6 +315,18 @@ namespace Syscall::Native {
     let mut created: *mut Fs::Node = null;
 
     return Fs::Vfs::create(parent, (pathBuffer() as *u8) + nameOffset, nameLength, Fs::Vfs::DIRECTORY, mode & Fs::Files::PERMISSION_MASK, &mut created as *mut *mut Fs::Node);
+  }
+
+  /// `UNLINK` and `REMOVE_DIRECTORY(directory, path, length)`.
+  function remove(directory: u64, path: u64, length: u64, isDirectory: boolean): u64 {
+    let mut base: *mut Fs::Node = null;
+    let status: u64 = resolve(Proc::Process::currentSlot(), directory, path, length, &mut base as *mut *mut Fs::Node);
+
+    if (status != Fs::Vfs::OK) {
+      return status;
+    }
+
+    return Fs::Files::remove(base, pathBuffer() as *u8, length, isDirectory);
   }
 
   /// `MAP(length, protection, flags, descriptor, offset)`.

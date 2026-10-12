@@ -405,6 +405,73 @@ namespace Fs::Files {
     return Fs::Vfs::OK;
   }
 
+  /// Removes the file (or, with `directory`, the empty directory) that the
+  /// `length` bytes of `path` name, relative to `base`. Returns the lookup
+  /// codes, `INVALID` for a path that ends in `.` or `..` or is `/`,
+  /// `IS_DIRECTORY` when removing a directory as a file, `NOT_DIRECTORY`
+  /// when removing a file as a directory or a file named with a trailing
+  /// `/`, `NOT_EMPTY`, and `BUSY` when a descriptor has the node open: an
+  /// open file points at its node, which must stay alive.
+  function remove(base: *mut Fs::Node, path: *u8, length: u64, directory: boolean): u64 {
+    let mut parent: *mut Fs::Node = null;
+    let mut nameOffset: u64 = 0;
+    let mut nameLength: u64 = 0;
+    let status: u64 = Fs::Vfs::lookupParent(base, path, length, &mut parent as *mut *mut Fs::Node, &mut nameOffset as *mut u64, &mut nameLength as *mut u64);
+
+    if (status != Fs::Vfs::OK) {
+      return status;
+    }
+
+    let node: *mut Fs::Node = Fs::Vfs::findChild(parent, path + nameOffset, nameLength);
+
+    if (node == null) {
+      return Fs::Vfs::NOT_FOUND;
+    }
+
+    let isDirectory: boolean = (*node).kind == Fs::Vfs::DIRECTORY;
+
+    if (directory && !isDirectory) {
+      return Fs::Vfs::NOT_DIRECTORY;
+    }
+
+    if (!directory && isDirectory) {
+      return Fs::Vfs::IS_DIRECTORY;
+    }
+
+    if (!isDirectory && *(path + length - 1) == SLASH) {
+      return Fs::Vfs::NOT_DIRECTORY;
+    }
+
+    if (isOpen(node)) {
+      return Fs::Vfs::BUSY;
+    }
+
+    return Fs::Vfs::remove(node);
+  }
+
+  /// True when a descriptor of any process points at `node`.
+  function isOpen(node: *mut Fs::Node): boolean {
+    let mut table: u64 = 0;
+
+    while (table < MAX_TABLES) {
+      let mut descriptor: u64 = 0;
+
+      while (descriptor < MAX_DESCRIPTORS) {
+        let file: *mut Fs::OpenFile = get(table, descriptor);
+
+        if (file != null && (*file).node == node) {
+          return true;
+        }
+
+        descriptor += 1;
+      }
+
+      table += 1;
+    }
+
+    return false;
+  }
+
   /// Finds the last component of `path` under its parent, or creates it as a
   /// regular file. `EXCLUSIVE` turns an existing name into `EXISTS`, and an
   /// existing directory is `IS_DIRECTORY`, as Linux's `open` with `O_CREAT`.

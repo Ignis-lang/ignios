@@ -1,0 +1,58 @@
+//!
+//! # rmdir
+//!
+//! `rmdir DIRECTORY...`: removes each empty directory.
+//!
+//! ## Behaviour
+//!
+//! | Case                       | Effect                                                   | Status |
+//! |----------------------------|----------------------------------------------------------|--------|
+//! | the directory is empty     | it is removed                                            | 0      |
+//! | it cannot be removed       | `rmdir: failed to remove 'PATH': REASON` on standard error, then the next one | 1 |
+//! | no arguments               | `rmdir: missing operand` on standard error                  | 1      |
+//!
+//! A directory with entries is `Directory not empty`, a file is `Not a
+//! directory`, and an open directory is `Device or resource busy`.
+
+import Args from "std::args";
+import Io from "std::io";
+import Sys from "std::sys";
+import _ from "std::panic";
+
+/// Removes `path`. Returns true on success.
+function removeOne(path: *u8): boolean {
+  let result: i64 = Sys::removeDirectory(path);
+
+  if (result < 0) {
+    Io::error("rmdir: failed to remove '");
+    Io::errorString(path);
+    Io::error("': ");
+    Io::error(Sys::errorText(result));
+    Io::error("\n");
+    return false;
+  }
+
+  return true;
+}
+
+/// Called by `_start` with argc and argv.
+@externName("ignis_main")
+function main(count: u64, values: *u64): u64 {
+  if (count < 2) {
+    Io::error("rmdir: missing operand\n");
+    return 1;
+  }
+
+  let mut status: u64 = 0;
+  let mut index: u64 = 1;
+
+  while (index < count) {
+    if (!removeOne(Args::get(values, index))) {
+      status = 1;
+    }
+
+    index += 1;
+  }
+
+  return status;
+}

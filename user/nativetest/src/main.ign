@@ -32,6 +32,7 @@
 //! | 97-98  | RDX comes back 0 from `CLOSE` and `YIELD` even when it went in as `0x1234`; call 512 is `NOT_SUPPORTED` |
 //! | 99     | `OPEN` of a path that crosses the user limit is `BAD_ADDRESS`        |
 //! | 100    | a path with a NUL byte in it (`/nt/x\0y`, length 7) is `INVALID`    |
+//! | 110-115 | `UNLINK` and `REMOVE_DIRECTORY`: a file, then `NOT_FOUND`; a directory as a file `IS_DIRECTORY`; a non-empty directory `NOT_EMPTY`; an open one `BUSY`; a file as a directory `NOT_DIRECTORY`; relative to a directory descriptor |
 //!
 //! The exit status is the number of the first check that failed, 0 when all
 //! passed. `Tests::User::runNative` runs it at boot and removes `/nt`.
@@ -327,6 +328,29 @@ function checkEdges(): void {
   expect(Sys::call4(Sys::MAKE_DIRECTORY, Sys::ROOT, buffer(), 7, 0x1ED), Sys::INVALID, 0, 100);
 }
 
+/// `UNLINK` and `REMOVE_DIRECTORY`.
+function checkRemove(): void {
+  let made: u64 = succeed(open("/nt/gone", 8, Sys::OPEN_WRITE | Sys::OPEN_CREATE), 110);
+
+  succeed(Sys::call1(Sys::CLOSE, made), 110);
+  expect(Sys::call3(Sys::UNLINK, Sys::ROOT, at("/nt/gone"), 8), Sys::OK, 0, 110);
+  expect(Sys::call3(Sys::UNLINK, Sys::ROOT, at("/nt/gone"), 8), Sys::NOT_FOUND, 0, 111);
+  expect(Sys::call3(Sys::UNLINK, Sys::ROOT, at("/nt"), 3), Sys::IS_DIRECTORY, 0, 112);
+  expect(Sys::call3(Sys::REMOVE_DIRECTORY, Sys::ROOT, at("/nt"), 3), Sys::NOT_EMPTY, 0, 113);
+
+  let directory: u64 = succeed(open("/nt", 3, Sys::OPEN_READ | Sys::OPEN_DIRECTORY), 114);
+
+  expect(Sys::call3(Sys::REMOVE_DIRECTORY, Sys::ROOT, at("/nt/a"), 5), Sys::NOT_DIRECTORY, 0, 114);
+  succeed(Sys::call4(Sys::MAKE_DIRECTORY, directory, at("e"), 1, 0x1ED), 115);
+
+  let inner: u64 = succeed(open("/nt/e", 5, Sys::OPEN_READ | Sys::OPEN_DIRECTORY), 115);
+
+  expect(Sys::call3(Sys::REMOVE_DIRECTORY, directory, at("e"), 1), Sys::BUSY, 0, 115);
+  succeed(Sys::call1(Sys::CLOSE, inner), 115);
+  expect(Sys::call3(Sys::REMOVE_DIRECTORY, directory, at("e"), 1), Sys::OK, 0, 115);
+  succeed(Sys::call1(Sys::CLOSE, directory), 115);
+}
+
 /// Called by `_start` with argc and argv.
 @externName("ignis_main")
 function main(count: u64, values: *u64): u64 {
@@ -338,6 +362,7 @@ function main(count: u64, values: *u64): u64 {
   checkMapping();
   checkScheduling();
   checkEdges();
+  checkRemove();
 
   Io::print("nativetest: every native call, its arguments and its status codes behave as specified\n");
 

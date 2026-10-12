@@ -42,6 +42,13 @@ commands=(
   "mkdir"
   "run ls /dev"
   "ls /etc/motd"
+  "rm /tmp/a"
+  "ls /tmp"
+  "rm /tmp"
+  "rmdir /tmp"
+  "rm /tmp/b"
+  "rmdir /tmp"
+  "ls /"
   "nope"
 )
 
@@ -69,6 +76,8 @@ mkdir
 mmtest
 nativetest
 reboot
+rm
+rmdir
 shutdown
 touch
 S0
@@ -109,6 +118,26 @@ console
 S0
 > ls /etc/motd
 /etc/motd
+S0
+> rm /tmp/a
+S0
+> ls /tmp
+b
+S0
+> rm /tmp
+rm: cannot remove '"'"'/tmp'"'"': Is a directory
+S1
+> rmdir /tmp
+rmdir: failed to remove '"'"'/tmp'"'"': Directory not empty
+S1
+> rm /tmp/b
+S0
+> rmdir /tmp
+S0
+> ls /
+bin
+etc
+dev
 S0
 > nope
 run: /bin/nope: no such file or directory'

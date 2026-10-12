@@ -82,6 +82,9 @@ namespace Syscall::Linux {
   /// `newfstatat`, number 262.
   const NUMBER_NEWFSTATAT: u64 = 262;
 
+  /// `unlinkat`, number 263.
+  const NUMBER_UNLINKAT: u64 = 263;
+
   /// Fills the table of the Linux ABI.
   function initialize(): void {
     let table: *mut u8 = tableBase();
@@ -98,6 +101,7 @@ namespace Syscall::Linux {
     *(table + NUMBER_OPENAT) = Operation::OPEN;
     *(table + NUMBER_MKDIRAT) = Operation::MAKE_DIRECTORY;
     *(table + NUMBER_NEWFSTATAT) = Operation::STAT_AT;
+    *(table + NUMBER_UNLINKAT) = Operation::UNLINK;
     *(table + NUMBER_SCHED_YIELD) = Operation::YIELD;
     *(table + NUMBER_NANOSLEEP) = Operation::SLEEP;
     *(table + NUMBER_GETPID) = Operation::GET_PID;

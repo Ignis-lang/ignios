@@ -59,6 +59,7 @@
 //! | `NOT_EMPTY`     | removing a directory that has children     | `ENOTEMPTY` |
 //! | `INVALID`       | a malformed request (an empty name, `..`)  | `EINVAL`  |
 //! | `TOO_LARGE`     | a file would grow past `MAX_FILE_SIZE` (64 MiB) | `EFBIG` |
+//! | `BUSY`          | removing a node that is open or in use     | `EBUSY`   |
 //!
 //! The VFS has no locks. Every caller runs with interrupts off on the only
 //! processor (the system call handlers do), so no two operations overlap.
@@ -169,6 +170,9 @@ namespace Fs::Vfs {
   /// The file would grow past `MAX_FILE_SIZE`.
   const TOO_LARGE: u64 = 9;
 
+  /// The node is in use: open by a descriptor, or the root.
+  const BUSY: u64 = 10;
+
   /// The largest file: 64 MiB. Files live on the kernel heap, which holds at
   /// most 256 MiB, and a write or a `truncate` past this is `TOO_LARGE`
   /// before anything is allocated.
@@ -240,6 +244,7 @@ namespace Fs::Vfs {
       NOT_EMPTY -> "directory not empty",
       INVALID -> "invalid argument",
       TOO_LARGE -> "file too large",
+      BUSY -> "device or resource busy",
       _ -> "unknown error",
     };
   }

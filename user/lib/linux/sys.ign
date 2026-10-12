@@ -97,6 +97,12 @@ export namespace Sys {
   /// Linux system call number 262.
   const NEWFSTATAT: u64 = 262;
 
+  /// Linux system call number 263.
+  const UNLINKAT: u64 = 263;
+
+  /// `unlinkat` flag: remove a directory.
+  const AT_REMOVEDIR: u64 = 0x200;
+
   /// Linux system call number 24.
   const SCHED_YIELD: u64 = 24;
 
@@ -191,6 +197,9 @@ export namespace Sys {
   /// Permission denied.
   const EACCES: i64 = 13;
 
+  /// Device or resource busy.
+  const EBUSY: i64 = 16;
+
   /// File exists.
   const EEXIST: i64 = 17;
 
@@ -202,6 +211,9 @@ export namespace Sys {
 
   /// Is a directory.
   const EISDIR: i64 = 21;
+
+  /// Directory not empty.
+  const ENOTEMPTY: i64 = 39;
 
   /// File too large.
   const EFBIG: i64 = 27;
@@ -468,6 +480,21 @@ export namespace Sys {
     (*result).mode = mode & 0x1FF;
   }
 
+  /// `unlinkat(dirfd, path, flags)`: 0 or -errno.
+  function unlinkAt(directory: u64, path: *u8, flags: u64): i64 {
+    return call3(UNLINKAT, directory, @integerFromPointer(path), flags);
+  }
+
+  /// Removes the file at the NUL-terminated `path`.
+  function unlink(path: *u8): i64 {
+    return unlinkAt(AT_FDCWD, path, 0);
+  }
+
+  /// Removes the empty directory at the NUL-terminated `path`.
+  function removeDirectory(path: *u8): i64 {
+    return unlinkAt(AT_FDCWD, path, AT_REMOVEDIR);
+  }
+
   /// the errors the file calls return.
   function errorText(result: i64): str {
     return match (0 - result) {
@@ -475,6 +502,8 @@ export namespace Sys {
       ENOMEM -> "Cannot allocate memory",
       EACCES -> "Permission denied",
       ENODEV -> "No such device",
+      EBUSY -> "Device or resource busy",
+      ENOTEMPTY -> "Directory not empty",
       EBADF -> "Bad file descriptor",
       EFAULT -> "Bad address",
       EEXIST -> "File exists",

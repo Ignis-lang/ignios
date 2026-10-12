@@ -22,6 +22,7 @@
 //! | 120-122 | a write at 2^62 or at 64 MiB is `-EFBIG`, one whose end overflows is `-EINVAL`; the file stays empty |
 //! | 123-124 | a bad buffer is `-EFAULT` for `read`, `write`, `fstat`, `newfstatat`, `getdents64`; a 48-byte `getdents64` buffer takes `.` and `..` |
 //! | 125    | `O_CREAT` on an existing directory is `-EISDIR`                      |
+//! | 130-138 | `unlinkat`: a file, then `-ENOENT`; a directory without `AT_REMOVEDIR` `-EISDIR`; a non-empty one `-ENOTEMPTY`; an open one `-EBUSY`, then 0 once closed; a file with `AT_REMOVEDIR` `-ENOTDIR`; `/` and an unknown flag `-EINVAL`; a file named with a trailing `/` `-ENOTDIR`; an open file `-EBUSY` |
 //!
 //! The exit status is the number of the first check that failed, 0 when all
 //! passed. `Tests::User::runFiles` runs it at boot and then removes the
@@ -340,6 +341,33 @@ function checkBuffers(): void {
   expect(Sys::close(directory as u64), 0, 124);
 }
 
+/// `unlinkat` with and without `AT_REMOVEDIR`, and its errors.
+function checkRemove(): void {
+  let made: i64 = Sys::open("/fstest/gone" as *u8, Sys::O_CREAT | Sys::O_WRONLY, 0x1A4);
+
+  expect(Sys::close(made as u64), 0, 130);
+  expect(Sys::unlink("/fstest/gone" as *u8), 0, 130);
+  expect(Sys::unlink("/fstest/gone" as *u8), 0 - Sys::ENOENT, 131);
+  expect(Sys::unlink("/fstest" as *u8), 0 - Sys::EISDIR, 132);
+  expect(Sys::removeDirectory("/fstest" as *u8), 0 - Sys::ENOTEMPTY, 133);
+  expect(Sys::makeDirectory("/fstest/d" as *u8, 0x1ED), 0, 134);
+
+  let directory: i64 = Sys::open("/fstest/d" as *u8, Sys::O_RDONLY | Sys::O_DIRECTORY, 0);
+
+  expect(Sys::removeDirectory("/fstest/d" as *u8), 0 - Sys::EBUSY, 134);
+  expect(Sys::close(directory as u64), 0, 134);
+  expect(Sys::removeDirectory("/fstest/d" as *u8), 0, 134);
+  expect(Sys::removeDirectory("/fstest/a" as *u8), 0 - Sys::ENOTDIR, 135);
+  expect(Sys::removeDirectory("/" as *u8), 0 - Sys::EINVAL, 136);
+  expect(Sys::unlinkAt(Sys::AT_FDCWD, "/fstest/a" as *u8, 1), 0 - Sys::EINVAL, 136);
+  expect(Sys::unlink("/fstest/a/" as *u8), 0 - Sys::ENOTDIR, 137);
+
+  let open: i64 = Sys::open("/fstest/a" as *u8, Sys::O_RDONLY, 0);
+
+  expect(Sys::unlink("/fstest/a" as *u8), 0 - Sys::EBUSY, 138);
+  expect(Sys::close(open as u64), 0, 138);
+}
+
 /// `O_CREAT` on an existing directory is `-EISDIR`, as on Linux.
 function checkCreateDirectory(): void {
   expect(Sys::open("/etc" as *u8, Sys::O_CREAT | Sys::O_RDONLY, 0x1A4), 0 - Sys::EISDIR, 125);
@@ -364,6 +392,7 @@ function main(count: u64, values: *u64): u64 {
   checkHugeOffsets();
   checkBuffers();
   checkCreateDirectory();
+  checkRemove();
 
   Io::print("fstest: openat, read, write, lseek, close, fstat, newfstatat, getdents64 and mkdirat behave as on Linux\n");
 

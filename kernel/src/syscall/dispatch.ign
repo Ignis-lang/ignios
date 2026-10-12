@@ -114,6 +114,8 @@ namespace Syscall {
       (*frame).rax = Linux::munmap(first, second);
     } else if (operation == Operation::POWER) {
       (*frame).rax = Linux::reboot(first, second, third);
+    } else if (operation == Operation::UNLINK) {
+      (*frame).rax = Linux::unlinkAt(first, second, third);
     } else if (operation == Operation::GET_PID) {
       (*frame).rax = Proc::Process::currentId();
     } else if (operation == Operation::YIELD) {

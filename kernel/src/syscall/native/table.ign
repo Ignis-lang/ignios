@@ -33,6 +33,8 @@
 //! | 13     | `YIELD`          |                                             | 0              |
 //! | 14     | `SLEEP`          | nanoseconds                                 | 0              |
 //! | 15     | `POWER`          | action: 1 reboot, 2 power off               | (no return on success) |
+//! | 16     | `UNLINK`         | directory, path, path length                | 0              |
+//! | 17     | `REMOVE_DIRECTORY` | directory, path, path length              | 0              |
 //!
 //! Paths are a pointer and a length, not NUL-terminated strings. The
 //! directory argument is a descriptor open on a directory, or `ROOT` (all
@@ -99,6 +101,12 @@ namespace Syscall::Native {
   /// Reboot or power off.
   const NUMBER_POWER: u64 = 15;
 
+  /// Remove a file.
+  const NUMBER_UNLINK: u64 = 16;
+
+  /// Remove an empty directory.
+  const NUMBER_REMOVE_DIRECTORY: u64 = 17;
+
   /// Fills the table.
   function initialize(): void {
     let table: *mut u8 = tableBase();
@@ -119,6 +127,8 @@ namespace Syscall::Native {
     *(table + NUMBER_YIELD) = Operation::YIELD;
     *(table + NUMBER_SLEEP) = Operation::SLEEP;
     *(table + NUMBER_POWER) = Operation::POWER;
+    *(table + NUMBER_UNLINK) = Operation::UNLINK;
+    *(table + NUMBER_REMOVE_DIRECTORY) = Operation::REMOVE_DIRECTORY;
   }
 
   /// The first byte of the table.

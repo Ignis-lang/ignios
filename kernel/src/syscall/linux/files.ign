@@ -2,7 +2,7 @@
 //! # Linux File System Calls
 //!
 //! `read`, `write`, `openat`, `close`, `lseek`, `fstat`, `newfstatat`,
-//! `getdents64` and `mkdirat`, with Linux numbers, flags, structures and
+//! `getdents64`, `mkdirat` and `unlinkat`, with Linux numbers, flags, structures and
 //! errno values, on top of `Fs::Files` and `Fs::Vfs`.
 //!
 //! ## Overview
@@ -97,6 +97,9 @@ record LinuxFilesState {
 namespace Syscall::Linux {
   /// `dirfd` of the `*at` calls meaning the current directory: -100.
   const AT_FDCWD: u64 = 0xFFFFFFFFFFFFFF9C;
+
+  /// `unlinkat` flag: remove a directory.
+  const AT_REMOVEDIR: u64 = 0x200;
 
   /// `newfstatat` flag: an empty path means `dirfd` itself.
   const AT_EMPTY_PATH: u64 = 0x1000;
@@ -344,6 +347,32 @@ namespace Syscall::Linux {
     }
 
     return written;
+  }
+
+  /// `unlinkat(dirfd, path, flags)`: removes a file, or with `AT_REMOVEDIR`
+  /// an empty directory. Another flag bit is `-EINVAL`; a file or directory
+  /// that is open is `-EBUSY`.
+  function unlinkAt(directory: u64, path: u64, flags: u64): u64 {
+    if ((flags & ~AT_REMOVEDIR) != 0) {
+      return Linux::failure(Linux::EINVAL);
+    }
+
+    let table: u64 = Proc::Process::currentSlot();
+    let mut base: *mut Fs::Node = null;
+    let mut length: u64 = 0;
+    let status: u64 = resolve(table, directory, path, &mut base as *mut *mut Fs::Node, &mut length as *mut u64);
+
+    if (status != Fs::Vfs::OK) {
+      return Linux::failureFor(status);
+    }
+
+    if (length == 0) {
+      return Linux::failure(Linux::ENOENT);
+    }
+
+    let removed: u64 = Fs::Files::remove(base, pathBuffer() as *u8, length, (flags & AT_REMOVEDIR) != 0);
+
+    return removed == Fs::Vfs::OK ? 0 : Linux::failureFor(removed);
   }
 
   /// `mkdirat(dirfd, path, mode)`.

@@ -1,0 +1,58 @@
+//!
+//! # rm
+//!
+//! `rm FILE...`: removes each file.
+//!
+//! ## Behaviour
+//!
+//! | Case                       | Effect                                                   | Status |
+//! |----------------------------|----------------------------------------------------------|--------|
+//! | the file exists            | it is removed                                            | 0      |
+//! | it cannot be removed       | `rm: cannot remove 'PATH': REASON` on standard error, then the next one | 1 |
+//! | no arguments               | `rm: missing operand` on standard error                  | 1      |
+//!
+//! A directory is `Is a directory`: there is no `-r`; use `rmdir`. A file
+//! that a process has open is `Device or resource busy`.
+
+import Args from "std::args";
+import Io from "std::io";
+import Sys from "std::sys";
+import _ from "std::panic";
+
+/// Removes `path`. Returns true on success.
+function removeOne(path: *u8): boolean {
+  let result: i64 = Sys::unlink(path);
+
+  if (result < 0) {
+    Io::error("rm: cannot remove '");
+    Io::errorString(path);
+    Io::error("': ");
+    Io::error(Sys::errorText(result));
+    Io::error("\n");
+    return false;
+  }
+
+  return true;
+}
+
+/// Called by `_start` with argc and argv.
+@externName("ignis_main")
+function main(count: u64, values: *u64): u64 {
+  if (count < 2) {
+    Io::error("rm: missing operand\n");
+    return 1;
+  }
+
+  let mut status: u64 = 0;
+  let mut index: u64 = 1;
+
+  while (index < count) {
+    if (!removeOne(Args::get(values, index))) {
+      status = 1;
+    }
+
+    index += 1;
+  }
+
+  return status;
+}

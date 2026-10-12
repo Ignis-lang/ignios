@@ -119,6 +119,12 @@ export namespace Sys {
   /// Reboot or power off.
   const POWER: u64 = 15;
 
+  /// Remove a file.
+  const UNLINK: u64 = 16;
+
+  /// Remove an empty directory.
+  const REMOVE_DIRECTORY: u64 = 17;
+
   /// `POWER` action: reset the machine.
   const POWER_REBOOT: u64 = 1;
 
@@ -269,6 +275,9 @@ export namespace Sys {
   /// The descriptor lacks the access.
   const ACCESS: u64 = 16;
 
+  /// The file or directory is in use.
+  const BUSY: u64 = 17;
+
   /// The portable error names, as in the Linux flavour, with native values.
   const ENOENT: i64 = 1;
 
@@ -313,6 +322,12 @@ export namespace Sys {
 
   /// Access.
   const EACCES: i64 = 16;
+
+  /// In use.
+  const EBUSY: i64 = 17;
+
+  /// Directory not empty.
+  const ENOTEMPTY: i64 = 7;
 
   /// A call with no arguments.
   function call0(number: u64): Sys::Result {
@@ -492,6 +507,16 @@ export namespace Sys {
     return portable(call1(SLEEP, (seconds as u64) * 1000000000 + (nanoseconds as u64)));
   }
 
+  /// `UNLINK(ROOT, path, length)` with a NUL-terminated path.
+  function unlink(path: *u8): i64 {
+    return portable(call3(UNLINK, ROOT, @integerFromPointer(path), length(path)));
+  }
+
+  /// `REMOVE_DIRECTORY(ROOT, path, length)` with a NUL-terminated path.
+  function removeDirectory(path: *u8): i64 {
+    return portable(call3(REMOVE_DIRECTORY, ROOT, @integerFromPointer(path), length(path)));
+  }
+
   /// Resets the machine. Returns only on failure, with the negated status.
   function reboot(): i64 {
     return portable(call1(POWER, POWER_REBOOT));
@@ -528,6 +553,7 @@ export namespace Sys {
       NOT_SUPPORTED -> "Function not implemented",
       NO_DEVICE -> "No such device",
       ACCESS -> "Permission denied",
+      BUSY -> "Device or resource busy",
       _ -> "Unknown error",
     };
   }

@@ -67,4 +67,10 @@ namespace Syscall::Operation {
 
   /// Power the machine off or reset it.
   const POWER: u8 = 16;
+
+  /// Remove a file.
+  const UNLINK: u8 = 17;
+
+  /// Remove an empty directory.
+  const REMOVE_DIRECTORY: u8 = 18;
 }

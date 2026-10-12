@@ -36,6 +36,9 @@ namespace Syscall::Linux {
   /// Bad address (14): a user pointer failed validation.
   const EFAULT: i64 = 14;
 
+  /// Device or resource busy (16): removing something in use.
+  const EBUSY: i64 = 16;
+
   /// File exists (17).
   const EEXIST: i64 = 17;
 
@@ -87,6 +90,7 @@ namespace Syscall::Linux {
       Fs::Vfs::NO_MEMORY -> ENOMEM,
       Fs::Vfs::NOT_EMPTY -> ENOTEMPTY,
       Fs::Vfs::TOO_LARGE -> EFBIG,
+      Fs::Vfs::BUSY -> EBUSY,
       Fs::Files::BAD_DESCRIPTOR -> EBADF,
       Fs::Files::TOO_MANY_OPEN -> EMFILE,
       Fs::Files::NOT_SEEKABLE -> ESPIPE,

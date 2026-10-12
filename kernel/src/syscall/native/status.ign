@@ -30,6 +30,7 @@
 //! | 14   | `NOT_SUPPORTED`  | the call number is not part of the ABI               |
 //! | 15   | `NO_DEVICE`      | mapping something that is not a regular file         |
 //! | 16   | `ACCESS`         | the descriptor lacks the access the call needs       |
+//! | 17   | `BUSY`           | the file or directory is in use                      |
 //!
 //! `statusFor` maps the kernel's own codes (`Fs::Vfs`, `Fs::Files`,
 //! `Syscall::Core`) one by one. The kernel's numbering may change; this table
@@ -91,6 +92,9 @@ namespace Syscall::Native {
   /// The descriptor lacks the access the call needs.
   const ACCESS: u64 = 16;
 
+  /// The file or directory is in use: open, or a current directory.
+  const BUSY: u64 = 17;
+
   /// The native code of a kernel status code. Anything the table does not
   /// name is `INVALID`.
   function statusFor(status: u64): u64 {
@@ -104,6 +108,7 @@ namespace Syscall::Native {
       Fs::Vfs::NO_MEMORY -> NO_MEMORY,
       Fs::Vfs::NOT_EMPTY -> NOT_EMPTY,
       Fs::Vfs::TOO_LARGE -> TOO_LARGE,
+      Fs::Vfs::BUSY -> BUSY,
       Fs::Files::BAD_DESCRIPTOR -> BAD_DESCRIPTOR,
       Fs::Files::TOO_MANY_OPEN -> TOO_MANY_OPEN,
       Fs::Files::NOT_SEEKABLE -> NOT_SEEKABLE,
