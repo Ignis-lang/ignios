@@ -127,7 +127,7 @@ record ProcessEntry {
 /// The process table and the id counter.
 record ProcessState {
   /// The process slots.
-  static mut table: ProcessEntry[8];
+  static mut table: ProcessEntry[64];
 
   /// The id the next process gets.
   static mut nextId: u64;
@@ -136,7 +136,7 @@ record ProcessState {
 /// The process API.
 namespace Proc::Process {
   /// Size of the process table.
-  const MAX_PROCESSES: u64 = 8;
+  const MAX_PROCESSES: u64 = 64;
 
   /// Returned instead of a process id or a slot when there is none.
   const NO_PROCESS: u64 = 0xFFFFFFFFFFFFFFFF;
@@ -548,6 +548,7 @@ namespace Proc::Process {
     (*process).status = status;
     (*process).state = (*process).detached ? FREE : EXITED;
     Fs::Files::closeAll(slot);
+    Proc::Memory::reset(slot);
     releaseChildren((*process).id);
     wakeParent((*process).parent);
 

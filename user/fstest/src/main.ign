@@ -17,7 +17,7 @@
 //! | 70-76  | `O_CREAT`, `O_EXCL`, `write`, `O_APPEND`, `O_TRUNC`, reading back what was written |
 //! | 80-85  | relative paths from a directory descriptor, `newfstatat`, `AT_EMPTY_PATH`, an empty path `-ENOENT` |
 //! | 90-95  | `getdents64` lists `.`, `..`, `a` and `b` with their types, then 0; a small buffer is `-EINVAL`; a file is `-ENOTDIR` |
-//! | 100    | 16 descriptors per process, then `-EMFILE`                          |
+//! | 100    | 256 descriptors per process (the table grows from 16 as files are opened), then `-EMFILE` |
 //! | 110-111 | descriptors 0 to 2: `fstat` says character device `0x501` (reading descriptor 0 waits for the keyboard; `make shelltest` checks it) |
 //! | 120-122 | a write at 2^62 or at 64 MiB is `-EFBIG`, one whose end overflows is `-EINVAL`; the file stays empty |
 //! | 123-124 | a bad buffer is `-EFAULT` for `read`, `write`, `fstat`, `newfstatat`, `getdents64`; a 48-byte `getdents64` buffer takes `.` and `..` |
@@ -64,7 +64,7 @@ const DT_DIR: u8 = 4;
 const DT_REG: u8 = 8;
 
 /// Descriptors a process can hold.
-const MAX_DESCRIPTORS: u64 = 16;
+const MAX_DESCRIPTORS: u64 = 256;
 
 /// What the checks share.
 record State {
@@ -286,8 +286,8 @@ function checkEntries(total: u64): void {
   expect(count as i64, 4, 91);
 }
 
-/// The descriptor limit: 13 more open files fill the table, the next one is
-/// `-EMFILE`.
+/// The descriptor limit: 253 more open files fill the table, which grows
+/// from 16 entries on the way, and the next one is `-EMFILE`.
 function checkLimit(): void {
   let mut opened: u64 = 3;
 

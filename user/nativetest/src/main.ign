@@ -34,7 +34,7 @@
 //! | 100    | a path with a NUL byte in it (`/nt/x\0y`, length 7) is `INVALID`    |
 //! | 120-125 | `CURRENT_DIRECTORY` is `/`; `CHANGE_DIRECTORY` to `/nt`, then paths relative to `CURRENT` start there; the current directory is `BUSY`; a file is `NOT_DIRECTORY`; a buffer too small is `INVALID` |
 //! | 130-137 | `SPAWN` of `/bin/pwd` and `WAIT` for its status 0; a second `WAIT` is `NOT_FOUND`; waiting for itself is `INVALID`; a missing program `NOT_FOUND`, a directory `IS_DIRECTORY`, a text file `INVALID`; arguments that do not match their count `INVALID`; a bad argument pointer `BAD_ADDRESS`; the child starts in the parent's current directory (`rmdir sub` from `/nt` removes `/nt/sub`) |
-//! | 200-206 | `POWER` with an unknown action is `INVALID`; `WAIT` for an id that never existed is `NOT_FOUND`; an argument block with an empty string is accepted; a child's exit status 1 comes back; 7 children fill the process table, the 8th is refused, and after waiting starting works again; `CURRENT_DIRECTORY` into 1 byte; removing `.` or `/bin/..` is `INVALID` |
+//! | 200-206 | `POWER` with an unknown action is `INVALID`; `WAIT` for an id that never existed is `NOT_FOUND`; an argument block with an empty string is accepted; a child's exit status 1 comes back; the 64-slot process table fills up (63 children at boot), the next start is refused, and after waiting starting works again; `CURRENT_DIRECTORY` into 1 byte; removing `.` or `/bin/..` is `INVALID` |
 //! | 170-175 | `KILL` of an unknown id is `NOT_FOUND`; a child sleeping 10 s, a child spinning in ring 3, a child waiting for the keyboard and a child waiting for its own child each end with status 137 right away; a process that kills itself ends with 137 |
 //! | 160-163 | `WAIT_ANY`: no child is `NO_CHILD`; a bad status pointer `BAD_ADDRESS`; with a quick child and a napping one, it returns the quick one first and then blocks until the napping one ends, each with its id and status |
 //! | 140-143 | parents: a grandchild is not the caller's child (`NO_CHILD`); an orphan is freed when it ends (`NOT_FOUND` afterwards); a child that ended before its parent is freed with the parent (`NOT_FOUND`) |
@@ -403,7 +403,7 @@ function checkLimits(): void {
   let mut started: u64 = 0;
   let mut last: Sys::Result = Sys::Result { status: 0, value: 0 };
 
-  while (started < 12) {
+  while (started < 64) {
     last = spawn("/bin/pwd", 8, "pwd", 4, 1);
 
     if (last.status != Sys::OK) {
@@ -414,7 +414,9 @@ function checkLimits(): void {
     started += 1;
   }
 
-  require(started == 7 && last.status == Sys::INVALID, 204);
+  // 64 slots: this process holds one, and /bin/sh one more when it started
+  // this program; the kernel test runs it with no shell.
+  require(started >= 62 && started <= 63 && last.status == Sys::INVALID, 204);
 
   while (started > 0) {
     started -= 1;

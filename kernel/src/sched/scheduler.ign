@@ -69,7 +69,7 @@ import _ from "./thread";
 /// and have to be integer literals.
 record SchedulerState {
   /// The run queue: a ring buffer of slot numbers.
-  static mut queue: u64[16];
+  static mut queue: u64[72];
 
   /// Index in `queue` of the next thread to run.
   static mut queueHead: u64;

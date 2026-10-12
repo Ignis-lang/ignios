@@ -29,7 +29,7 @@
 //! | 40-42  | `munmap` of the middle page of three keeps the other two and their data |
 //! | 50-51  | a `PROT_READ` mapping reads as zeros; `read` into it is `-EFAULT`    |
 //! | 52     | `write` from a mapping works: the kernel sees it in the page tables |
-//! | 60-61  | the region table fills up: `-ENOMEM`; a split that needs one more entry is `-ENOMEM` and leaves the region whole; then every mapping is removed |
+//! | 60-61  | the region table grows from 32 entries and fills up at 1024: `-ENOMEM`; a split that needs one more entry is `-ENOMEM` and leaves the region whole; then every mapping is removed |
 //! | 70-72  | a private mapping of `/etc/motd`: the file, then zeros to the page end; a write changes the mapping, not the file |
 //! | 73     | an offset: page 1 of `/bin/hello` mapped equals page 1 read with `read` |
 //! | 74     | an offset past the end of the file maps zeros                       |
@@ -54,7 +54,7 @@ const MAP_BOTTOM: u64 = 0x0000100000000000;
 const MAP_TOP: u64 = 0x00007F0000000000;
 
 /// The most mappings `checkLimit` asks for.
-const LIMIT_ATTEMPTS: u64 = 40;
+const LIMIT_ATTEMPTS: u64 = 1100;
 
 /// The text of `initramfs/etc/motd`.
 const MOTD: str = "Welcome to IgniOS.\n";
@@ -68,7 +68,7 @@ const BLOCKS: u64 = 200;
 /// What the checks share.
 record State {
   /// The mappings of `checkLimit`.
-  static mut addresses: u64[40];
+  static mut addresses: u64[1100];
 
   /// The blocks of `checkAllocator`.
   static mut blocks: u64[200];
@@ -208,8 +208,8 @@ function checkProtection(): void {
   expect(Sys::munmap(writable as u64, PAGE), 0, 52);
 }
 
-/// The region table holds 32 regions: a 3-page one and 31 more, then
-/// `-ENOMEM`. A split that needs a 33rd entry is refused too.
+/// The region table holds 1024 regions: a 3-page one and 1023 more, then
+/// `-ENOMEM`. A split that needs a 1025th entry is refused too.
 function checkLimit(): void {
   let addresses: *mut u64 = &mut State::addresses as *mut u64;
   let three: i64 = Sys::mapAnonymous(3 * PAGE);
@@ -230,10 +230,10 @@ function checkLimit(): void {
   }
 
   expect(last, 0 - Sys::ENOMEM, 60);
-  expect(count as i64, 32, 60);
+  expect(count as i64, 1024, 60);
 
   // Unmapping the middle page of the 3-page region would split it in two,
-  // which needs a 33rd entry: refused, and the region is still whole.
+  // which needs a 1025th entry: refused, and the region is still whole.
   expect(Sys::munmap(three as u64 + PAGE, PAGE), 0 - Sys::ENOMEM, 61);
   poke(three as u64 + PAGE, 7);
   expect(Sys::munmap(three as u64, 3 * PAGE), 0, 61);

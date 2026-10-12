@@ -13,7 +13,8 @@
 //! they all name the console.
 //!
 //! ```text
-//!   descriptor table of a process (one per slot, MAX_DESCRIPTORS entries)
+//!   descriptor table of a process (one per slot, on the heap: 16 entries,
+//!   doubled when full, up to MAX_DESCRIPTORS = 256)
 //!     0 ──┐
 //!     1 ──┼──► OpenFile { CONSOLE, READ | WRITE, references 3 }
 //!     2 ──┘
@@ -51,13 +52,14 @@
 //! | Code             | Meaning                                         | Linux    |
 //! |------------------|-------------------------------------------------|----------|
 //! | `BAD_DESCRIPTOR` | the descriptor is not open, or lacks the access | `EBADF`  |
-//! | `TOO_MANY_OPEN`  | the table of the process is full                | `EMFILE` |
+//! | `TOO_MANY_OPEN`  | the table holds `MAX_DESCRIPTORS` and is full   | `EMFILE` |
 //! | `NOT_SEEKABLE`   | seeking the console                             | `ESPIPE` |
 //!
 //! Reading the console waits for a line typed at the keyboard
 //! (`Drivers::Tty`); Ctrl+D on an empty line reads as the end of input.
 
 import Drivers from "@drivers";
+import Lib from "@lib";
 import Mm from "@mm";
 import _ from "./vfs";
 
@@ -85,23 +87,35 @@ namespace Fs {
 
 /// The descriptor tables of every process slot.
 record FilesState {
-  /// `MAX_TABLES` tables of `MAX_DESCRIPTORS` entries each, the address of
-  /// an `Fs::OpenFile` or 0 for a free descriptor. Table `t`, descriptor `d`
-  /// is entry `t * MAX_DESCRIPTORS + d`. The size must be 8 * 16.
-  static mut tables: u64[128];
+  /// The table of each slot: the address of a heap array of `capacities[t]`
+  /// entries, each the address of an `Fs::OpenFile` or 0 for a free
+  /// descriptor; 0 when the slot has no table. The size must equal
+  /// `MAX_TABLES`.
+  static mut entries: u64[64];
+
+  /// The number of entries of each table: 0, then `INITIAL_DESCRIPTORS`,
+  /// doubled as needed up to `MAX_DESCRIPTORS`.
+  static mut capacities: u64[64];
 
   /// The current directory of each slot, the address of an `Fs::Node`; 0
   /// means the root.
-  static mut directories: u64[8];
+  static mut directories: u64[64];
 }
 
 /// The descriptor API.
 namespace Fs::Files {
   /// Tables, one per process slot (`Proc::Process::MAX_PROCESSES`).
-  const MAX_TABLES: u64 = 8;
+  const MAX_TABLES: u64 = 64;
 
-  /// Descriptors per process: 0 to 15.
-  const MAX_DESCRIPTORS: u64 = 16;
+  /// Descriptors per process: 0 to 255.
+  const MAX_DESCRIPTORS: u64 = 256;
+
+  /// The entries a new table starts with. It doubles when a process opens
+  /// more, up to `MAX_DESCRIPTORS`.
+  const INITIAL_DESCRIPTORS: u64 = 16;
+
+  /// `reserveDescriptor` found no memory to grow the table.
+  const NO_ROOM: u64 = 0xFFFFFFFFFFFFFFFF;
 
   /// An open file or directory of the tree.
   const NODE: u64 = 1;
@@ -161,6 +175,10 @@ namespace Fs::Files {
       return Fs::Vfs::INVALID;
     }
 
+    if (*capacityPointer(table) == 0 && !grow(table, INITIAL_DESCRIPTORS)) {
+      return Fs::Vfs::NO_MEMORY;
+    }
+
     let file: *mut Fs::OpenFile = newOpenFile(CONSOLE, null, READ | WRITE);
 
     if (file == null) {
@@ -186,15 +204,21 @@ namespace Fs::Files {
 
     let mut descriptor: u64 = 0;
 
-    while (descriptor < MAX_DESCRIPTORS) {
+    while (descriptor < *capacityPointer(table)) {
       close(table, descriptor);
       descriptor += 1;
+    }
+
+    if (*capacityPointer(table) > 0) {
+      Mm::Heap::free(@pointerFromInteger<*mut u8>(*arrayPointer(table)));
+      *arrayPointer(table) = 0;
+      *capacityPointer(table) = 0;
     }
   }
 
   /// The open file of `descriptor` in `table`, or null when it is not open.
   function get(table: u64, descriptor: u64): *mut Fs::OpenFile {
-    if (table >= MAX_TABLES || descriptor >= MAX_DESCRIPTORS) {
+    if (table >= MAX_TABLES || descriptor >= *capacityPointer(table)) {
       return null;
     }
 
@@ -241,10 +265,14 @@ namespace Fs::Files {
       return BAD_DESCRIPTOR;
     }
 
-    let free: u64 = freeDescriptor(table);
+    let free: u64 = reserveDescriptor(table);
 
     if (free == MAX_DESCRIPTORS) {
       return TOO_MANY_OPEN;
+    }
+
+    if (free == NO_ROOM) {
+      return Fs::Vfs::NO_MEMORY;
     }
 
     if (length == 0) {
@@ -473,7 +501,7 @@ namespace Fs::Files {
 
       let mut descriptor: u64 = 0;
 
-      while (descriptor < MAX_DESCRIPTORS) {
+      while (descriptor < *capacityPointer(table)) {
         let file: *mut Fs::OpenFile = get(table, descriptor);
 
         if (file != null && (*file).node == node) {
@@ -528,15 +556,55 @@ namespace Fs::Files {
   }
 
   /// The lowest free descriptor of `table`, or `MAX_DESCRIPTORS` when it is
-  /// full.
-  function freeDescriptor(table: u64): u64 {
+  /// The lowest free descriptor of `table`. When every entry is taken the
+  /// table doubles first, up to `MAX_DESCRIPTORS`. Returns `MAX_DESCRIPTORS`
+  /// when the table is at its limit and full, and `NO_ROOM` when the heap
+  /// cannot hold a bigger one.
+  function reserveDescriptor(table: u64): u64 {
+    let capacity: u64 = *capacityPointer(table);
     let mut descriptor: u64 = 0;
 
-    while (descriptor < MAX_DESCRIPTORS && *entryPointer(table, descriptor) != 0) {
+    while (descriptor < capacity && *entryPointer(table, descriptor) != 0) {
       descriptor += 1;
     }
 
-    return descriptor;
+    if (descriptor < capacity) {
+      return descriptor;
+    }
+
+    if (capacity >= MAX_DESCRIPTORS) {
+      return MAX_DESCRIPTORS;
+    }
+
+    if (!grow(table, capacity == 0 ? INITIAL_DESCRIPTORS : capacity * 2)) {
+      return NO_ROOM;
+    }
+
+    return capacity;
+  }
+
+  /// Gives `table` an array of `capacity` entries with the old entries copied
+  /// and the new ones free. Returns false, with the table unchanged, when the
+  /// heap is exhausted.
+  function grow(table: u64, capacity: u64): boolean {
+    let old: u64 = *capacityPointer(table);
+    let array: *mut u8 = Mm::Heap::allocate(capacity * 8, 8);
+
+    if (array == null) {
+      return false;
+    }
+
+    Lib::Mem::fill(array, 0, capacity * 8);
+
+    if (old > 0) {
+      Lib::Mem::copy(array, @pointerFromInteger<*u8>(*arrayPointer(table)), old * 8);
+      Mm::Heap::free(@pointerFromInteger<*mut u8>(*arrayPointer(table)));
+    }
+
+    *arrayPointer(table) = @integerFromPointer(array);
+    *capacityPointer(table) = capacity;
+
+    return true;
   }
 
   /// Allocates an open file with one reference and offset 0, or returns null.
@@ -617,6 +685,16 @@ namespace Fs::Files {
 
   /// The address of the entry of `descriptor` in `table`.
   function entryPointer(table: u64, descriptor: u64): *mut u64 {
-    return @pointerFromInteger<*mut u64>(@integerFromPointer(&mut FilesState::tables as *mut u64) + (table * MAX_DESCRIPTORS + descriptor) * 8);
+    return @pointerFromInteger<*mut u64>(*arrayPointer(table) + descriptor * 8);
+  }
+
+  /// The address of the array address of `table`.
+  function arrayPointer(table: u64): *mut u64 {
+    return @pointerFromInteger<*mut u64>(@integerFromPointer(&mut FilesState::entries as *mut u64) + table * 8);
+  }
+
+  /// The address of the entry count of `table`.
+  function capacityPointer(table: u64): *mut u64 {
+    return @pointerFromInteger<*mut u64>(@integerFromPointer(&mut FilesState::capacities as *mut u64) + table * 8);
   }
 }

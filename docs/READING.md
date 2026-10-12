@@ -212,7 +212,7 @@ Docs 14 and 15.
 
 **`mm/modules.ign` and `proc/programs.ign`.** `Mm::Modules` maps the Limine modules and finds one by its configuration string; the only one is the initramfs. `Proc::Programs::run` splits a command line into arguments, looks the program up in the file tree (`/bin/NAME` for a name without a slash) and starts it. `Proc::Process::buildStack` writes the Linux initial stack: argc, argv, an empty envp, the auxiliary vector and the strings, with the diagram in its comment.
 
-**`proc/memory.ign` and `syscall/linux/memory.ign`.** `mmap` and `munmap`. `Proc::Memory` keeps up to 32 regions per process, hands out addresses downwards from `0x7F0000000000`, allocates and zeroes every page at `mmap` time, and turns the protection into page table bits (W for write, NX unless execute, nothing mapped for `PROT_NONE`). `unmap` trims or splits regions and frees their pages; it never touches the ELF image or the stack. The Linux side checks the arguments (the header has the table), copies a file for a private file mapping, and refuses `MAP_SHARED`, `MAP_FIXED` and write with execute. `user/mmtest` checks all of it from ring 3. Doc 20.
+**`proc/memory.ign` and `syscall/linux/memory.ign`.** `mmap` and `munmap`. `Proc::Memory` keeps a heap table of regions per process that grows from 32 to 1024 entries, hands out addresses downwards from `0x7F0000000000`, allocates and zeroes every page at `mmap` time, and turns the protection into page table bits (W for write, NX unless execute, nothing mapped for `PROT_NONE`). `unmap` trims or splits regions and frees their pages; it never touches the ELF image or the stack. The Linux side checks the arguments (the header has the table), copies a file for a private file mapping, and refuses `MAP_SHARED`, `MAP_FIXED` and write with execute. `user/mmtest` checks all of it from ring 3. Doc 20.
 
 **`user/lib/common/alloc.ign`.** `std::alloc`, the heap of user programs: first-fit over 64 KiB arenas from `mmap`, an address-ordered free list that merges neighbours, and a mapping of its own for a block over 16 KiB, given back with `munmap`. It also defines the compiler's `@allocHandler` and `@freeHandler`, so closures that capture values work in a program that imports it. The header draws both block layouts.
 
@@ -377,9 +377,9 @@ vmm: self-test ok
 `Tests::Vmm::run` mapped a frame at a test address, wrote through it, read it through the direct map, and unmapped it.
 
 ```text
-modules: initramfs is /initramfs.tar, 204800 bytes at 0xffff80000a088000
+modules: initramfs is /initramfs.tar, 204800 bytes at 0xffff80000a09c000
 ```
-The Limine module from `boot/limine.conf`. `initramfs` is the `module_string`, `/initramfs.tar` the path. `Mm::Modules::initialize` mapped its pages read only. The address is in the direct map, so the file sits at physical `0xa088000`. Doc 15.
+The Limine module from `boot/limine.conf`. `initramfs` is the `module_string`, `/initramfs.tar` the path. `Mm::Modules::initialize` mapped its pages read only. The address is in the direct map, so the file sits at physical `0xa09c000`. Doc 15.
 
 ```text
 heap: self-test ok, 1092 KiB mapped, 0 bytes in use
@@ -387,16 +387,16 @@ heap: self-test ok, 1092 KiB mapped, 0 bytes in use
 `Tests::Heap::run` checked alignment, reuse, merging, growth (it allocates 1 MiB) and the compiler allocation handlers. 1092 KiB of heap pages stayed mapped and every block was freed. Doc 10.
 
 ```text
-initramfs: 204800 bytes, 15 files with 187267 bytes of data, 3 directories
+initramfs: 204800 bytes, 15 files with 191563 bytes of data, 3 directories
 initramfs: self-test ok, 6 malformed headers refused, 2 valid ones read, etc/motd read back
 ```
 `Fs::Initramfs::initialize` walked the archive: `etc/motd` and the fourteen programs in `bin` (`cat`, `fstest`, `hello`, `ls`, `mkdir`, `mmtest`, `nativetest`, `pwd`, `reboot`, `rm`, `rmdir`, `sh`, `shutdown`, `touch`) are the files, and `.`, `bin` and `etc` the directories. The size is a multiple of 10240 bytes because tar pads the archive to whole records. `Tests::Initramfs::run` then fed the reader one broken header per error code (checksum, magic, a non-octal number, a `..` path, a symbolic link, data past the end), a file and a directory with a prefix, and compared `etc/motd` with the text it should hold.
 
 ```text
-vfs: 20 nodes, 187267 bytes in files, seeded from the initramfs
+vfs: 20 nodes, 191563 bytes in files, seeded from the initramfs
 vfs: self-test ok, lookup, create, read, write, truncate, remove and copy on write
 ```
-`Fs::Vfs::initialize` built the tree: the root, `bin` with its fourteen programs, `etc` and `etc/motd` from the archive, then `dev` and the device node `dev/console`. The file bytes are the same 187267 as in the archive, because nothing was copied. `Tests::Vfs::run` checked every path rule, created, wrote, read, truncated and removed a test directory `/t` and checked that the heap returned to where it was, then wrote to `/etc/motd` to check that the write copied the file and left the archive alone.
+`Fs::Vfs::initialize` built the tree: the root, `bin` with its fourteen programs, `etc` and `etc/motd` from the archive, then `dev` and the device node `dev/console`. The file bytes are the same 191563 as in the archive, because nothing was copied. `Tests::Vfs::run` checked every path rule, created, wrote, read, truncated and removed a test directory `/t` and checked that the heap returned to where it was, then wrote to `/etc/motd` to check that the write copied the file and left the archive alone.
 
 ```text
 address space: self-test ok, private user half, shared kernel half, frames returned
@@ -647,7 +647,7 @@ fstest: openat, read, write, lseek, close, fstat, newfstatat, getdents64 and mkd
 process 20 exited with status 0
 user: fstest passed, and removing /fstest gave back every byte it used
 ```
-`Tests::User::runFiles` ran `/bin/fstest` (`user/fstest/src/main.ign`). Its data segment has no file bytes and 4753 bytes of memory: it is all `.bss`, the buffers of the checks. The program went through every file system call from ring 3: `openat` of `/etc/motd` gave descriptor 3, the first one after the console's 0, 1 and 2; reads, seeks, `fstat`; every `openat` error; `mkdirat` of `/fstest`; creating, appending and truncating `/fstest/a`; a path relative to a directory descriptor; `getdents64` (`.`, `..`, `a`, `b`); the limit of 16 descriptors; and the console as a character device. Its exit status would have named the first check that failed. The test then removed `/fstest` with `Fs::Vfs::remove` and checked that the heap and the PMM were back where they were before the program started. Doc 15.
+`Tests::User::runFiles` ran `/bin/fstest` (`user/fstest/src/main.ign`). Its data segment has no file bytes and 4753 bytes of memory: it is all `.bss`, the buffers of the checks. The program went through every file system call from ring 3: `openat` of `/etc/motd` gave descriptor 3, the first one after the console's 0, 1 and 2; reads, seeks, `fstat`; every `openat` error; `mkdirat` of `/fstest`; creating, appending and truncating `/fstest/a`; a path relative to a directory descriptor; `getdents64` (`.`, `..`, `a`, `b`); the limit of 256 descriptors (the table grows from 16); and the console as a character device. Its exit status would have named the first check that failed. The test then removed `/fstest` with `Fs::Vfs::remove` and checked that the heap and the PMM were back where they were before the program started. Doc 15.
 
 ```text
 Welcome to IgniOS.
