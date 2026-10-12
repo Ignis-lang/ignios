@@ -204,7 +204,7 @@ Docs 14 and 15.
 
 **`arch/x86_64/cpu_local.ign` and `cpu_local_asm.S`.** The per-CPU block behind the GS base. The header has the table of the two GS MSRs in ring 0 and ring 3, and the list of every place that runs `swapgs`: the `SYSCALL` entry and exit, the interrupt stub when the saved CS is ring 3, and the first entry to ring 3. Doc 18.
 
-**`proc/process.ign`.** The process table. A process is a slot plus a kernel thread that owns the address space. The header draws the lifetime from `startElf` to `wait`, which blocks in `Sched::Scheduler::join` until the process thread is gone.
+**`proc/process.ign`.** The process table. A process is a slot plus a kernel thread that owns the address space. The header draws the lifetime from `startElf` to `wait`, which blocks in `Sched::Scheduler::join` until the process thread is gone. Each process records its parent, and only the parent may wait for it; `releaseChildren` frees the children of a process that ends, or makes the running ones orphans that are freed when they end, so no slot stays taken. `waitAny` parks the caller (`Sched::Scheduler::park`) until a child ends and `wakeParent` wakes it. `kill` marks a process and wakes it from a sleep, a wait or a keyboard read (`Sched::Scheduler::interrupt`, `Drivers::Tty::cancel`); `checkKill`, at the end of every system call and every interrupt from ring 3, ends it with status 137, so a process never dies in the middle of kernel code. The table holds 64 processes; the descriptor and region tables of each grow on the heap.
 
 **`syscall/dispatch.ign`, `operation.ign` and `linux/`.** Two-step dispatch: the call number maps to an operation through a per-process table, then the operation runs. `dispatch.ign` draws the flow, `operation.ign` has the ABI independent operations, `linux/table.ign` lists the calls, `linux/files.ign` (part 10) and `linux/nanosleep.ign` are the handlers, and `linux/errno.ign` turns the status codes of `Fs` into errno values. `native/` is the second ABI, chosen by the IgniOS ELF note that `Proc::Elf::findAbi` looks for: `native/table.ign` has its call numbers, `native/status.ign` its published status codes, `native/calls.ign` the handlers, which put the status in RAX and the value in RDX; its header has the argument rules (paths as pointer and length, `ROOT` for `/`, `CURRENT` for the current directory; `SPAWN` with its arguments packed as NUL-terminated strings, which the kernel counts before it trusts them; `WAIT`), the open flags, the 32-byte info record and the directory entry layout. `core.ign` moves bytes for both ABIs with the user pointers checked, so they cannot drift apart. Doc 21. Every user pointer goes through `Mm::AddressSpace::copyFromUser`, `copyToUser` or `copyStringFromUser`, and a bad one is `-EFAULT`.
 
@@ -639,10 +639,10 @@ user: run refused a missing program, a directory, a file that is not ELF, an emp
 `Tests::User::runRefused` asked `run` for a program that does not exist, a directory, `/etc/motd` (a text file the ELF loader refuses), a line of spaces and 33 arguments, one more than `MAX_ARGUMENTS`. None started a process, and the PMM free count and the heap were the same afterwards.
 
 ```text
-elf: PT_LOAD 0x0000000000400000 file 6418 mem 6418 r-x
-elf: PT_LOAD 0x0000000000402000 file 327 mem 327 r--
-elf: PT_LOAD 0x0000000000403000 file 0 mem 4753 rw-
-elf: 3 segments, 5 pages, entry 0x0000000000400000, stack pointer 0x00007fffffffefa0, argc 1, abi linux
+elf: PT_LOAD 0x0000000000400000 file 9010 mem 9010 r-x
+elf: PT_LOAD 0x0000000000403000 file 403 mem 403 r--
+elf: PT_LOAD 0x0000000000404000 file 0 mem 4753 rw-
+elf: 3 segments, 6 pages, entry 0x0000000000400000, stack pointer 0x00007fffffffefa0, argc 1, abi linux
 fstest: openat, read, write, lseek, close, fstat, newfstatat, getdents64 and mkdirat behave as on Linux
 process 20 exited with status 0
 user: fstest passed, and removing /fstest gave back every byte it used
@@ -668,15 +668,23 @@ user: mmtest passed, writing read-only, using unmapped, executing non-exec and t
 `Tests::User::runMemory` ran `/bin/mmtest` (the loader's `elf:` lines left out). The first line is `/etc/motd`, which the program read into a mapping and wrote from it, to show that system calls take mapped memory as a buffer. The checks also mapped `/etc/motd` and a page of `/bin/hello` privately, and ran `std::alloc` through 200 blocks, a large block and a closure. Then the program ran four more times with an argument, each one doing something the page tables must stop, and each one was killed. Every first mapping of a process is the page below `0x7F0000000000`, `0x7EFFFFFFF000`. The error codes say why: `0x7` is a write to a present read-only user page, `0x4` a user read of a page that is not present (unmapped, or `PROT_NONE`, which maps nothing), `0x15` an instruction fetch from a no-execute page; `rip` equal to the address is the jump into the mapping. The last run freed a `std::alloc` block twice; the allocator panicked, and the shared handler of `std::panic` printed the message with its file and line on standard error and exited with 101. The PMM free count was the same afterwards. Doc 20.
 
 ```text
-elf: 3 segments, 4 pages, entry 0x0000000000400000, stack pointer 0x00007fffffffefa0, argc 1, abi native
+elf: 3 segments, 6 pages, entry 0x0000000000400000, stack pointer 0x00007fffffffefa0, argc 1, abi native
 nativetest: hello through the native ABI
+/
+process 28 exited with status 0
+...
+process 102 killed, status 137
+process 103 killed, status 137
+process 104 killed, status 137
+process 105 killed, status 137
+process 107 killed, status 137
 nativetest: every native call, its arguments and its status codes behave as specified
 process 27 exited with status 0
 elf: the IgniOS ABI note names an unknown version
 elf: a note runs past the end of the file
 user: nativetest passed, a note of version 2 and a note past the end of the file were refused
 ```
-`Tests::User::runNative` ran `/bin/nativetest`. Its ELF carries the IgniOS note, so the loader printed `abi native` (every other program says `abi linux`) and the process used the native call table. The program checked that a call returns its status in RAX and its value in RDX, that an error leaves RDX at 0 even when RDX went in with another value, and that call 9999 and Linux's `getpid` number 39 are both `NOT_SUPPORTED`; then every native call with its errors, in a directory `/nt` that the test removed afterwards (the table in `user/nativetest/src/main.ign` lists the checks). Then the test handed the loader two copies of the same file with the note broken, one claiming version 2 and one with a description larger than the file; both were refused before anything was mapped, and no memory leaked. Doc 21.
+`Tests::User::runNative` ran `/bin/nativetest`. Its ELF carries the IgniOS note, so the loader printed `abi native` (every other program says `abi linux`) and the process used the native call table. The program checked that a call returns its status in RAX and its value in RDX, that an error leaves RDX at 0 even when RDX went in with another value, and that call 9999 and Linux's `getpid` number 39 are both `NOT_SUPPORTED`; then every native call with its errors, in a directory `/nt` that the test removed afterwards (the table in `user/nativetest/src/main.ign` lists the checks). The lines left out (`...`) are its own children: `/bin/pwd` and `/bin/rmdir` runs for the spawn checks, 63 `pwd` children that fill the 64-slot process table, and helpers for the parent checks (an orphan and a child that ends before its parent are both freed). The five `killed, status 137` lines are the kill checks: a child sleeping 10 s, one spinning in ring 3, one waiting for the keyboard, one waiting for its own child, and one that killed itself. Each ended right away with 128 + 9. Then the test handed the loader two copies of the same file with the note broken, one claiming version 2 and one with a description larger than the file; both were refused before anything was mapped, and no memory leaked. Doc 21.
 
 ```text
 cpu local: self-test ok, after ring 3 the kernel GS base is the per-CPU block and the user one is 0
