@@ -1,0 +1,277 @@
+//!
+//! # sh
+//!
+//! The shell: reads a line, runs it, prints a prompt again.
+//!
+//! ## Overview
+//!
+//! The kernel starts `/bin/sh` once the boot is done (`Shell::Terminal::run`).
+//! Each line from the keyboard (descriptor 0) is split into words at spaces:
+//!
+//! | Line               | Effect                                                         |
+//! |--------------------|----------------------------------------------------------------|
+//! | empty              | a new prompt                                                    |
+//! | `cd [DIR]`         | changes the current directory; `/` without an argument          |
+//! | `exit [STATUS]`    | ends the shell with `STATUS` (0 by default)                     |
+//! | `NAME ARG...`      | starts `/bin/NAME` with the words as arguments and waits for it |
+//! | `PATH ARG...`      | a word with a `/` is a path, relative to the current directory |
+//! | Ctrl+D             | ends the shell, as `exit`                                       |
+//!
+//! Errors go to standard error in the style of bash:
+//! `sh: nope: command not found`, `sh: cd: /etc/motd: Not a directory`.
+//! The kernel prints `process N exited with status S` when a program ends.
+//!
+//! When the shell ends, the kernel terminal takes over the keyboard; it
+//! still has `uptime`, `ps` and `threads`.
+//!
+//! ## Limits
+//!
+//! A line holds 255 characters, a command 32 words. There are no quotes,
+//! pipes, redirections, variables or background jobs.
+
+import Args from "std::args";
+import Io from "std::io";
+import Sys from "std::sys";
+import _ from "std::panic";
+
+/// The shell's buffers.
+record Shell {
+  /// The line as read, newline included.
+  static mut line: u8[256];
+
+  /// The words of the line, each followed by a NUL: the argument block
+  /// `SPAWN` takes.
+  static mut words: u8[256];
+
+  /// `/bin/` and a command name.
+  static mut path: u8[262];
+}
+
+/// Bytes of `Shell::line`.
+const LINE_CAPACITY: u64 = 256;
+
+/// The most words a command can have, as the kernel's `MAX_ARGUMENTS`.
+const MAX_WORDS: u64 = 32;
+
+/// ASCII space.
+const SPACE: u8 = 0x20;
+
+/// ASCII line feed.
+const NEWLINE: u8 = 0x0A;
+
+/// ASCII `/`.
+const SLASH: u8 = 0x2F;
+
+/// Where a name without a slash is looked up.
+const BIN: str = "/bin/";
+
+/// The native status of a missing file, negated as the portable `Sys`
+/// functions return it.
+const NOT_FOUND: i64 = -1;
+
+/// Copies the words of the first `length` bytes of the line to
+/// `Shell::words`, each followed by a NUL, writes the bytes used to `bytes`
+/// and returns the number of words.
+function split(length: u64, bytes: *mut u64): u64 {
+  let line: *mut u8 = &mut Shell::line as *mut u8;
+  let words: *mut u8 = &mut Shell::words as *mut u8;
+  let mut position: u64 = 0;
+  let mut written: u64 = 0;
+  let mut count: u64 = 0;
+
+  while (position < length) {
+    while (position < length && *(line + position) == SPACE) {
+      position += 1;
+    }
+
+    if (position == length) {
+      break;
+    }
+
+    while (position < length && *(line + position) != SPACE) {
+      *(words + written) = *(line + position);
+      written += 1;
+      position += 1;
+    }
+
+    *(words + written) = 0;
+    written += 1;
+    count += 1;
+  }
+
+  *bytes = written;
+
+  return count;
+}
+
+/// True when the NUL-terminated `word` is `name`.
+function wordIs(word: *u8, name: str): boolean {
+  let length: u64 = Args::length(word);
+  let mut index: u64 = 0;
+
+  while (index < length) {
+    if (*(word + index) != *(name as *u8 + index)) {
+      return false;
+    }
+
+    index += 1;
+  }
+
+  return *(name as *u8 + length) == 0;
+}
+
+/// The word that follows the NUL-terminated `word`.
+function nextWord(word: *u8): *u8 {
+  return word + Args::length(word) + 1;
+}
+
+/// The decimal value of the NUL-terminated `word`, or 0 when it is not a
+/// number.
+function number(word: *u8): u64 {
+  let mut value: u64 = 0;
+  let mut index: u64 = 0;
+
+  while (*(word + index) != 0) {
+    let digit: u8 = *(word + index);
+
+    if (digit < 0x30 || digit > 0x39) {
+      return 0;
+    }
+
+    value = value * 10 + (digit - 0x30) as u64;
+    index += 1;
+  }
+
+  return value;
+}
+
+/// Prints `sh: TEXT` and a newline on standard error, with a `: REASON`
+/// when `result` is negative.
+function report(first: *u8, second: *u8, result: i64): void {
+  Io::error("sh: ");
+  Io::errorString(first);
+
+  if (second != null) {
+    Io::error(": ");
+    Io::errorString(second);
+  }
+
+  if (result < 0) {
+    Io::error(": ");
+    Io::error(Sys::errorText(result));
+  }
+
+  Io::error("\n");
+}
+
+/// `cd [DIR]`.
+function changeDirectory(count: u64, words: *u8): void {
+  let target: *u8 = count > 1 ? nextWord(words) : "/" as *u8;
+  let result: i64 = Sys::changeDirectory(target);
+
+  if (result < 0) {
+    report("cd" as *u8, target, result);
+  }
+}
+
+/// Starts the command in `Shell::words` and waits for it.
+function run(count: u64, bytes: u64): void {
+  let words: *u8 = &mut Shell::words as *u8;
+  let name: *u8 = words;
+  let nameLength: u64 = Args::length(name);
+  let mut program: *u8 = name;
+  let mut index: u64 = 0;
+  let mut hasSlash: boolean = false;
+
+  while (index < nameLength) {
+    if (*(name + index) == SLASH) {
+      hasSlash = true;
+    }
+
+    index += 1;
+  }
+
+  if (!hasSlash) {
+    let path: *mut u8 = &mut Shell::path as *mut u8;
+
+    index = 0;
+
+    while (index < 5) {
+      *(path + index) = *(BIN as *u8 + index);
+      index += 1;
+    }
+
+    index = 0;
+
+    while (index <= nameLength) {
+      *(path + 5 + index) = *(name + index);
+      index += 1;
+    }
+
+    program = path as *u8;
+  }
+
+  let id: i64 = Sys::spawn(program, words, bytes, count);
+
+  if (id == NOT_FOUND && !hasSlash) {
+    report(name, "command not found" as *u8, 0);
+    return;
+  }
+
+  if (id < 0) {
+    report(name, null, id);
+    return;
+  }
+
+  Sys::wait(id as u64);
+}
+
+/// Called by `_start`. Returns the status `exit` asked for, or 0 at the end
+/// of input.
+@externName("ignis_main")
+function main(count: u64, values: *u64): u64 {
+  let line: *mut u8 = &mut Shell::line as *mut u8;
+
+  while (true) {
+    Io::print("> ");
+
+    let length: i64 = Sys::read(Sys::STDIN, line, LINE_CAPACITY);
+
+    if (length <= 0) {
+      Io::print("\n");
+      return 0;
+    }
+
+    let mut used: u64 = length as u64;
+
+    if (*(line + used - 1) == NEWLINE) {
+      used -= 1;
+    }
+
+    let mut bytes: u64 = 0;
+    let words: u64 = split(used, &mut bytes as *mut u64);
+    let first: *u8 = &mut Shell::words as *u8;
+
+    if (words == 0) {
+      continue;
+    }
+
+    if (words > MAX_WORDS) {
+      report("too many words" as *u8, null, 0);
+      continue;
+    }
+
+    if (wordIs(first, "exit")) {
+      return words > 1 ? number(nextWord(first)) & 0xFF : 0;
+    }
+
+    if (wordIs(first, "cd")) {
+      changeDirectory(words, first);
+      continue;
+    }
+
+    run(words, bytes);
+  }
+
+  return 0;
+}

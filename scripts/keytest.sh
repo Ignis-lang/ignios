@@ -36,12 +36,13 @@ keys=(
 # What the serial transcript must show after the keyboard line, once every
 # backspace is applied: `h i shift-1 spc backspace` leaves `hi!`, and Caps
 # Lock is on only between the two `caps_lock` presses, so `q` is typed in
-# upper case. A line that is not a built-in command runs as a program, so
-# `hi!` and `Abc` each print the error of a missing /bin program.
+# upper case. The loader's `elf:` lines for /bin/sh are left out. The prompt
+# is the one of /bin/sh, which runs each line as a
+# program, so `hi!` and `Abc` each print `command not found`.
 expected_lines='> hi!
-run: /bin/hi!: no such file or directory
+sh: hi!: command not found
 > Abc
-run: /bin/Abc: no such file or directory
+sh: Abc: command not found
 > xyzQw'
 
 # Each erased character is mirrored as backspace, space, backspace.
@@ -119,7 +120,7 @@ for byte in typed.replace(b"\r", b""):
     else:
         screen.append(chr(byte))
 
-transcript = "".join(screen)
+transcript = "\n".join(line for line in "".join(screen).split("\n") if not line.startswith("elf: "))
 
 print("keytest: echoed lines after backspaces:")
 print(transcript)

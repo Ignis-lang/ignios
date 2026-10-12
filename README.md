@@ -23,10 +23,11 @@ Early, and only tested in QEMU with OVMF.
 | User mode | Per-process address spaces (own PML4, shared kernel half, U/S pages, frames freed on exit); ring 3 entered with `iretq`, left through `SYSCALL`/`SYSRET` or an interrupt (TSS.RSP0 follows the running thread); a Linux x86_64 syscall subset (`read`, `write`, `openat`, `close`, `lseek`, `fstat`, `newfstatat`, `getdents64`, `mkdirat`, `unlinkat`, `chdir`, `getcwd`, `reboot`, `mmap`, `munmap`, `exit`, `exit_group`, `getpid`, `sched_yield`, `nanosleep`, `-ENOSYS` for the rest) behind a per-process ABI table; every user pointer validated before use; a static ELF64 loader that starts programs from the file tree with argc and argv; a fault, privileged instruction or undefined instruction in ring 3 kills only that process; waiting for a process blocks until it is gone |
 | Keyboard input | Programs read lines from descriptor 0: echo, Backspace, Enter, Ctrl+D for the end of input, shared with the kernel terminal |
 | Files | A ustar initramfs loaded by Limine and checked at boot; an in-memory file tree seeded from it with copy on write, `/dev/console`, path rules as on Linux; per-process descriptor tables (16 descriptors, 0 to 2 on the console) and current directories; nothing is saved across reboots |
-| Commands | `cat`, `ls`, `touch`, `mkdir`, `rm`, `rmdir`, `pwd`, `reboot` and `shutdown` in `/bin`, written in Ignis on the native IgniOS ABI; any line at the prompt that is not a built-in runs as a program |
+| Shell | `/bin/sh`, a user program the kernel starts after the boot: it runs programs with spawn and wait and has `cd` and `exit`; Ctrl+D or `exit` hands the keyboard back to the kernel terminal (`uptime`, `ps`, `threads`, `run`) |
+| Commands | `cat`, `ls`, `touch`, `mkdir`, `rm`, `rmdir`, `pwd`, `reboot` and `shutdown` in `/bin`, written in Ignis on the native IgniOS ABI |
 | Memory mappings | `mmap` of anonymous memory and private copies of files, `munmap` that trims and splits regions, `PROT_READ`/`PROT_WRITE`/`PROT_EXEC`/`PROT_NONE` enforced by the page tables, write with execute refused; up to 32 regions per process; `std::alloc`, a user heap on `mmap` behind the compiler's allocation hooks; `cat` reads files through `mmap` |
 | Native ABI | A second system call ABI next to Linux, chosen per program by an `IgniOS` ELF note: own call numbers (22 calls: files, directories, the current directory, memory, process creation and waiting, scheduling, power), the status in RAX and the value in RDX, a published table of status codes, paths as pointer and length; both ABIs share descriptors and the checked transfers of `Syscall::Core`; `hello`, `cat`, `ls`, `touch` and `mkdir` are native programs, `fstest` and `mmtest` keep testing the Linux layer |
-| Next | `unlink`, `rmdir` and a current directory; a writable console input for programs |
+| Next | redirections and pipes in the shell; demand paging; more than one processor |
 
 ## Quick start
 
@@ -44,7 +45,7 @@ direnv allow
 make run
 ```
 
-QEMU opens a window. Click it to give it the keyboard and type at the prompt: `ls /`, `cat /etc/motd`, `mkdir /tmp`, `touch /tmp/a`, `ls /tmp`. `reboot` boots the machine again and `shutdown` powers it off, which closes QEMU. The programs are in `/bin`, and the files you create live in memory until the next boot. The terminal shows the serial log.
+QEMU opens a window. Click it to give it the keyboard and type at the prompt: `ls /`, `cat /etc/motd`, `mkdir /tmp`, `touch /tmp/a`, `ls /tmp`. The prompt is `/bin/sh`: `cd /etc`, `pwd`, `rm`, `rmdir` work as on Unix, `cat` alone copies what you type until Ctrl+D. `reboot` boots the machine again and `shutdown` powers it off, which closes QEMU. The programs are in `/bin`, and the files you create live in memory until the next boot. The terminal shows the serial log.
 
 The build also needs an Ignis compiler with freestanding support (Ignis `main` from October 2026 or later). The Makefile uses the `ignis` on your `PATH`; point elsewhere with `make IGNIS=/path/to/ignis`.
 
@@ -103,6 +104,7 @@ The dependencies run one way, and the compiler rejects an import cycle. `Lib`, `
 kernel/linker.ld               higher-half layout
 user/lib/                      the user standard library (entry stub, syscalls, text output, argv)
 user/hello/                    the first user program
+user/sh/                       the shell
 user/cat, ls, touch, mkdir, rm, rmdir, pwd/  the commands
 user/reboot, shutdown/         reset and power off
 user/fstest/                   ring 3 checks of the file system calls

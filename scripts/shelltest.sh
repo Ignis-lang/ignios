@@ -23,8 +23,10 @@ serial_log=$1
 timeout_seconds=$2
 shift 3
 
-# The session. Lines without `run` run as programs from /bin; the `run`
-# prefix still works. An entry with `|` types more lines after the command,
+# The session runs in /bin/sh, which the kernel starts after the boot: a
+# word without a slash is a program in /bin, `cd` and `exit` are built in.
+# The last entries end the shell with Ctrl+D and run one command in the
+# kernel terminal that takes over. An entry with `|` types more lines after the command,
 # for a program that reads the keyboard: each part is typed and followed by
 # Enter, and `^D` is Ctrl+D (the end of input).
 commands=(
@@ -42,7 +44,7 @@ commands=(
   "touch /nope/a"
   "mkdir /etc/motd/x"
   "mkdir"
-  "run ls /dev"
+  "ls /dev"
   "ls /etc/motd"
   "rm /tmp/a"
   "ls /tmp"
@@ -54,7 +56,16 @@ commands=(
   "pwd"
   "cat|hello from the keyboard|^D"
   "cat|^D"
+  "cd /etc"
+  "pwd"
+  "cat motd"
+  "cd /etc/motd"
+  "cd"
+  "pwd"
   "nope"
+  "/bin/nope"
+  "^D"
+  "pwd"
 )
 
 # What the serial log must show after the keyboard line. A line that starts
@@ -84,6 +95,7 @@ pwd
 reboot
 rm
 rmdir
+sh
 shutdown
 touch
 S0
@@ -119,7 +131,7 @@ S1
 > mkdir
 mkdir: missing operand
 S1
-> run ls /dev
+> ls /dev
 console
 S0
 > ls /etc/motd
@@ -154,8 +166,29 @@ hello from the keyboard
 S0
 > cat
 S0
+> cd /etc
+> pwd
+/etc
+S0
+> cat motd
+Welcome to IgniOS\.
+S0
+> cd /etc/motd
+sh: cd: /etc/motd: Not a directory
+> cd
+> pwd
+/
+S0
 > nope
-run: /bin/nope: no such file or directory'
+sh: nope: command not found
+> /bin/nope
+sh: /bin/nope: No such file or directory
+> 
+S0
+shell: /bin/sh ended, the kernel terminal takes over
+> pwd
+/
+S0'
 
 # Waits until <serial-log> has at least $1 lines that start with the prompt.
 wait_for_prompts() {

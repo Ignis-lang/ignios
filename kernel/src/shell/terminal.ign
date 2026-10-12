@@ -5,7 +5,9 @@
 //!
 //! ## Overview
 //!
-//! `Shell::Terminal::run` is where the boot thread ends up. It prints a
+//! `Shell::Terminal::run` is where the boot thread ends up. It first runs the
+//! user space shell, `/bin/sh`, and waits for it; the kernel terminal below
+//! is the fallback once it ends (Ctrl+D or `exit`). The terminal prints a
 //! prompt, reads one line with `Drivers::Tty::readLine` (which echoes it and
 //! handles Backspace without ever erasing the prompt) and runs it as a
 //! command (`Shell::Commands::run`). The keyboard interrupt fills the
@@ -14,6 +16,7 @@
 //! ignored.
 
 import Drivers from "@drivers";
+import Proc from "@proc";
 import _ from "./commands";
 
 /// The terminal loop.
@@ -33,7 +36,9 @@ namespace Shell::Terminal {
     Drivers::Console::setColors(Drivers::Color::BRIGHT_WHITE, Drivers::Color::BLACK);
   }
 
-  /// Reads one line at a time with `Drivers::Tty::readLine`, which echoes it
+  /// Runs `/bin/sh` and waits for it. When it ends, or cannot start, the
+  /// kernel terminal takes over: it reads one line at a time with
+  /// `Drivers::Tty::readLine`, which echoes it
   /// and handles Backspace, and runs it as a command, forever. The terminal
   /// runs in the boot thread, so the keyboard keeps working while other
   /// threads run. Input past `LINE_CAPACITY` characters is ignored; Ctrl+D on
@@ -42,6 +47,13 @@ namespace Shell::Terminal {
     // Literal size: array lengths must be integer literals, so this repeats
     // `LINE_CAPACITY` plus the newline.
     let mut line: u8[129];
+    let status: u64 = Proc::Programs::runNamed("/bin/sh");
+
+    if (status == Proc::Process::NO_PROCESS) {
+      Drivers::Console::writeLine("shell: /bin/sh did not start, the kernel terminal takes over");
+    } else {
+      Drivers::Console::writeLine("shell: /bin/sh ended, the kernel terminal takes over");
+    }
 
     while (true) {
       printPrompt();

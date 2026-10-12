@@ -191,7 +191,7 @@ Doc 13.
 
 **`sched/scheduler.ign`.** The run queue, sleeping and the timer-driven preemption. The header has the call chain from the timer interrupt to a switch. Look at how a dead thread's stack is freed by the next thread (`reapZombie`), because a thread cannot free the stack it is running on. Sleeping and waking are here and not in a file of their own, because `sleep` calls `switchToNext` and `switchToNext` calls the wake-up scan. `join` blocks a thread until another one is gone: the thread that frees the dead one (`reapZombie`) makes its waiters ready, so a waiter runs once, not once per tick. `switchToNext` also swaps the x87 and SSE state.
 
-**`shell/terminal.ign`.** The terminal loop the boot thread becomes: a prompt, a line from `Drivers::Tty::readLine`, a command.
+**`shell/terminal.ign`.** Where the boot thread ends up: it runs `/bin/sh` and waits for it, and when the shell ends it becomes the kernel terminal, a prompt, a line from `Drivers::Tty::readLine`, a command.
 
 **`shell/commands.ign` and `shell/thread_commands.ign`.** The commands: `uptime`, `ps`, `threads` and `run PROGRAM [ARG...]`. `reboot` and `shutdown` are programs in `/bin`. Any other line that is not blank runs as a program, so `cat /etc/motd` is `run cat /etc/motd`.
 
@@ -236,6 +236,8 @@ Doc 19.
 **`syscall/linux/files.ign`.** The Linux side: `read`, `write`, `openat`, `close`, `lseek`, `fstat`, `newfstatat`, `getdents64`, `mkdirat`, `unlinkat`, `chdir` and `getcwd`. The header has the `openat` flag table and the byte layouts of `struct stat` and `struct linux_dirent64`. Each handler checks the user pointer first, copies paths with `Mm::AddressSpace::copyStringFromUser`, translates the Linux flags to `Fs::Files` flags, and turns the status it gets back into an errno with `errorFor` (`linux/errno.ign`). `AT_FDCWD` is the process's current directory, which `chdir` changes and `getcwd` reports.
 
 **`user/fstest/`.** A ring 3 program that checks each call and each error the way a Linux program sees them, and exits with the number of the first check that failed. The table in its header lists the checks.
+
+**`user/sh/`.** The shell, a native program: a loop that prints `> `, reads a line from descriptor 0, splits it into words, runs the built-ins `cd` and `exit`, and starts anything else with `SPAWN` and `WAIT`. The header lists what it does and its limits (no quotes, pipes or redirections).
 
 **`user/cat/`, `user/ls/`, `user/touch/`, `user/mkdir/`, `user/rm/`, `user/rmdir/` and `user/pwd/`.** The commands, each one a short Ignis program on `std::sys`. Each header has a table of what it does in each case and the exact error line, in the format of GNU coreutils (`ls: cannot access '/nope': No such file or directory`). `cat` maps a regular file with `mmap` and writes it out, 64 KiB per call at most, and falls back to `read` for anything else; with no argument it copies the keyboard until Ctrl+D; `ls` lists with `Sys::readEntry`, which hides `.` and `..`; `touch` opens with `O_CREAT | O_RDONLY` and takes `-EISDIR` (an existing directory) as success, as GNU touch does. `Sys::errorText` in `user/lib/linux/sys.ign` is their `strerror`.
 
@@ -374,9 +376,9 @@ vmm: self-test ok
 `Tests::Vmm::run` mapped a frame at a test address, wrote through it, read it through the direct map, and unmapped it.
 
 ```text
-modules: initramfs is /initramfs.tar, 194560 bytes at 0xffff80000a0ab000
+modules: initramfs is /initramfs.tar, 204800 bytes at 0xffff80000a0a9000
 ```
-The Limine module from `boot/limine.conf`. `initramfs` is the `module_string`, `/initramfs.tar` the path. `Mm::Modules::initialize` mapped its pages read only. The address is in the direct map, so the file sits at physical `0xa0ab000`. Doc 15.
+The Limine module from `boot/limine.conf`. `initramfs` is the `module_string`, `/initramfs.tar` the path. `Mm::Modules::initialize` mapped its pages read only. The address is in the direct map, so the file sits at physical `0xa0a9000`. Doc 15.
 
 ```text
 heap: self-test ok, 1092 KiB mapped, 0 bytes in use
@@ -384,16 +386,16 @@ heap: self-test ok, 1092 KiB mapped, 0 bytes in use
 `Tests::Heap::run` checked alignment, reuse, merging, growth (it allocates 1 MiB) and the compiler allocation handlers. 1092 KiB of heap pages stayed mapped and every block was freed. Doc 10.
 
 ```text
-initramfs: 194560 bytes, 14 files with 174043 bytes of data, 3 directories
+initramfs: 204800 bytes, 15 files with 187267 bytes of data, 3 directories
 initramfs: self-test ok, 6 malformed headers refused, 2 valid ones read, etc/motd read back
 ```
-`Fs::Initramfs::initialize` walked the archive: `etc/motd` and the thirteen programs in `bin` (`cat`, `fstest`, `hello`, `ls`, `mkdir`, `mmtest`, `nativetest`, `pwd`, `reboot`, `rm`, `rmdir`, `shutdown`, `touch`) are the files, and `.`, `bin` and `etc` the directories. The size is a multiple of 10240 bytes because tar pads the archive to whole records. `Tests::Initramfs::run` then fed the reader one broken header per error code (checksum, magic, a non-octal number, a `..` path, a symbolic link, data past the end), a file and a directory with a prefix, and compared `etc/motd` with the text it should hold.
+`Fs::Initramfs::initialize` walked the archive: `etc/motd` and the fourteen programs in `bin` (`cat`, `fstest`, `hello`, `ls`, `mkdir`, `mmtest`, `nativetest`, `pwd`, `reboot`, `rm`, `rmdir`, `sh`, `shutdown`, `touch`) are the files, and `.`, `bin` and `etc` the directories. The size is a multiple of 10240 bytes because tar pads the archive to whole records. `Tests::Initramfs::run` then fed the reader one broken header per error code (checksum, magic, a non-octal number, a `..` path, a symbolic link, data past the end), a file and a directory with a prefix, and compared `etc/motd` with the text it should hold.
 
 ```text
-vfs: 19 nodes, 174043 bytes in files, seeded from the initramfs
+vfs: 20 nodes, 187267 bytes in files, seeded from the initramfs
 vfs: self-test ok, lookup, create, read, write, truncate, remove and copy on write
 ```
-`Fs::Vfs::initialize` built the tree: the root, `bin` with its thirteen programs, `etc` and `etc/motd` from the archive, then `dev` and the device node `dev/console`. The file bytes are the same 174043 as in the archive, because nothing was copied. `Tests::Vfs::run` checked every path rule, created, wrote, read, truncated and removed a test directory `/t` and checked that the heap returned to where it was, then wrote to `/etc/motd` to check that the write copied the file and left the archive alone.
+`Fs::Vfs::initialize` built the tree: the root, `bin` with its fourteen programs, `etc` and `etc/motd` from the archive, then `dev` and the device node `dev/console`. The file bytes are the same 187267 as in the archive, because nothing was copied. `Tests::Vfs::run` checked every path rule, created, wrote, read, truncated and removed a test directory `/t` and checked that the heap returned to where it was, then wrote to `/etc/motd` to check that the write copied the file and left the archive alone.
 
 ```text
 address space: self-test ok, private user half, shared kernel half, frames returned
@@ -688,20 +690,24 @@ keyboard: PS/2, scancode set 1, US layout, IRQ1 through the IOAPIC
 `Drivers::Keyboard::initialize` configured the 8042 and enabled the first port. The keyboard interrupt, routed earlier, is now live.
 
 ```text
+elf: 3 segments, 3 pages, entry 0x0000000000400000, stack pointer 0x00007fffffffefa0, argc 1, abi native
 > 
 ```
-`Shell::Terminal::run` printed the prompt and sleeps in `sti; hlt` until a key arrives. Everything after this line in a real run is what you type. `make keytest` types a fixed sequence here and checks the echo, and `make shelltest` types a session of `cat`, `ls`, `touch` and `mkdir`. A session looks like this (the loader's `elf:` lines left out):
+`Shell::Terminal::run` started `/bin/sh` (the loader's line, the PT_LOAD lines left out), and the shell printed its prompt. It now waits in `Drivers::Tty`, with `sti; hlt`, until a key arrives. Everything after this line in a real run is what you type. `make keytest` types a fixed sequence here and checks the echo, and `make shelltest` types a session. A session looks like this (the loader's `elf:` lines left out):
 
 ```text
 > mkdir /tmp
-process 21 exited with status 0
-> touch /tmp/a
 process 22 exited with status 0
-> ls /tmp
-a
+> cd /tmp
+> touch a
 process 23 exited with status 0
+> ls
+a
+process 24 exited with status 0
 > cat /nope
 cat: /nope: No such file or directory
-process 24 exited with status 1
+process 25 exited with status 1
+> nope
+sh: nope: command not found
 ```
-Each line that is not a built-in command (`uptime`, `ps`, `threads`, `run`) runs as a program from `/bin`. The tree lives in memory: `/tmp` is gone after a reboot.
+`sh` splits each line into words, runs `cd` and `exit` itself and starts anything else from `/bin` (or from a path) with `SPAWN`, then `WAIT`s for it; the kernel prints the `process N exited` lines. Ctrl+D or `exit` ends the shell, and the kernel terminal takes over the keyboard with its own commands (`uptime`, `ps`, `threads`, `run`). The tree lives in memory: `/tmp` is gone after a reboot.
