@@ -116,6 +116,10 @@ namespace Syscall {
       (*frame).rax = Linux::reboot(first, second, third);
     } else if (operation == Operation::UNLINK) {
       (*frame).rax = Linux::unlinkAt(first, second, third);
+    } else if (operation == Operation::CHANGE_DIRECTORY) {
+      (*frame).rax = Linux::changeDirectory(first);
+    } else if (operation == Operation::CURRENT_DIRECTORY) {
+      (*frame).rax = Linux::currentDirectory(first, second);
     } else if (operation == Operation::GET_PID) {
       (*frame).rax = Proc::Process::currentId();
     } else if (operation == Operation::YIELD) {

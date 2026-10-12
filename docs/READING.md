@@ -203,7 +203,7 @@ Docs 14 and 15.
 
 **`proc/process.ign`.** The process table. A process is a slot plus a kernel thread that owns the address space. The header draws the lifetime from `startElf` to `wait`, which blocks in `Sched::Scheduler::join` until the process thread is gone.
 
-**`syscall/dispatch.ign`, `operation.ign` and `linux/`.** Two-step dispatch: the call number maps to an operation through a per-process table, then the operation runs. `dispatch.ign` draws the flow, `operation.ign` has the ABI independent operations, `linux/table.ign` lists the calls, `linux/files.ign` (part 10) and `linux/nanosleep.ign` are the handlers, and `linux/errno.ign` turns the status codes of `Fs` into errno values. `native/` is the second ABI, chosen by the IgniOS ELF note that `Proc::Elf::findAbi` looks for: `native/table.ign` has its call numbers, `native/status.ign` its published status codes, `native/calls.ign` the handlers, which put the status in RAX and the value in RDX; its header has the argument rules (paths as pointer and length, `ROOT` for `/`), the open flags, the 32-byte info record and the directory entry layout. `core.ign` moves bytes for both ABIs with the user pointers checked, so they cannot drift apart. Doc 21. Every user pointer goes through `Mm::AddressSpace::copyFromUser`, `copyToUser` or `copyStringFromUser`, and a bad one is `-EFAULT`.
+**`syscall/dispatch.ign`, `operation.ign` and `linux/`.** Two-step dispatch: the call number maps to an operation through a per-process table, then the operation runs. `dispatch.ign` draws the flow, `operation.ign` has the ABI independent operations, `linux/table.ign` lists the calls, `linux/files.ign` (part 10) and `linux/nanosleep.ign` are the handlers, and `linux/errno.ign` turns the status codes of `Fs` into errno values. `native/` is the second ABI, chosen by the IgniOS ELF note that `Proc::Elf::findAbi` looks for: `native/table.ign` has its call numbers, `native/status.ign` its published status codes, `native/calls.ign` the handlers, which put the status in RAX and the value in RDX; its header has the argument rules (paths as pointer and length, `ROOT` for `/`, `CURRENT` for the current directory), the open flags, the 32-byte info record and the directory entry layout. `core.ign` moves bytes for both ABIs with the user pointers checked, so they cannot drift apart. Doc 21. Every user pointer goes through `Mm::AddressSpace::copyFromUser`, `copyToUser` or `copyStringFromUser`, and a bad one is `-EFAULT`.
 
 **`proc/elf.ign`.** The ELF64 loader. The header maps the segments of `build/user/hello.elf` to user addresses and shows the header structures. It refuses a segment that is both writable and executable.
 
@@ -229,13 +229,13 @@ Doc 19.
 
 **`fs/vfs.ign`.** The file tree. Every file and directory is a `Fs::Node` on the heap, and a directory keeps its children in a linked list in creation order. The header has the path rules (`.`, `..`, repeated and trailing slashes, the `NAME_MAX` and `PATH_MAX` limits) and the table of status codes with the Linux error each one becomes. Files are limited to 64 MiB (`MAX_FILE_SIZE`, `-EFBIG` past it), checked before anything is allocated. Look at `seedEntry`, which builds the tree from the archive without copying file data, and at `reserve`, which copies a seeded file to the heap the first time it is written (copy on write), so the read-only archive is never touched. The VFS has no locks: its callers run with interrupts off on the only processor.
 
-**`fs/files.ign`.** Descriptors and open files. The header draws a descriptor table: descriptors 0, 1 and 2 of a new process share one console open file, and an open file is freed with its last descriptor. The flags and status codes are this module's own, not Linux's, so another ABI can use the same functions. `Proc::Process::launch` calls `openStandard` and `finishCurrent` calls `closeAll`. `remove` deletes a file or an empty directory by path, and refuses one that a descriptor has open (`BUSY`): an open file holds a pointer to its node, so the node must outlive it.
+**`fs/files.ign`.** Descriptors and open files. The header draws a descriptor table: descriptors 0, 1 and 2 of a new process share one console open file, and an open file is freed with its last descriptor. The flags and status codes are this module's own, not Linux's, so another ABI can use the same functions. `Proc::Process::launch` calls `openStandard` and `finishCurrent` calls `closeAll`. `remove` deletes a file or an empty directory by path, and refuses one that a descriptor has open (`BUSY`): an open file holds a pointer to its node, so the node must outlive it. Each table also keeps the process's current directory, where relative paths start; a current directory counts as open too. `Fs::Vfs::pathOf` turns a node back into its absolute path for `getcwd`.
 
-**`syscall/linux/files.ign`.** The Linux side: `read`, `write`, `openat`, `close`, `lseek`, `fstat`, `newfstatat`, `getdents64`, `mkdirat` and `unlinkat`. The header has the `openat` flag table and the byte layouts of `struct stat` and `struct linux_dirent64`. Each handler checks the user pointer first, copies paths with `Mm::AddressSpace::copyStringFromUser`, translates the Linux flags to `Fs::Files` flags, and turns the status it gets back into an errno with `errorFor` (`linux/errno.ign`). There is no current directory yet: `AT_FDCWD` is `/`.
+**`syscall/linux/files.ign`.** The Linux side: `read`, `write`, `openat`, `close`, `lseek`, `fstat`, `newfstatat`, `getdents64`, `mkdirat`, `unlinkat`, `chdir` and `getcwd`. The header has the `openat` flag table and the byte layouts of `struct stat` and `struct linux_dirent64`. Each handler checks the user pointer first, copies paths with `Mm::AddressSpace::copyStringFromUser`, translates the Linux flags to `Fs::Files` flags, and turns the status it gets back into an errno with `errorFor` (`linux/errno.ign`). `AT_FDCWD` is the process's current directory, which `chdir` changes and `getcwd` reports.
 
 **`user/fstest/`.** A ring 3 program that checks each call and each error the way a Linux program sees them, and exits with the number of the first check that failed. The table in its header lists the checks.
 
-**`user/cat/`, `user/ls/`, `user/touch/`, `user/mkdir/`, `user/rm/` and `user/rmdir/`.** The commands, each one a short Ignis program on `std::sys`. Each header has a table of what it does in each case and the exact error line, in the format of GNU coreutils (`ls: cannot access '/nope': No such file or directory`). `cat` maps a regular file with `mmap` and writes it out, 64 KiB per call at most, and falls back to `read` for anything else; `ls` lists with `Sys::readEntry`, which hides `.` and `..`; `touch` opens with `O_CREAT | O_RDONLY` and takes `-EISDIR` (an existing directory) as success, as GNU touch does. `Sys::errorText` in `user/lib/linux/sys.ign` is their `strerror`.
+**`user/cat/`, `user/ls/`, `user/touch/`, `user/mkdir/`, `user/rm/`, `user/rmdir/` and `user/pwd/`.** The commands, each one a short Ignis program on `std::sys`. Each header has a table of what it does in each case and the exact error line, in the format of GNU coreutils (`ls: cannot access '/nope': No such file or directory`). `cat` maps a regular file with `mmap` and writes it out, 64 KiB per call at most, and falls back to `read` for anything else; `ls` lists with `Sys::readEntry`, which hides `.` and `..`; `touch` opens with `O_CREAT | O_RDONLY` and takes `-EISDIR` (an existing directory) as success, as GNU touch does. `Sys::errorText` in `user/lib/linux/sys.ign` is their `strerror`.
 
 ## Part 11. Boot self-tests
 
@@ -372,9 +372,9 @@ vmm: self-test ok
 `Tests::Vmm::run` mapped a frame at a test address, wrote through it, read it through the direct map, and unmapped it.
 
 ```text
-modules: initramfs is /initramfs.tar, 174080 bytes at 0xffff80000a0b2000
+modules: initramfs is /initramfs.tar, 194560 bytes at 0xffff80000a0ad000
 ```
-The Limine module from `boot/limine.conf`. `initramfs` is the `module_string`, `/initramfs.tar` the path. `Mm::Modules::initialize` mapped its pages read only. The address is in the direct map, so the file sits at physical `0xa0b2000`. Doc 15.
+The Limine module from `boot/limine.conf`. `initramfs` is the `module_string`, `/initramfs.tar` the path. `Mm::Modules::initialize` mapped its pages read only. The address is in the direct map, so the file sits at physical `0xa0ad000`. Doc 15.
 
 ```text
 heap: self-test ok, 1092 KiB mapped, 0 bytes in use
@@ -382,16 +382,16 @@ heap: self-test ok, 1092 KiB mapped, 0 bytes in use
 `Tests::Heap::run` checked alignment, reuse, merging, growth (it allocates 1 MiB) and the compiler allocation handlers. 1092 KiB of heap pages stayed mapped and every block was freed. Doc 10.
 
 ```text
-initramfs: 174080 bytes, 13 files with 156819 bytes of data, 3 directories
+initramfs: 194560 bytes, 14 files with 174043 bytes of data, 3 directories
 initramfs: self-test ok, 6 malformed headers refused, 2 valid ones read, etc/motd read back
 ```
-`Fs::Initramfs::initialize` walked the archive: `etc/motd` and the twelve programs in `bin` (`cat`, `fstest`, `hello`, `ls`, `mkdir`, `mmtest`, `nativetest`, `reboot`, `rm`, `rmdir`, `shutdown`, `touch`) are the files, and `.`, `bin` and `etc` the directories. The size is a multiple of 10240 bytes because tar pads the archive to whole records. `Tests::Initramfs::run` then fed the reader one broken header per error code (checksum, magic, a non-octal number, a `..` path, a symbolic link, data past the end), a file and a directory with a prefix, and compared `etc/motd` with the text it should hold.
+`Fs::Initramfs::initialize` walked the archive: `etc/motd` and the thirteen programs in `bin` (`cat`, `fstest`, `hello`, `ls`, `mkdir`, `mmtest`, `nativetest`, `pwd`, `reboot`, `rm`, `rmdir`, `shutdown`, `touch`) are the files, and `.`, `bin` and `etc` the directories. The size is a multiple of 10240 bytes because tar pads the archive to whole records. `Tests::Initramfs::run` then fed the reader one broken header per error code (checksum, magic, a non-octal number, a `..` path, a symbolic link, data past the end), a file and a directory with a prefix, and compared `etc/motd` with the text it should hold.
 
 ```text
-vfs: 18 nodes, 156819 bytes in files, seeded from the initramfs
+vfs: 19 nodes, 174043 bytes in files, seeded from the initramfs
 vfs: self-test ok, lookup, create, read, write, truncate, remove and copy on write
 ```
-`Fs::Vfs::initialize` built the tree: the root, `bin` with its twelve programs, `etc` and `etc/motd` from the archive, then `dev` and the device node `dev/console`. The file bytes are the same 156819 as in the archive, because nothing was copied. `Tests::Vfs::run` checked every path rule, created, wrote, read, truncated and removed a test directory `/t` and checked that the heap returned to where it was, then wrote to `/etc/motd` to check that the write copied the file and left the archive alone.
+`Fs::Vfs::initialize` built the tree: the root, `bin` with its thirteen programs, `etc` and `etc/motd` from the archive, then `dev` and the device node `dev/console`. The file bytes are the same 174043 as in the archive, because nothing was copied. `Tests::Vfs::run` checked every path rule, created, wrote, read, truncated and removed a test directory `/t` and checked that the heap returned to where it was, then wrote to `/etc/motd` to check that the write copied the file and left the archive alone.
 
 ```text
 address space: self-test ok, private user half, shared kernel half, frames returned

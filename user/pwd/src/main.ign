@@ -1,0 +1,38 @@
+//!
+//! # pwd
+//!
+//! `pwd`: prints the absolute path of the current directory and a newline.
+//!
+//! | Case          | Output                               | Status |
+//! |---------------|--------------------------------------|--------|
+//! | always        | the path, `/` at the root            | 0      |
+//! | the call fails | `pwd: REASON` on standard error     | 1      |
+
+import Io from "std::io";
+import Sys from "std::sys";
+import _ from "std::panic";
+
+/// The path buffer: the longest path and its NUL.
+record Pwd {
+  /// The path.
+  static mut path: u8[4096];
+}
+
+/// Called by `_start` with argc and argv.
+@externName("ignis_main")
+function main(count: u64, values: *u64): u64 {
+  let buffer: *mut u8 = &mut Pwd::path as *mut u8;
+  let length: i64 = Sys::currentDirectory(buffer, 4096);
+
+  if (length < 0) {
+    Io::error("pwd: ");
+    Io::error(Sys::errorText(length));
+    Io::error("\n");
+    return 1;
+  }
+
+  Io::printBytes(buffer as *u8, length as u64);
+  Io::print("\n");
+
+  return 0;
+}

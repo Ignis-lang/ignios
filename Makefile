@@ -41,7 +41,7 @@ IGNIS_OBJECT := $(BUILD)/ignis/user/obj/kernel.o
 # `std_path` (../lib/linux or ../lib/native). It is linked with that flavour's
 # entry stub user/lib/FLAVOUR/start.S and shipped in the initramfs as
 # /bin/NAME.
-USER_PROGRAMS := hello fstest mmtest nativetest cat ls touch mkdir rm rmdir reboot shutdown
+USER_PROGRAMS := hello fstest mmtest nativetest cat ls touch mkdir rm rmdir pwd reboot shutdown
 USER_ELFS := $(patsubst %,$(BUILD)/user/%.elf,$(USER_PROGRAMS))
 USER_LIB_SOURCES := $(shell find user/lib -name '*.ign' -o -name '*.toml' -o -name '*.S')
 USER_STARTS := $(BUILD)/user/start-linux.o $(BUILD)/user/start-native.o

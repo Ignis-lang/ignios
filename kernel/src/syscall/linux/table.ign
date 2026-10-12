@@ -64,6 +64,12 @@ namespace Syscall::Linux {
   /// `exit`, number 60.
   const NUMBER_EXIT: u64 = 60;
 
+  /// `getcwd`, number 79.
+  const NUMBER_GETCWD: u64 = 79;
+
+  /// `chdir`, number 80.
+  const NUMBER_CHDIR: u64 = 80;
+
   /// `reboot`, number 169.
   const NUMBER_REBOOT: u64 = 169;
 
@@ -102,6 +108,8 @@ namespace Syscall::Linux {
     *(table + NUMBER_MKDIRAT) = Operation::MAKE_DIRECTORY;
     *(table + NUMBER_NEWFSTATAT) = Operation::STAT_AT;
     *(table + NUMBER_UNLINKAT) = Operation::UNLINK;
+    *(table + NUMBER_GETCWD) = Operation::CURRENT_DIRECTORY;
+    *(table + NUMBER_CHDIR) = Operation::CHANGE_DIRECTORY;
     *(table + NUMBER_SCHED_YIELD) = Operation::YIELD;
     *(table + NUMBER_NANOSLEEP) = Operation::SLEEP;
     *(table + NUMBER_GETPID) = Operation::GET_PID;

@@ -134,6 +134,16 @@ export namespace Sys {
   /// The directory argument meaning `/`.
   const ROOT: u64 = 0xFFFFFFFFFFFFFFFF;
 
+  /// The directory argument meaning the current directory. The portable
+  /// functions use it, so relative paths start there.
+  const CURRENT: u64 = 0xFFFFFFFFFFFFFFFE;
+
+  /// Change the current directory.
+  const CHANGE_DIRECTORY: u64 = 18;
+
+  /// Read the path of the current directory.
+  const CURRENT_DIRECTORY: u64 = 19;
+
   /// Descriptor 0, the console, which reads as empty.
   const STDIN: u64 = 0;
 
@@ -406,10 +416,10 @@ export namespace Sys {
     return portable(call3(READ, descriptor, @integerFromPointer(buffer), count));
   }
 
-  /// `OPEN(ROOT, path, length, flags, mode)` with a NUL-terminated path: the
+  /// `OPEN(CURRENT, path, length, flags, mode)` with a NUL-terminated path: the
   /// descriptor.
   function open(path: *u8, flags: u64, mode: u64): i64 {
-    return portable(call5(OPEN, ROOT, @integerFromPointer(path), length(path), flags, mode));
+    return portable(call5(OPEN, CURRENT, @integerFromPointer(path), length(path), flags, mode));
   }
 
   /// `CLOSE(descriptor)`.
@@ -427,9 +437,9 @@ export namespace Sys {
     return portable(call2(INFO, descriptor, @integerFromPointer(result)));
   }
 
-  /// `INFO_AT(ROOT, path, length, result)` with a NUL-terminated path.
+  /// `INFO_AT(CURRENT, path, length, result)` with a NUL-terminated path.
   function infoAt(path: *u8, result: *mut Sys::FileInfo): i64 {
-    return portable(call4(INFO_AT, ROOT, @integerFromPointer(path), length(path), @integerFromPointer(result)));
+    return portable(call4(INFO_AT, CURRENT, @integerFromPointer(path), length(path), @integerFromPointer(result)));
   }
 
   /// Reads the next entry of the open directory `descriptor`: writes its
@@ -458,9 +468,9 @@ export namespace Sys {
     return nameLength as i64;
   }
 
-  /// `MAKE_DIRECTORY(ROOT, path, length, mode)` with a NUL-terminated path.
+  /// `MAKE_DIRECTORY(CURRENT, path, length, mode)` with a NUL-terminated path.
   function makeDirectory(path: *u8, mode: u64): i64 {
-    return portable(call4(MAKE_DIRECTORY, ROOT, @integerFromPointer(path), length(path), mode));
+    return portable(call4(MAKE_DIRECTORY, CURRENT, @integerFromPointer(path), length(path), mode));
   }
 
   /// `MAP(length, protection, flags, descriptor, offset)`: the address.
@@ -507,14 +517,38 @@ export namespace Sys {
     return portable(call1(SLEEP, (seconds as u64) * 1000000000 + (nanoseconds as u64)));
   }
 
-  /// `UNLINK(ROOT, path, length)` with a NUL-terminated path.
+  /// `UNLINK(CURRENT, path, length)` with a NUL-terminated path.
   function unlink(path: *u8): i64 {
-    return portable(call3(UNLINK, ROOT, @integerFromPointer(path), length(path)));
+    return portable(call3(UNLINK, CURRENT, @integerFromPointer(path), length(path)));
   }
 
-  /// `REMOVE_DIRECTORY(ROOT, path, length)` with a NUL-terminated path.
+  /// `REMOVE_DIRECTORY(CURRENT, path, length)` with a NUL-terminated path.
   function removeDirectory(path: *u8): i64 {
-    return portable(call3(REMOVE_DIRECTORY, ROOT, @integerFromPointer(path), length(path)));
+    return portable(call3(REMOVE_DIRECTORY, CURRENT, @integerFromPointer(path), length(path)));
+  }
+
+  /// `CHANGE_DIRECTORY(CURRENT, path, length)` with a NUL-terminated path.
+  function changeDirectory(path: *u8): i64 {
+    return portable(call3(CHANGE_DIRECTORY, CURRENT, @integerFromPointer(path), length(path)));
+  }
+
+  /// Writes the absolute path of the current directory and a NUL to the
+  /// `capacity` bytes at `buffer` and returns its length without the NUL, or
+  /// the negated status (`INVALID` when it does not fit).
+  function currentDirectory(buffer: *mut u8, capacity: u64): i64 {
+    if (capacity == 0) {
+      return 0 - (INVALID as i64);
+    }
+
+    let result: Sys::Result = call2(CURRENT_DIRECTORY, @integerFromPointer(buffer), capacity - 1);
+
+    if (result.status != OK) {
+      return portable(result);
+    }
+
+    *(buffer + result.value) = 0;
+
+    return result.value as i64;
   }
 
   /// Resets the machine. Returns only on failure, with the negated status.

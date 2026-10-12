@@ -49,6 +49,7 @@ commands=(
   "rm /tmp/b"
   "rmdir /tmp"
   "ls /"
+  "pwd"
   "nope"
 )
 
@@ -75,6 +76,7 @@ ls
 mkdir
 mmtest
 nativetest
+pwd
 reboot
 rm
 rmdir
@@ -138,6 +140,9 @@ S0
 bin
 etc
 dev
+S0
+> pwd
+/
 S0
 > nope
 run: /bin/nope: no such file or directory'

@@ -63,6 +63,9 @@ namespace Syscall::Linux {
   /// Illegal seek (29): the descriptor is the console.
   const ESPIPE: i64 = 29;
 
+  /// Result too large (34): `getcwd` into a buffer too small.
+  const ERANGE: i64 = 34;
+
   /// File name too long (36).
   const ENAMETOOLONG: i64 = 36;
 

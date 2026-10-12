@@ -362,7 +362,7 @@ namespace Tests::User {
 
   /// Panics unless `startElf` refuses the `size` bytes at `image`.
   function expectElfRefused(image: *mut u8, size: u64): void {
-    if (Proc::Process::startElf(image as *u8, size, "nativetest" as *u8, 11, 1) != Proc::Process::NO_PROCESS) {
+    if (Proc::Process::startElf(image as *u8, size, "nativetest" as *u8, 11, 1, Fs::Vfs::root()) != Proc::Process::NO_PROCESS) {
       @panic("user test: the loader started a program with a broken IgniOS note");
     }
   }

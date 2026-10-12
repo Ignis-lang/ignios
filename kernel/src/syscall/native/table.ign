@@ -35,10 +35,13 @@
 //! | 15     | `POWER`          | action: 1 reboot, 2 power off               | (no return on success) |
 //! | 16     | `UNLINK`         | directory, path, path length                | 0              |
 //! | 17     | `REMOVE_DIRECTORY` | directory, path, path length              | 0              |
+//! | 18     | `CHANGE_DIRECTORY` | directory, path, path length              | 0              |
+//! | 19     | `CURRENT_DIRECTORY` | buffer, capacity                         | the path length (no NUL) |
 //!
 //! Paths are a pointer and a length, not NUL-terminated strings. The
-//! directory argument is a descriptor open on a directory, or `ROOT` (all
-//! bits set) for `/`; an absolute path ignores it. `calls.ign` has the
+//! directory argument is a descriptor open on a directory, `ROOT` (all bits
+//! set) for `/`, or `CURRENT` (all bits set but the lowest) for the current
+//! directory of the process; an absolute path ignores it. `calls.ign` has the
 //! layouts of the info record and the directory entry, and the flags. Like
 //! the status codes, a number is never renumbered or reused.
 
@@ -107,6 +110,12 @@ namespace Syscall::Native {
   /// Remove an empty directory.
   const NUMBER_REMOVE_DIRECTORY: u64 = 17;
 
+  /// Change the current directory.
+  const NUMBER_CHANGE_DIRECTORY: u64 = 18;
+
+  /// Read the path of the current directory.
+  const NUMBER_CURRENT_DIRECTORY: u64 = 19;
+
   /// Fills the table.
   function initialize(): void {
     let table: *mut u8 = tableBase();
@@ -129,6 +138,8 @@ namespace Syscall::Native {
     *(table + NUMBER_POWER) = Operation::POWER;
     *(table + NUMBER_UNLINK) = Operation::UNLINK;
     *(table + NUMBER_REMOVE_DIRECTORY) = Operation::REMOVE_DIRECTORY;
+    *(table + NUMBER_CHANGE_DIRECTORY) = Operation::CHANGE_DIRECTORY;
+    *(table + NUMBER_CURRENT_DIRECTORY) = Operation::CURRENT_DIRECTORY;
   }
 
   /// The first byte of the table.

@@ -32,6 +32,7 @@
 //! | 97-98  | RDX comes back 0 from `CLOSE` and `YIELD` even when it went in as `0x1234`; call 512 is `NOT_SUPPORTED` |
 //! | 99     | `OPEN` of a path that crosses the user limit is `BAD_ADDRESS`        |
 //! | 100    | a path with a NUL byte in it (`/nt/x\0y`, length 7) is `INVALID`    |
+//! | 120-125 | `CURRENT_DIRECTORY` is `/`; `CHANGE_DIRECTORY` to `/nt`, then paths relative to `CURRENT` start there; the current directory is `BUSY`; a file is `NOT_DIRECTORY`; a buffer too small is `INVALID` |
 //! | 110-115 | `UNLINK` and `REMOVE_DIRECTORY`: a file, then `NOT_FOUND`; a directory as a file `IS_DIRECTORY`; a non-empty directory `NOT_EMPTY`; an open one `BUSY`; a file as a directory `NOT_DIRECTORY`; relative to a directory descriptor |
 //!
 //! The exit status is the number of the first check that failed, 0 when all
@@ -328,6 +329,24 @@ function checkEdges(): void {
   expect(Sys::call4(Sys::MAKE_DIRECTORY, Sys::ROOT, buffer(), 7, 0x1ED), Sys::INVALID, 0, 100);
 }
 
+/// The current directory.
+function checkCurrentDirectory(): void {
+  let current: u64 = 0xFFFFFFFFFFFFFFFE;
+
+  expect(Sys::call2(Sys::CURRENT_DIRECTORY, buffer(), 100), Sys::OK, 1, 120);
+  require(byte(buffer()) == 0x2F, 120);
+  expect(Sys::call3(Sys::CHANGE_DIRECTORY, Sys::ROOT, at("/nt"), 3), Sys::OK, 0, 121);
+  expect(Sys::call2(Sys::CURRENT_DIRECTORY, buffer(), 100), Sys::OK, 3, 121);
+  require(same(buffer(), "/nt", 3), 121);
+  expect(Sys::call4(Sys::INFO_AT, current, at("a"), 1, info()), Sys::OK, 0, 122);
+  expect(Sys::call4(Sys::INFO_AT, Sys::ROOT, at("a"), 1, info()), Sys::NOT_FOUND, 0, 122);
+  expect(Sys::call3(Sys::REMOVE_DIRECTORY, Sys::ROOT, at("/nt"), 3), Sys::BUSY, 0, 123);
+  expect(Sys::call3(Sys::CHANGE_DIRECTORY, current, at("a"), 1), Sys::NOT_DIRECTORY, 0, 124);
+  expect(Sys::call2(Sys::CURRENT_DIRECTORY, buffer(), 2), Sys::INVALID, 0, 125);
+  expect(Sys::call3(Sys::CHANGE_DIRECTORY, current, at(".."), 2), Sys::OK, 0, 125);
+  expect(Sys::call2(Sys::CURRENT_DIRECTORY, buffer(), 100), Sys::OK, 1, 125);
+}
+
 /// `UNLINK` and `REMOVE_DIRECTORY`.
 function checkRemove(): void {
   let made: u64 = succeed(open("/nt/gone", 8, Sys::OPEN_WRITE | Sys::OPEN_CREATE), 110);
@@ -363,6 +382,7 @@ function main(count: u64, values: *u64): u64 {
   checkScheduling();
   checkEdges();
   checkRemove();
+  checkCurrentDirectory();
 
   Io::print("nativetest: every native call, its arguments and its status codes behave as specified\n");
 

@@ -151,7 +151,7 @@ namespace Proc::Programs {
     } else if ((*node).kind != Fs::Vfs::FILE) {
       reportPath(path as *u8, pathLength, "not a regular file");
     } else {
-      id = Proc::Process::startElf((*node).data as *u8, (*node).size, strings, stringBytes, count);
+      id = Proc::Process::startElf((*node).data as *u8, (*node).size, strings, stringBytes, count, Fs::Vfs::root());
     }
 
     Arch::Cpu::restoreInterrupts(saved);

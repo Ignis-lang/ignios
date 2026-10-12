@@ -24,6 +24,10 @@
 //! An open file is freed when its last descriptor is closed. A process that
 //! ends closes everything it still has (`closeAll`).
 //!
+//! Each table also has a current directory, where relative paths start
+//! (`currentDirectory`, `changeDirectory`). A node that is a current
+//! directory counts as open: `remove` refuses it with `BUSY`.
+//!
 //! ## Flags
 //!
 //! The functions take this module's own flags, not any ABI's. The system call
@@ -85,6 +89,10 @@ record FilesState {
   /// an `Fs::OpenFile` or 0 for a free descriptor. Table `t`, descriptor `d`
   /// is entry `t * MAX_DESCRIPTORS + d`. The size must be 8 * 16.
   static mut tables: u64[128];
+
+  /// The current directory of each slot, the address of an `Fs::Node`; 0
+  /// means the root.
+  static mut directories: u64[8];
 }
 
 /// The descriptor API.
@@ -172,6 +180,8 @@ namespace Fs::Files {
     if (table >= MAX_TABLES) {
       return;
     }
+
+    *directoryPointer(table) = 0;
 
     let mut descriptor: u64 = 0;
 
@@ -449,11 +459,16 @@ namespace Fs::Files {
     return Fs::Vfs::remove(node);
   }
 
-  /// True when a descriptor of any process points at `node`.
+  /// True when a descriptor of any process points at `node`, or `node` is a
+  /// process's current directory.
   function isOpen(node: *mut Fs::Node): boolean {
     let mut table: u64 = 0;
 
     while (table < MAX_TABLES) {
+      if (*directoryPointer(table) == @integerFromPointer(node)) {
+        return true;
+      }
+
       let mut descriptor: u64 = 0;
 
       while (descriptor < MAX_DESCRIPTORS) {
@@ -537,6 +552,52 @@ namespace Fs::Files {
     (*file).references = 1;
 
     return file;
+  }
+
+  /// The current directory of `table`: the root until `setCurrentDirectory`.
+  function currentDirectory(table: u64): *mut Fs::Node {
+    if (table >= MAX_TABLES || *directoryPointer(table) == 0) {
+      return Fs::Vfs::root();
+    }
+
+    return @pointerFromInteger<*mut Fs::Node>(*directoryPointer(table));
+  }
+
+  /// Makes `directory`, which must be a directory, the current directory of
+  /// `table`.
+  function setCurrentDirectory(table: u64, directory: *mut Fs::Node): void {
+    if (table < MAX_TABLES) {
+      *directoryPointer(table) = @integerFromPointer(directory);
+    }
+  }
+
+  /// Changes the current directory of `table` to the one the `length` bytes
+  /// of `path` name, relative to `base`. Returns the lookup codes and
+  /// `NOT_DIRECTORY` for anything that is not a directory.
+  function changeDirectory(table: u64, base: *mut Fs::Node, path: *u8, length: u64): u64 {
+    if (length == 0) {
+      return Fs::Vfs::NOT_FOUND;
+    }
+
+    let mut node: *mut Fs::Node = null;
+    let status: u64 = Fs::Vfs::lookup(base, path, length, &mut node as *mut *mut Fs::Node);
+
+    if (status != Fs::Vfs::OK) {
+      return status;
+    }
+
+    if ((*node).kind != Fs::Vfs::DIRECTORY) {
+      return Fs::Vfs::NOT_DIRECTORY;
+    }
+
+    setCurrentDirectory(table, node);
+
+    return Fs::Vfs::OK;
+  }
+
+  /// The address of the current directory entry of `table`.
+  function directoryPointer(table: u64): *mut u64 {
+    return @pointerFromInteger<*mut u64>(@integerFromPointer(&mut FilesState::directories as *mut u64) + table * 8);
   }
 
   /// Stores `file` as `descriptor` of `table`.

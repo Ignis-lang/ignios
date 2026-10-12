@@ -2,7 +2,7 @@
 //! # Linux File System Calls
 //!
 //! `read`, `write`, `openat`, `close`, `lseek`, `fstat`, `newfstatat`,
-//! `getdents64`, `mkdirat` and `unlinkat`, with Linux numbers, flags, structures and
+//! `getdents64`, `mkdirat`, `unlinkat`, `chdir` and `getcwd`, with Linux numbers, flags, structures and
 //! errno values, on top of `Fs::Files` and `Fs::Vfs`.
 //!
 //! ## Overview
@@ -24,8 +24,8 @@
 //!     └─ Fs::Files::open    lowest free descriptor
 //! ```
 //!
-//! There is no current directory yet: `AT_FDCWD` means `/` for every
-//! process.
+//! `AT_FDCWD` and relative paths of `chdir` start at the process's current
+//! directory (`Fs::Files::currentDirectory`), `/` until it calls `chdir`.
 //!
 //! ## Flags of `openat`
 //!
@@ -349,6 +349,42 @@ namespace Syscall::Linux {
     return written;
   }
 
+  /// `chdir(path)`: relative to the current directory.
+  function changeDirectory(path: u64): u64 {
+    let table: u64 = Proc::Process::currentSlot();
+    let mut base: *mut Fs::Node = null;
+    let mut length: u64 = 0;
+    let status: u64 = resolve(table, AT_FDCWD, path, &mut base as *mut *mut Fs::Node, &mut length as *mut u64);
+
+    if (status != Fs::Vfs::OK) {
+      return Linux::failureFor(status);
+    }
+
+    let changed: u64 = Fs::Files::changeDirectory(table, base, pathBuffer() as *u8, length);
+
+    return changed == Fs::Vfs::OK ? 0 : Linux::failureFor(changed);
+  }
+
+  /// `getcwd(buf, size)`: writes the absolute path and a NUL and returns the
+  /// bytes written, NUL included, as the Linux system call does. A buffer
+  /// too small is `-ERANGE`.
+  function currentDirectory(buffer: u64, size: u64): u64 {
+    let mut length: u64 = 0;
+    let node: *mut Fs::Node = Fs::Files::currentDirectory(Proc::Process::currentSlot());
+
+    if (Fs::Vfs::pathOf(node, pathBuffer(), Fs::Vfs::PATH_MAX - 1, &mut length as *mut u64) != Fs::Vfs::OK || length + 1 > size) {
+      return Linux::failure(Linux::ERANGE);
+    }
+
+    *(pathBuffer() + length) = 0;
+
+    if (!Mm::AddressSpace::copyToUser(Proc::Process::currentRoot(), buffer, pathBuffer() as *u8, length + 1)) {
+      return Linux::failure(Linux::EFAULT);
+    }
+
+    return length + 1;
+  }
+
   /// `unlinkat(dirfd, path, flags)`: removes a file, or with `AT_REMOVEDIR`
   /// an empty directory. Another flag bit is `-EINVAL`; a file or directory
   /// that is open is `-EBUSY`.
@@ -434,8 +470,13 @@ namespace Syscall::Linux {
 
     *length = copied;
 
-    if (directory == AT_FDCWD || (copied > 0 && *pathBuffer() == 0x2F)) {
+    if (copied > 0 && *pathBuffer() == 0x2F) {
       *base = Fs::Vfs::root();
+      return Fs::Vfs::OK;
+    }
+
+    if (directory == AT_FDCWD) {
+      *base = Fs::Files::currentDirectory(table);
       return Fs::Vfs::OK;
     }
 

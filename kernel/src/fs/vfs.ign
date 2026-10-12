@@ -590,6 +590,49 @@ namespace Fs::Vfs {
     return OK;
   }
 
+  /// Writes the absolute path of `node` (`/` for the root, `/a/b` below it)
+  /// to the `capacity` bytes at `buffer`, without a NUL, and its length to
+  /// `length`. Returns `NAME_TOO_LONG` when it does not fit.
+  function pathOf(node: *mut Fs::Node, buffer: *mut u8, capacity: u64, length: *mut u64): u64 {
+    if (node == VfsState::root) {
+      if (capacity < 1) {
+        return NAME_TOO_LONG;
+      }
+
+      *buffer = SLASH;
+      *length = 1;
+      return OK;
+    }
+
+    let mut total: u64 = 0;
+    let mut walk: *mut Fs::Node = node;
+
+    while (walk != VfsState::root) {
+      total += 1 + (*walk).nameLength;
+      walk = (*walk).parent;
+    }
+
+    if (total > capacity) {
+      return NAME_TOO_LONG;
+    }
+
+    let mut end: u64 = total;
+
+    walk = node;
+
+    while (walk != VfsState::root) {
+      end -= (*walk).nameLength;
+      Lib::Mem::copy(buffer + end, (*walk).name as *u8, (*walk).nameLength);
+      end -= 1;
+      *(buffer + end) = SLASH;
+      walk = (*walk).parent;
+    }
+
+    *length = total;
+
+    return OK;
+  }
+
   /// The child of `directory` at `index` in the order they were added, or
   /// null past the last one.
   function child(directory: *mut Fs::Node, index: u64): *mut Fs::Node {

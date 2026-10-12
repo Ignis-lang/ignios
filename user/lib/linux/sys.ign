@@ -100,6 +100,15 @@ export namespace Sys {
   /// Linux system call number 263.
   const UNLINKAT: u64 = 263;
 
+  /// Linux system call number 79.
+  const GETCWD: u64 = 79;
+
+  /// Linux system call number 80.
+  const CHDIR: u64 = 80;
+
+  /// Result too large: `getcwd` into a buffer too small.
+  const ERANGE: i64 = 34;
+
   /// `unlinkat` flag: remove a directory.
   const AT_REMOVEDIR: u64 = 0x200;
 
@@ -495,6 +504,25 @@ export namespace Sys {
     return unlinkAt(AT_FDCWD, path, AT_REMOVEDIR);
   }
 
+  /// `chdir(path)`: 0 or -errno.
+  function changeDirectory(path: *u8): i64 {
+    return call1(CHDIR, @integerFromPointer(path));
+  }
+
+  /// `getcwd(buffer, capacity)`, returning the length without the NUL as the
+  /// native flavour does, or -errno.
+  function currentDirectory(buffer: *mut u8, capacity: u64): i64 {
+    let result: i64 = call2(GETCWD, @integerFromPointer(buffer), capacity);
+
+    return result > 0 ? result - 1 : result;
+  }
+
+  /// The raw `getcwd(buffer, capacity)`: the bytes written with the NUL, or
+  /// -errno.
+  function getcwd(buffer: *mut u8, capacity: u64): i64 {
+    return call2(GETCWD, @integerFromPointer(buffer), capacity);
+  }
+
   /// the errors the file calls return.
   function errorText(result: i64): str {
     return match (0 - result) {
@@ -504,6 +532,7 @@ export namespace Sys {
       ENODEV -> "No such device",
       EBUSY -> "Device or resource busy",
       ENOTEMPTY -> "Directory not empty",
+      ERANGE -> "Numerical result out of range",
       EBADF -> "Bad file descriptor",
       EFAULT -> "Bad address",
       EEXIST -> "File exists",

@@ -96,6 +96,9 @@ namespace Syscall::Native {
   /// The directory argument meaning `/`.
   const ROOT: u64 = 0xFFFFFFFFFFFFFFFF;
 
+  /// The directory argument meaning the current directory.
+  const CURRENT: u64 = 0xFFFFFFFFFFFFFFFE;
+
   /// The bits `OPEN` accepts.
   const OPEN_FLAGS: u64 = 0x7F;
 
@@ -158,6 +161,10 @@ namespace Syscall::Native {
       status = map(first, second, third, fourth, fifth, valuePointer);
     } else if (operation == Operation::UNMAP) {
       status = Syscall::Core::unmap(first, second);
+    } else if (operation == Operation::CHANGE_DIRECTORY) {
+      status = changeDirectory(first, second, third);
+    } else if (operation == Operation::CURRENT_DIRECTORY) {
+      status = currentDirectory(first, second, valuePointer);
     } else if (operation == Operation::UNLINK || operation == Operation::REMOVE_DIRECTORY) {
       status = remove(first, second, third, operation == Operation::REMOVE_DIRECTORY);
     } else if (operation == Operation::GET_PID) {
@@ -317,6 +324,38 @@ namespace Syscall::Native {
     return Fs::Vfs::create(parent, (pathBuffer() as *u8) + nameOffset, nameLength, Fs::Vfs::DIRECTORY, mode & Fs::Files::PERMISSION_MASK, &mut created as *mut *mut Fs::Node);
   }
 
+  /// `CHANGE_DIRECTORY(directory, path, length)`.
+  function changeDirectory(directory: u64, path: u64, length: u64): u64 {
+    let table: u64 = Proc::Process::currentSlot();
+    let mut base: *mut Fs::Node = null;
+    let status: u64 = resolve(table, directory, path, length, &mut base as *mut *mut Fs::Node);
+
+    if (status != Fs::Vfs::OK) {
+      return status;
+    }
+
+    return Fs::Files::changeDirectory(table, base, pathBuffer() as *u8, length);
+  }
+
+  /// `CURRENT_DIRECTORY(buffer, capacity)`: the absolute path, no NUL. A
+  /// buffer too small is `INVALID`.
+  function currentDirectory(buffer: u64, capacity: u64, written: *mut u64): u64 {
+    let mut length: u64 = 0;
+    let node: *mut Fs::Node = Fs::Files::currentDirectory(Proc::Process::currentSlot());
+
+    if (Fs::Vfs::pathOf(node, pathBuffer(), Fs::Vfs::PATH_MAX, &mut length as *mut u64) != Fs::Vfs::OK || length > capacity) {
+      return Fs::Vfs::INVALID;
+    }
+
+    if (!Mm::AddressSpace::copyToUser(Proc::Process::currentRoot(), buffer, pathBuffer() as *u8, length)) {
+      return Syscall::Core::BAD_ADDRESS;
+    }
+
+    *written = length;
+
+    return Fs::Vfs::OK;
+  }
+
   /// `UNLINK` and `REMOVE_DIRECTORY(directory, path, length)`.
   function remove(directory: u64, path: u64, length: u64, isDirectory: boolean): u64 {
     let mut base: *mut Fs::Node = null;
@@ -359,7 +398,8 @@ namespace Syscall::Native {
 
   /// Copies the `length` bytes of the user path at `path` into `pathBuffer`
   /// and finds the directory it is relative to: the root for an absolute
-  /// path or `ROOT`, otherwise the open directory `directory`. Returns
+  /// path or `ROOT`, the current directory for `CURRENT`, otherwise the open
+  /// directory `directory`. Returns
   /// `NOT_FOUND` for an empty path, `NAME_TOO_LONG`, `BAD_ADDRESS`,
   /// `INVALID` for a path with a NUL byte in it, and the
   /// `Fs::Files::directoryOf` codes.
@@ -396,6 +436,11 @@ namespace Syscall::Native {
 
     if (directory == ROOT || *pathBuffer() == 0x2F) {
       *base = Fs::Vfs::root();
+      return Fs::Vfs::OK;
+    }
+
+    if (directory == CURRENT) {
+      *base = Fs::Files::currentDirectory(table);
       return Fs::Vfs::OK;
     }
 

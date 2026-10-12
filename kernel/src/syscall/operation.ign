@@ -73,4 +73,10 @@ namespace Syscall::Operation {
 
   /// Remove an empty directory.
   const REMOVE_DIRECTORY: u8 = 18;
+
+  /// Change the current directory.
+  const CHANGE_DIRECTORY: u8 = 19;
+
+  /// Read the path of the current directory.
+  const CURRENT_DIRECTORY: u8 = 20;
 }
