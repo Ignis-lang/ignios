@@ -85,4 +85,7 @@ namespace Syscall::Operation {
 
   /// Wait for a process to end.
   const WAIT: u8 = 22;
+
+  /// Wait for any child to end.
+  const WAIT_ANY: u8 = 23;
 }

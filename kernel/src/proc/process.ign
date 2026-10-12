@@ -379,6 +379,7 @@ namespace Proc::Process {
     directory: *mut Fs::Node
   ): u64 {
     let saved: u64 = Arch::Cpu::saveAndDisableInterrupts();
+
     // Read before the new slot turns RUNNING: `currentSlot` matches slots by
     // thread, and the new slot's thread field still holds a stale value.
     let caller: u64 = currentId();
@@ -525,6 +526,7 @@ namespace Proc::Process {
     (*process).state = (*process).detached ? FREE : EXITED;
     Fs::Files::closeAll(slot);
     releaseChildren((*process).id);
+    wakeParent((*process).parent);
 
     Drivers::Console::write("process ");
     Drivers::Console::writeDecimal((*process).id);
@@ -561,6 +563,71 @@ namespace Proc::Process {
 
       slot += 1;
     }
+  }
+
+  /// Wakes the thread of process `parent` if it is parked in `waitAny`.
+  /// Nothing happens for `NO_PARENT` or a parent that is not parked.
+  function wakeParent(parent: u64): void {
+    if (parent == NO_PARENT) {
+      return;
+    }
+
+    let slot: u64 = findSlot(parent);
+
+    if (slot != NO_PROCESS && (*slotPointer(slot)).state == RUNNING) {
+      Sched::Scheduler::wake((*slotPointer(slot)).thread);
+    }
+  }
+
+  /// Waits until any child of the running process has ended, writes its
+  /// exit status to `status`, frees its slot and returns its id. Returns
+  /// `NO_PROCESS` when the process has no child at all. The scan and the
+  /// park happen with interrupts off, so a child that ends in between still
+  /// finds its parent parked and wakes it.
+  function waitAny(status: *mut u64): u64 {
+    let saved: u64 = Arch::Cpu::saveAndDisableInterrupts();
+    let me: u64 = currentId();
+
+    while (true) {
+      let mut found: boolean = false;
+      let mut slot: u64 = 0;
+
+      while (slot < MAX_PROCESSES) {
+        let child: *mut ProcessEntry = slotPointer(slot);
+
+        if ((*child).state != FREE && (*child).parent == me) {
+          found = true;
+
+          if ((*child).state == EXITED) {
+            let id: u64 = (*child).id;
+
+            // The child's thread may still be dying: wait until it is gone
+            // and its address space freed, as `wait` does.
+            Sched::Scheduler::join((*child).thread);
+
+            if ((*child).state == EXITED && (*child).id == id) {
+              *status = (*child).status;
+              (*child).state = FREE;
+              Arch::Cpu::restoreInterrupts(saved);
+              return id;
+            }
+          }
+        }
+
+        slot += 1;
+      }
+
+      if (!found) {
+        Arch::Cpu::restoreInterrupts(saved);
+        return NO_PROCESS;
+      }
+
+      Sched::Scheduler::park();
+    }
+
+    Arch::Cpu::restoreInterrupts(saved);
+
+    return NO_PROCESS;
   }
 
   /// The parent of process `id`: `NO_PARENT` for one the kernel started or

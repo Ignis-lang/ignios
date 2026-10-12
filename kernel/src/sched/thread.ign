@@ -149,6 +149,9 @@ namespace Sched::Thread {
   /// Waiting until the thread `joinTarget` is gone from the table.
   const WAITING: u64 = 5;
 
+  /// Parked until another thread calls `Sched::Scheduler::wake` on it.
+  const PARKED: u64 = 6;
+
   /// 4 KiB.
   const PAGE_SIZE: u64 = 4096;
 

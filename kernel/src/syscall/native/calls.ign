@@ -172,6 +172,8 @@ namespace Syscall::Native {
       status = spawn(first, second, third, fourth, fifth, valuePointer);
     } else if (operation == Operation::WAIT) {
       status = wait(first, valuePointer);
+    } else if (operation == Operation::WAIT_ANY) {
+      status = waitAny(first, valuePointer);
     } else if (operation == Operation::CHANGE_DIRECTORY) {
       status = changeDirectory(first, second, third);
     } else if (operation == Operation::CURRENT_DIRECTORY) {
@@ -453,6 +455,33 @@ namespace Syscall::Native {
     }
 
     *status = result;
+
+    return Fs::Vfs::OK;
+  }
+
+  /// `WAIT_ANY(statusPointer)`: blocks until any child has ended, writes its
+  /// exit status (8 bytes) to `statusPointer` and returns its id. The pointer
+  /// is checked before waiting, so a bad one is `BAD_ADDRESS` and collects
+  /// nothing. `NO_CHILD` when the caller has no child.
+  function waitAny(statusPointer: u64, id: *mut u64): u64 {
+    let root: u64 = Proc::Process::currentRoot();
+
+    if (!Mm::AddressSpace::isAccessible(root, statusPointer, 8, true)) {
+      return Syscall::Core::BAD_ADDRESS;
+    }
+
+    let mut status: u64 = 0;
+    let child: u64 = Proc::Process::waitAny(&mut status as *mut u64);
+
+    if (child == Proc::Process::NO_PROCESS) {
+      return Syscall::Core::NO_CHILD;
+    }
+
+    if (!Mm::AddressSpace::copyToUser(root, statusPointer, &status as *u8, 8)) {
+      return Syscall::Core::BAD_ADDRESS;
+    }
+
+    *id = child;
 
     return Fs::Vfs::OK;
   }

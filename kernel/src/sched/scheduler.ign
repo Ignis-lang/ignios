@@ -345,6 +345,43 @@ namespace Sched::Scheduler {
     wakeJoiners((*thread).id);
   }
 
+  /// Parks the running thread until another thread calls `wake` on it, and
+  /// returns then. The caller checks its condition with interrupts off and
+  /// parks without turning them on in between, so a `wake` cannot slip in
+  /// between the check and the park on this processor (see the concurrency
+  /// proposal for several processors).
+  function park(): void {
+    let saved: u64 = Arch::Cpu::saveAndDisableInterrupts();
+
+    if (SchedulerState::current == Sched::Thread::IDLE_SLOT) {
+      @panic("scheduler: the idle thread cannot park");
+    }
+
+    (*Sched::Thread::slotPointer(SchedulerState::current)).state = Sched::Thread::PARKED;
+    switchToNext();
+
+    Arch::Cpu::restoreInterrupts(saved);
+  }
+
+  /// Makes the thread `id` ready when it is parked. Does nothing otherwise,
+  /// so a wake for a thread that is not waiting is harmless.
+  function wake(id: u64): void {
+    let saved: u64 = Arch::Cpu::saveAndDisableInterrupts();
+    let mut slot: u64 = 0;
+
+    while (slot < Sched::Thread::MAX_THREADS) {
+      let thread: *mut Sched::Thread::Control = Sched::Thread::slotPointer(slot);
+
+      if ((*thread).state == Sched::Thread::PARKED && (*thread).id == id) {
+        makeReady(slot);
+      }
+
+      slot += 1;
+    }
+
+    Arch::Cpu::restoreInterrupts(saved);
+  }
+
   /// Makes every thread that waits for the thread `id` ready. Interrupts
   /// must be disabled.
   function wakeJoiners(id: u64): void {
