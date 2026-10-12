@@ -79,4 +79,10 @@ namespace Syscall::Operation {
 
   /// Read the path of the current directory.
   const CURRENT_DIRECTORY: u8 = 20;
+
+  /// Start a program from a path.
+  const SPAWN: u8 = 21;
+
+  /// Wait for a process to end.
+  const WAIT: u8 = 22;
 }

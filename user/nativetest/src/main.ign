@@ -33,6 +33,7 @@
 //! | 99     | `OPEN` of a path that crosses the user limit is `BAD_ADDRESS`        |
 //! | 100    | a path with a NUL byte in it (`/nt/x\0y`, length 7) is `INVALID`    |
 //! | 120-125 | `CURRENT_DIRECTORY` is `/`; `CHANGE_DIRECTORY` to `/nt`, then paths relative to `CURRENT` start there; the current directory is `BUSY`; a file is `NOT_DIRECTORY`; a buffer too small is `INVALID` |
+//! | 130-137 | `SPAWN` of `/bin/pwd` and `WAIT` for its status 0; a second `WAIT` is `NOT_FOUND`; waiting for itself is `INVALID`; a missing program `NOT_FOUND`, a directory `IS_DIRECTORY`, a text file `INVALID`; arguments that do not match their count `INVALID`; a bad argument pointer `BAD_ADDRESS`; the child starts in the parent's current directory (`rmdir sub` from `/nt` removes `/nt/sub`) |
 //! | 110-115 | `UNLINK` and `REMOVE_DIRECTORY`: a file, then `NOT_FOUND`; a directory as a file `IS_DIRECTORY`; a non-empty directory `NOT_EMPTY`; an open one `BUSY`; a file as a directory `NOT_DIRECTORY`; relative to a directory descriptor |
 //!
 //! The exit status is the number of the first check that failed, 0 when all
@@ -347,6 +348,38 @@ function checkCurrentDirectory(): void {
   expect(Sys::call2(Sys::CURRENT_DIRECTORY, buffer(), 100), Sys::OK, 1, 125);
 }
 
+/// `SPAWN(path, length, arguments, bytes, count)`.
+function spawn(path: str, length: u64, arguments: str, bytes: u64, count: u64): Sys::Result {
+  return Sys::call5(Sys::SPAWN, at(path), length, at(arguments), bytes, count);
+}
+
+/// Process creation.
+function checkSpawn(): void {
+  let child: u64 = succeed(spawn("/bin/pwd", 8, "pwd", 4, 1), 130);
+
+  expect(Sys::call1(Sys::WAIT, child), Sys::OK, 0, 130);
+  expect(Sys::call1(Sys::WAIT, child), Sys::NOT_FOUND, 0, 131);
+
+  let me: u64 = succeed(Sys::call0(Sys::PROCESS_ID), 132);
+
+  expect(Sys::call1(Sys::WAIT, me), Sys::INVALID, 0, 132);
+  expect(spawn("/bin/nope", 9, "nope", 5, 1), Sys::NOT_FOUND, 0, 133);
+  expect(spawn("/bin", 4, "bin", 4, 1), Sys::IS_DIRECTORY, 0, 133);
+  expect(spawn("/etc/motd", 9, "motd", 5, 1), Sys::INVALID, 0, 134);
+  expect(spawn("/bin/pwd", 8, "pwd", 4, 2), Sys::INVALID, 0, 135);
+  expect(spawn("/bin/pwd", 8, "pwdx", 3, 1), Sys::INVALID, 0, 135);
+  expect(Sys::call5(Sys::SPAWN, at("/bin/pwd"), 8, 1, 4, 1), Sys::BAD_ADDRESS, 0, 136);
+
+  succeed(Sys::call4(Sys::MAKE_DIRECTORY, Sys::ROOT, at("/nt/sub"), 7, 0x1ED), 137);
+  succeed(Sys::call3(Sys::CHANGE_DIRECTORY, Sys::ROOT, at("/nt"), 3), 137);
+
+  let remover: u64 = succeed(spawn("/bin/rmdir", 10, "rmdir\0sub", 10, 2), 137);
+
+  expect(Sys::call1(Sys::WAIT, remover), Sys::OK, 0, 137);
+  expect(Sys::call4(Sys::INFO_AT, Sys::ROOT, at("/nt/sub"), 7, info()), Sys::NOT_FOUND, 0, 137);
+  succeed(Sys::call3(Sys::CHANGE_DIRECTORY, Sys::ROOT, at("/"), 1), 137);
+}
+
 /// `UNLINK` and `REMOVE_DIRECTORY`.
 function checkRemove(): void {
   let made: u64 = succeed(open("/nt/gone", 8, Sys::OPEN_WRITE | Sys::OPEN_CREATE), 110);
@@ -383,6 +416,7 @@ function main(count: u64, values: *u64): u64 {
   checkEdges();
   checkRemove();
   checkCurrentDirectory();
+  checkSpawn();
 
   Io::print("nativetest: every native call, its arguments and its status codes behave as specified\n");
 

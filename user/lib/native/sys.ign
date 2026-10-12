@@ -144,6 +144,12 @@ export namespace Sys {
   /// Read the path of the current directory.
   const CURRENT_DIRECTORY: u64 = 19;
 
+  /// Start a program.
+  const SPAWN: u64 = 20;
+
+  /// Wait for a process.
+  const WAIT: u64 = 21;
+
   /// Descriptor 0, the console, which reads as empty.
   const STDIN: u64 = 0;
 
@@ -549,6 +555,20 @@ export namespace Sys {
     *(buffer + result.value) = 0;
 
     return result.value as i64;
+  }
+
+  /// Starts the program at the NUL-terminated `path` (relative to the current
+  /// directory) with `count` arguments packed as NUL-terminated strings in
+  /// the `bytes` bytes at `arguments`, argument 0 being its name. Returns the
+  /// process id, or the negated status.
+  function spawn(path: *u8, arguments: *u8, bytes: u64, count: u64): i64 {
+    return portable(call5(SPAWN, @integerFromPointer(path), length(path), @integerFromPointer(arguments), bytes, count));
+  }
+
+  /// Waits until process `id` has ended and returns its exit status, or the
+  /// negated status.
+  function wait(id: u64): i64 {
+    return portable(call1(WAIT, id));
   }
 
   /// Resets the machine. Returns only on failure, with the negated status.

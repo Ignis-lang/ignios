@@ -37,6 +37,8 @@
 //! | 17     | `REMOVE_DIRECTORY` | directory, path, path length              | 0              |
 //! | 18     | `CHANGE_DIRECTORY` | directory, path, path length              | 0              |
 //! | 19     | `CURRENT_DIRECTORY` | buffer, capacity                         | the path length (no NUL) |
+//! | 20     | `SPAWN`          | path, path length, arguments, argument bytes, argument count | the process id |
+//! | 21     | `WAIT`           | process id                                  | its exit status |
 //!
 //! Paths are a pointer and a length, not NUL-terminated strings. The
 //! directory argument is a descriptor open on a directory, `ROOT` (all bits
@@ -116,6 +118,12 @@ namespace Syscall::Native {
   /// Read the path of the current directory.
   const NUMBER_CURRENT_DIRECTORY: u64 = 19;
 
+  /// Start a program from a path.
+  const NUMBER_SPAWN: u64 = 20;
+
+  /// Wait for a process to end.
+  const NUMBER_WAIT: u64 = 21;
+
   /// Fills the table.
   function initialize(): void {
     let table: *mut u8 = tableBase();
@@ -140,6 +148,8 @@ namespace Syscall::Native {
     *(table + NUMBER_REMOVE_DIRECTORY) = Operation::REMOVE_DIRECTORY;
     *(table + NUMBER_CHANGE_DIRECTORY) = Operation::CHANGE_DIRECTORY;
     *(table + NUMBER_CURRENT_DIRECTORY) = Operation::CURRENT_DIRECTORY;
+    *(table + NUMBER_SPAWN) = Operation::SPAWN;
+    *(table + NUMBER_WAIT) = Operation::WAIT;
   }
 
   /// The first byte of the table.

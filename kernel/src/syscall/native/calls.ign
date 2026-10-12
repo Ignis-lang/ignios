@@ -66,6 +66,12 @@
 //! returns on success. Another action is `INVALID`, and a machine that cannot
 //! power off returns `NOT_SUPPORTED`.
 //!
+//! **Spawn** takes the program's path and its arguments packed as
+//! NUL-terminated strings with their total size and count; the child starts
+//! in the caller's current directory. **Wait** blocks until the process has
+//! ended, returns its exit status and frees its slot; a process nobody waits
+//! for keeps its slot.
+//!
 //! **Sleep** takes a plain count of nanoseconds, rounded up to whole timer
 //! ticks and capped at a million seconds.
 
@@ -161,6 +167,10 @@ namespace Syscall::Native {
       status = map(first, second, third, fourth, fifth, valuePointer);
     } else if (operation == Operation::UNMAP) {
       status = Syscall::Core::unmap(first, second);
+    } else if (operation == Operation::SPAWN) {
+      status = spawn(first, second, third, fourth, fifth, valuePointer);
+    } else if (operation == Operation::WAIT) {
+      status = wait(first, valuePointer);
     } else if (operation == Operation::CHANGE_DIRECTORY) {
       status = changeDirectory(first, second, third);
     } else if (operation == Operation::CURRENT_DIRECTORY) {
@@ -322,6 +332,117 @@ namespace Syscall::Native {
     let mut created: *mut Fs::Node = null;
 
     return Fs::Vfs::create(parent, (pathBuffer() as *u8) + nameOffset, nameLength, Fs::Vfs::DIRECTORY, mode & Fs::Files::PERMISSION_MASK, &mut created as *mut *mut Fs::Node);
+  }
+
+  /// `SPAWN(path, length, arguments, argumentBytes, argumentCount)`: starts
+  /// the program at `path`, relative to the current directory, with the
+  /// `argumentCount` NUL-terminated strings packed in the `argumentBytes`
+  /// bytes at `arguments` (argument 0 is the program name). The new process
+  /// starts in the caller's current directory with fresh descriptors 0 to 2.
+  /// Returns the lookup codes, `IS_DIRECTORY`, `BAD_ADDRESS`, and `INVALID`
+  /// for arguments that are not exactly `argumentCount` strings, more than
+  /// `MAX_ARGUMENTS` of them or `MAX_ARGUMENT_BYTES` bytes, or a file the
+  /// loader refuses or a full process table.
+  function spawn(
+    path: u64,
+    length: u64,
+    arguments: u64,
+    argumentBytes: u64,
+    argumentCount: u64,
+    id: *mut u64
+  ): u64 {
+    if (argumentCount == 0 || argumentCount > Proc::Process::MAX_ARGUMENTS || argumentBytes == 0 || argumentBytes > Proc::Process::MAX_ARGUMENT_BYTES) {
+      return Fs::Vfs::INVALID;
+    }
+
+    let table: u64 = Proc::Process::currentSlot();
+    let mut base: *mut Fs::Node = null;
+    let status: u64 = resolve(table, CURRENT, path, length, &mut base as *mut *mut Fs::Node);
+
+    if (status != Fs::Vfs::OK) {
+      return status;
+    }
+
+    let mut node: *mut Fs::Node = null;
+    let found: u64 = Fs::Vfs::lookup(base, pathBuffer() as *u8, length, &mut node as *mut *mut Fs::Node);
+
+    if (found != Fs::Vfs::OK) {
+      return found;
+    }
+
+    if ((*node).kind != Fs::Vfs::FILE) {
+      return (*node).kind == Fs::Vfs::DIRECTORY ? Fs::Vfs::IS_DIRECTORY : Fs::Vfs::INVALID;
+    }
+
+    let strings: *mut u8 = Mm::Heap::allocate(argumentBytes, 16);
+
+    if (strings == null) {
+      return Fs::Vfs::NO_MEMORY;
+    }
+
+    if (!Mm::AddressSpace::copyFromUser(Proc::Process::currentRoot(), strings, arguments, argumentBytes)) {
+      Mm::Heap::free(strings);
+      return Syscall::Core::BAD_ADDRESS;
+    }
+
+    if (!countStrings(strings as *u8, argumentBytes, argumentCount)) {
+      Mm::Heap::free(strings);
+      return Fs::Vfs::INVALID;
+    }
+
+    let started: u64 = Proc::Process::startElf((*node).data as *u8, (*node).size, strings as *u8, argumentBytes, argumentCount, Fs::Files::currentDirectory(table));
+
+    Mm::Heap::free(strings);
+
+    if (started == Proc::Process::NO_PROCESS) {
+      return Fs::Vfs::INVALID;
+    }
+
+    *id = started;
+
+    return Fs::Vfs::OK;
+  }
+
+  /// True when the `length` bytes at `strings` are exactly `count` strings
+  /// that each end with a NUL: the last byte is a NUL and there are `count`
+  /// NULs. `Proc::Process::buildStack` walks the strings by their NULs, so
+  /// fewer would make it read past the block.
+  function countStrings(strings: *u8, length: u64, count: u64): boolean {
+    if (*(strings + length - 1) != 0) {
+      return false;
+    }
+
+    let mut found: u64 = 0;
+    let mut index: u64 = 0;
+
+    while (index < length) {
+      if (*(strings + index) == 0) {
+        found += 1;
+      }
+
+      index += 1;
+    }
+
+    return found == count;
+  }
+
+  /// `WAIT(id)`: blocks until process `id` has ended and returns its exit
+  /// status. `NOT_FOUND` for an id that is not running or was already
+  /// collected, `INVALID` for the caller's own id.
+  function wait(id: u64, status: *mut u64): u64 {
+    if (id == Proc::Process::currentId()) {
+      return Fs::Vfs::INVALID;
+    }
+
+    let result: u64 = Proc::Process::wait(id);
+
+    if (result == Proc::Process::NO_PROCESS) {
+      return Fs::Vfs::NOT_FOUND;
+    }
+
+    *status = result;
+
+    return Fs::Vfs::OK;
   }
 
   /// `CHANGE_DIRECTORY(directory, path, length)`.
