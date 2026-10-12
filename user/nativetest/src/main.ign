@@ -35,11 +35,13 @@
 //! | 120-125 | `CURRENT_DIRECTORY` is `/`; `CHANGE_DIRECTORY` to `/nt`, then paths relative to `CURRENT` start there; the current directory is `BUSY`; a file is `NOT_DIRECTORY`; a buffer too small is `INVALID` |
 //! | 130-137 | `SPAWN` of `/bin/pwd` and `WAIT` for its status 0; a second `WAIT` is `NOT_FOUND`; waiting for itself is `INVALID`; a missing program `NOT_FOUND`, a directory `IS_DIRECTORY`, a text file `INVALID`; arguments that do not match their count `INVALID`; a bad argument pointer `BAD_ADDRESS`; the child starts in the parent's current directory (`rmdir sub` from `/nt` removes `/nt/sub`) |
 //! | 200-206 | `POWER` with an unknown action is `INVALID`; `WAIT` for an id that never existed is `NOT_FOUND`; an argument block with an empty string is accepted; a child's exit status 1 comes back; 7 children fill the process table, the 8th is refused, and after waiting starting works again; `CURRENT_DIRECTORY` into 1 byte; removing `.` or `/bin/..` is `INVALID` |
+//! | 140-143 | parents: a grandchild is not the caller's child (`NO_CHILD`); an orphan is freed when it ends (`NOT_FOUND` afterwards); a child that ended before its parent is freed with the parent (`NOT_FOUND`) |
 //! | 110-115 | `UNLINK` and `REMOVE_DIRECTORY`: a file, then `NOT_FOUND`; a directory as a file `IS_DIRECTORY`; a non-empty directory `NOT_EMPTY`; an open one `BUSY`; a file as a directory `NOT_DIRECTORY`; relative to a directory descriptor |
 //!
 //! The exit status is the number of the first check that failed, 0 when all
 //! passed. `Tests::User::runNative` runs it at boot and removes `/nt`.
 
+import Args from "std::args";
 import Io from "std::io";
 import Sys from "std::sys";
 import _ from "std::panic";
@@ -425,6 +427,47 @@ function checkLimits(): void {
   expect(Sys::call3(Sys::REMOVE_DIRECTORY, Sys::ROOT, at("/bin/.."), 7), Sys::INVALID, 0, 206);
 }
 
+/// Parents and children. `nativetest orphan` starts `nativetest nap` and
+/// ends at once, so the napping grandchild becomes an orphan; `nativetest
+/// zombie` starts `/bin/pwd`, lets it end, and ends without waiting for it.
+/// Both exit with the grandchild's id, which fits a status in these runs.
+function checkParents(): void {
+  let orphanMaker: u64 = succeed(spawn("/bin/nativetest", 15, "nativetest\0orphan", 18, 2), 140);
+  let orphan: u64 = succeed(Sys::call1(Sys::WAIT, orphanMaker), 140);
+
+  expect(Sys::call1(Sys::WAIT, orphan), Sys::NO_CHILD, 0, 141);
+  expect(Sys::call1(Sys::SLEEP, 400000000), Sys::OK, 0, 142);
+  expect(Sys::call1(Sys::WAIT, orphan), Sys::NOT_FOUND, 0, 142);
+
+  let zombieMaker: u64 = succeed(spawn("/bin/nativetest", 15, "nativetest\0zombie", 18, 2), 143);
+  let zombie: u64 = succeed(Sys::call1(Sys::WAIT, zombieMaker), 143);
+
+  expect(Sys::call1(Sys::WAIT, zombie), Sys::NOT_FOUND, 0, 143);
+}
+
+/// The helper modes of `checkParents`. Returns the exit status.
+function helper(mode: *u8): u64 {
+  let length: u64 = Args::length(mode);
+
+  if (length == 3 && same(@integerFromPointer(mode), "nap", 3)) {
+    Sys::call1(Sys::SLEEP, 200000000);
+    return 0;
+  }
+
+  if (length == 6 && same(@integerFromPointer(mode), "orphan", 6)) {
+    return succeed(spawn("/bin/nativetest", 15, "nativetest\0nap", 15, 2), 150) & 0xFF;
+  }
+
+  if (length == 6 && same(@integerFromPointer(mode), "zombie", 6)) {
+    let child: u64 = succeed(spawn("/bin/pwd", 8, "pwd", 4, 1), 151);
+
+    Sys::call1(Sys::SLEEP, 100000000);
+    return child & 0xFF;
+  }
+
+  return 152;
+}
+
 /// `UNLINK` and `REMOVE_DIRECTORY`.
 function checkRemove(): void {
   let made: u64 = succeed(open("/nt/gone", 8, Sys::OPEN_WRITE | Sys::OPEN_CREATE), 110);
@@ -451,6 +494,10 @@ function checkRemove(): void {
 /// Called by `_start` with argc and argv.
 @externName("ignis_main")
 function main(count: u64, values: *u64): u64 {
+  if (count > 1) {
+    return helper(Args::get(values, 1));
+  }
+
   checkBasics();
   checkReading();
   checkOpenErrors();
@@ -463,6 +510,7 @@ function main(count: u64, values: *u64): u64 {
   checkCurrentDirectory();
   checkSpawn();
   checkLimits();
+  checkParents();
 
   Io::print("nativetest: every native call, its arguments and its status codes behave as specified\n");
 

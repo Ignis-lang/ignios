@@ -41,6 +41,16 @@
 //!                    thread is gone, returns the status, slot := FREE
 //! ```
 //!
+//! ## Parents and children
+//!
+//! A process remembers the process that started it (`parent`; `NO_PARENT` for
+//! one the kernel started, which the kernel waits for itself). Only the
+//! parent may wait for a process. When a process ends, `releaseChildren`
+//! frees its children that already ended, since nobody can wait for them
+//! any more, and makes the running ones orphans (`detached`): an orphan's
+//! slot is freed as soon as it ends. So no slot stays taken by a process
+//! nobody can collect.
+//!
 //! ## User Address Space of a Process
 //!
 //! ```text
@@ -91,6 +101,14 @@ record ProcessEntry {
 
   /// The system call convention of the process, `ABI_LINUX` or `ABI_NATIVE`.
   public abi: u64;
+
+  /// The id of the process that started this one, `NO_PARENT` for a process
+  /// the kernel started (the kernel waits for those itself).
+  public parent: u64;
+
+  /// True for an orphan: its parent ended first, nobody can wait for it,
+  /// and its slot is freed as soon as it ends.
+  public detached: boolean;
 }
 
 /// The process table and the id counter.
@@ -118,6 +136,9 @@ namespace Proc::Process {
 
   /// Slot state: the process ended and its status waits for `wait`.
   const EXITED: u64 = 2;
+
+  /// `ProcessEntry::parent` of a process the kernel started.
+  const NO_PARENT: u64 = 0;
 
   /// The system call convention the process speaks: Linux x86_64 numbers and
   /// errno values.
@@ -358,6 +379,9 @@ namespace Proc::Process {
     directory: *mut Fs::Node
   ): u64 {
     let saved: u64 = Arch::Cpu::saveAndDisableInterrupts();
+    // Read before the new slot turns RUNNING: `currentSlot` matches slots by
+    // thread, and the new slot's thread field still holds a stale value.
+    let caller: u64 = currentId();
     let slot: u64 = findFreeSlot();
 
     if (slot == NO_PROCESS) {
@@ -374,6 +398,8 @@ namespace Proc::Process {
     (*process).stackPointer = stackPointer;
     (*process).status = 0;
     (*process).abi = abi;
+    (*process).parent = caller == NO_PROCESS ? NO_PARENT : caller;
+    (*process).detached = false;
 
     Proc::Memory::reset(slot);
 
@@ -496,8 +522,9 @@ namespace Proc::Process {
     let process: *mut ProcessEntry = slotPointer(slot);
 
     (*process).status = status;
-    (*process).state = EXITED;
+    (*process).state = (*process).detached ? FREE : EXITED;
     Fs::Files::closeAll(slot);
+    releaseChildren((*process).id);
 
     Drivers::Console::write("process ");
     Drivers::Console::writeDecimal((*process).id);
@@ -512,6 +539,60 @@ namespace Proc::Process {
     Drivers::Console::writeLine("");
 
     Sched::Scheduler::exitCurrent();
+  }
+
+  /// Frees the children of `parent` that already ended, which nobody can
+  /// wait for any more, and turns the ones still running into orphans that
+  /// are freed when they end. Interrupts must be off.
+  function releaseChildren(parent: u64): void {
+    let mut slot: u64 = 0;
+
+    while (slot < MAX_PROCESSES) {
+      let child: *mut ProcessEntry = slotPointer(slot);
+
+      if ((*child).state != FREE && (*child).parent == parent) {
+        if ((*child).state == EXITED) {
+          (*child).state = FREE;
+        } else {
+          (*child).parent = NO_PARENT;
+          (*child).detached = true;
+        }
+      }
+
+      slot += 1;
+    }
+  }
+
+  /// The parent of process `id`: `NO_PARENT` for one the kernel started or
+  /// an orphan, `NO_PROCESS` when no process has that id.
+  function parentOf(id: u64): u64 {
+    let saved: u64 = Arch::Cpu::saveAndDisableInterrupts();
+    let slot: u64 = findSlot(id);
+    let parent: u64 = slot == NO_PROCESS ? NO_PROCESS : (*slotPointer(slot)).parent;
+
+    Arch::Cpu::restoreInterrupts(saved);
+
+    return parent;
+  }
+
+  /// The number of slots in use, ended processes waiting for `wait`
+  /// included. The self-tests check it to prove nothing is left behind.
+  function usedSlots(): u64 {
+    let saved: u64 = Arch::Cpu::saveAndDisableInterrupts();
+    let mut count: u64 = 0;
+    let mut slot: u64 = 0;
+
+    while (slot < MAX_PROCESSES) {
+      if ((*slotPointer(slot)).state != FREE) {
+        count += 1;
+      }
+
+      slot += 1;
+    }
+
+    Arch::Cpu::restoreInterrupts(saved);
+
+    return count;
   }
 
   /// Runs in the thread of a new process: drops to ring 3. The argument is

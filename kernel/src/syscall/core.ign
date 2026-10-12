@@ -48,6 +48,9 @@ namespace Syscall::Core {
   /// The descriptor lacks the access the call needs.
   const ACCESS: u64 = 102;
 
+  /// The process is not a child of the caller, or the caller has none.
+  const NO_CHILD: u64 = 103;
+
   /// The most one `read` or `write` moves.
   const MAX_TRANSFER: u64 = 65536;
 

@@ -294,6 +294,9 @@ export namespace Sys {
   /// The file or directory is in use.
   const BUSY: u64 = 17;
 
+  /// The process is not a child of the caller, or the caller has none.
+  const NO_CHILD: u64 = 18;
+
   /// The portable error names, as in the Linux flavour, with native values.
   const ENOENT: i64 = 1;
 
@@ -341,6 +344,9 @@ export namespace Sys {
 
   /// In use.
   const EBUSY: i64 = 17;
+
+  /// No such child.
+  const ECHILD: i64 = 18;
 
   /// Directory not empty.
   const ENOTEMPTY: i64 = 7;
@@ -608,6 +614,7 @@ export namespace Sys {
       NO_DEVICE -> "No such device",
       ACCESS -> "Permission denied",
       BUSY -> "Device or resource busy",
+      NO_CHILD -> "No child processes",
       _ -> "Unknown error",
     };
   }

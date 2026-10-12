@@ -27,6 +27,9 @@ namespace Syscall::Linux {
   /// Bad file descriptor (9): the descriptor is not open, or not for this.
   const EBADF: i64 = 9;
 
+  /// No child processes (10).
+  const ECHILD: i64 = 10;
+
   /// Out of memory (12).
   const ENOMEM: i64 = 12;
 
@@ -100,6 +103,7 @@ namespace Syscall::Linux {
       Syscall::Core::BAD_ADDRESS -> EFAULT,
       Syscall::Core::NO_DEVICE -> ENODEV,
       Syscall::Core::ACCESS -> EACCES,
+      Syscall::Core::NO_CHILD -> ECHILD,
       _ -> EINVAL,
     };
   }

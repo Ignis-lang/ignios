@@ -68,9 +68,10 @@
 //!
 //! **Spawn** takes the program's path and its arguments packed as
 //! NUL-terminated strings with their total size and count; the child starts
-//! in the caller's current directory. **Wait** blocks until the process has
-//! ended, returns its exit status and frees its slot; a process nobody waits
-//! for keeps its slot.
+//! in the caller's current directory and the caller is its parent. **Wait**
+//! blocks until a child has ended, returns its exit status and frees its
+//! slot; another process's child is `NO_CHILD`. A child that ends after its
+//! parent is freed on its own, so no slot stays taken.
 //!
 //! **Sleep** takes a plain count of nanoseconds, rounded up to whole timer
 //! ticks and capped at a million seconds.
@@ -426,12 +427,23 @@ namespace Syscall::Native {
     return found == count;
   }
 
-  /// `WAIT(id)`: blocks until process `id` has ended and returns its exit
-  /// status. `NOT_FOUND` for an id that is not running or was already
-  /// collected, `INVALID` for the caller's own id.
+  /// `WAIT(id)`: blocks until process `id`, a child of the caller, has ended
+  /// and returns its exit status. `NOT_FOUND` for an id that is not running
+  /// or was already collected, `NO_CHILD` for another process's child,
+  /// `INVALID` for the caller's own id.
   function wait(id: u64, status: *mut u64): u64 {
     if (id == Proc::Process::currentId()) {
       return Fs::Vfs::INVALID;
+    }
+
+    let parent: u64 = Proc::Process::parentOf(id);
+
+    if (parent == Proc::Process::NO_PROCESS) {
+      return Fs::Vfs::NOT_FOUND;
+    }
+
+    if (parent != Proc::Process::currentId()) {
+      return Syscall::Core::NO_CHILD;
     }
 
     let result: u64 = Proc::Process::wait(id);

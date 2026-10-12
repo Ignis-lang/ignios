@@ -31,6 +31,7 @@
 //! | 15   | `NO_DEVICE`      | mapping something that is not a regular file         |
 //! | 16   | `ACCESS`         | the descriptor lacks the access the call needs       |
 //! | 17   | `BUSY`           | the file or directory is in use                      |
+//! | 18   | `NO_CHILD`       | the process is not a child of the caller, or there is none |
 //!
 //! `statusFor` maps the kernel's own codes (`Fs::Vfs`, `Fs::Files`,
 //! `Syscall::Core`) one by one. The kernel's numbering may change; this table
@@ -95,6 +96,9 @@ namespace Syscall::Native {
   /// The file or directory is in use: open, or a current directory.
   const BUSY: u64 = 17;
 
+  /// The process is not a child of the caller, or the caller has none.
+  const NO_CHILD: u64 = 18;
+
   /// The native code of a kernel status code. Anything the table does not
   /// name is `INVALID`.
   function statusFor(status: u64): u64 {
@@ -115,6 +119,7 @@ namespace Syscall::Native {
       Syscall::Core::BAD_ADDRESS -> BAD_ADDRESS,
       Syscall::Core::NO_DEVICE -> NO_DEVICE,
       Syscall::Core::ACCESS -> ACCESS,
+      Syscall::Core::NO_CHILD -> NO_CHILD,
       _ -> INVALID,
     };
   }
