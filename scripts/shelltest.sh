@@ -24,7 +24,9 @@ timeout_seconds=$2
 shift 3
 
 # The session. Lines without `run` run as programs from /bin; the `run`
-# prefix still works.
+# prefix still works. An entry with `|` types more lines after the command,
+# for a program that reads the keyboard: each part is typed and followed by
+# Enter, and `^D` is Ctrl+D (the end of input).
 commands=(
   "cat /etc/motd"
   "ls /"
@@ -50,6 +52,8 @@ commands=(
   "rmdir /tmp"
   "ls /"
   "pwd"
+  "cat|hello from the keyboard|^D"
+  "cat|^D"
   "nope"
 )
 
@@ -144,6 +148,12 @@ S0
 > pwd
 /
 S0
+> cat
+hello from the keyboard
+hello from the keyboard
+S0
+> cat
+S0
 > nope
 run: /bin/nope: no such file or directory'
 
@@ -201,9 +211,28 @@ send_monitor_commands() {
       return 1
     fi
 
-    for key in $(keys_for "$command"); do
-      echo "sendkey $key"
-      sleep 0.05
+    local first=1
+    local part
+
+    IFS="|" read -r -a parts <<< "$command"
+
+    for part in "${parts[@]}"; do
+      if [ "$first" -eq 0 ]; then
+        sleep 0.5
+      fi
+
+      first=0
+
+      if [ "$part" = "^D" ]; then
+        echo "sendkey ctrl-d"
+        sleep 0.05
+        continue
+      fi
+
+      for key in $(keys_for "$part"); do
+        echo "sendkey $key"
+        sleep 0.05
+      done
     done
 
     prompts=$((prompts + 1))

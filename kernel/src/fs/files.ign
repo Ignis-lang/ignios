@@ -54,8 +54,8 @@
 //! | `TOO_MANY_OPEN`  | the table of the process is full                | `EMFILE` |
 //! | `NOT_SEEKABLE`   | seeking the console                             | `ESPIPE` |
 //!
-//! The console reads as an empty file (0 bytes): the keyboard belongs to the
-//! kernel terminal, and a program has no input yet.
+//! Reading the console waits for a line typed at the keyboard
+//! (`Drivers::Tty`); Ctrl+D on an empty line reads as the end of input.
 
 import Drivers from "@drivers";
 import Mm from "@mm";
@@ -313,7 +313,8 @@ namespace Fs::Files {
 
   /// Reads up to `count` bytes from `descriptor` at its offset into the
   /// kernel buffer `buffer`, advances the offset and writes the number read
-  /// to `done`: 0 at the end of the file and always for the console.
+  /// to `done`: 0 at the end of the file. The console waits for a line typed
+  /// at the keyboard.
   /// Returns `BAD_DESCRIPTOR` when it is not open for reading and
   /// `IS_DIRECTORY` for a directory.
   function read(table: u64, descriptor: u64, buffer: *mut u8, count: u64, done: *mut u64): u64 {
@@ -324,7 +325,7 @@ namespace Fs::Files {
     }
 
     if ((*file).kind == CONSOLE) {
-      *done = 0;
+      Drivers::Tty::read(buffer, count, done);
       return Fs::Vfs::OK;
     }
 

@@ -36,9 +36,12 @@ keys=(
 # What the serial transcript must show after the keyboard line, once every
 # backspace is applied: `h i shift-1 spc backspace` leaves `hi!`, and Caps
 # Lock is on only between the two `caps_lock` presses, so `q` is typed in
-# upper case.
+# upper case. A line that is not a built-in command runs as a program, so
+# `hi!` and `Abc` each print the error of a missing /bin program.
 expected_lines='> hi!
+run: /bin/hi!: no such file or directory
 > Abc
+run: /bin/Abc: no such file or directory
 > xyzQw'
 
 # Each erased character is mirrored as backspace, space, backspace.

@@ -70,7 +70,7 @@ Each subsystem is a directory under `kernel/src/` with a `mod.ign` facade. The f
 | 4 | CPU tables and interrupts | `arch/x86_64/cpu.ign`, `gdt.ign`, `gdt_asm.S`, `idt.ign`, `interrupt_frame.ign`, `interrupt_asm.S`, `trap/dispatch.ign`, `trap/exception.ign`, `trap/setup.ign` |
 | 5 | Memory | `boot/hhdm.ign`, `mm/pmm.ign`, `mm/vmm.ign`, `mm/heap.ign`, `mm/address_space.ign` |
 | 6 | ACPI, APIC, the timer and power | `acpi/*.ign`, `power/mod.ign`, `arch/x86_64/pic.ign`, `apic/lapic.ign`, `apic/ioapic.ign`, `arch/x86_64/pit.ign`, `time/timer.ign` |
-| 7 | Keyboard | `drivers/ps2.ign`, `lib/scancode_queue.ign`, `drivers/keyboard.ign` |
+| 7 | Keyboard | `drivers/ps2.ign`, `lib/scancode_queue.ign`, `drivers/keyboard.ign`, `drivers/tty.ign` |
 | 8 | Threads, scheduling and the shell | `arch/x86_64/context.ign`, `context_asm.S`, `sched/thread.ign`, `sched/scheduler.ign`, `shell/*.ign` |
 | 9 | User mode | `arch/x86_64/usermode.ign`, `usermode_asm.S`, `proc/process.ign`, `syscall/*.ign`, `proc/elf.ign`, `mm/modules.ign`, `proc/programs.ign`, `user/` |
 | 10 | Files | `initramfs/`, `fs/tar.ign`, `fs/initramfs.ign`, `fs/vfs.ign`, `fs/files.ign`, `syscall/linux/files.ign`, `user/fstest/`, `user/cat/`, `user/ls/`, `user/touch/`, `user/mkdir/` |
@@ -177,7 +177,9 @@ Doc 06. `kmain` enables the keyboard last, but the path it uses runs through the
 
 **`lib/scancode_queue.ign`.** A single-producer single-consumer ring buffer between the interrupt handler and the terminal. There is no lock. Each side writes only its own index, and every access is volatile.
 
-**`drivers/keyboard.ign`.** The scancode set 1 decoder with a US layout. The header lists the make codes and draws the state machine. It handles Shift, Caps Lock, Ctrl, the `0xE0` prefix and the six-byte Pause sequence. `Drivers::Keyboard::initialize` brings the controller up and prints the keyboard line.
+**`drivers/keyboard.ign`.** The scancode set 1 decoder with a US layout. The header lists the make codes and draws the state machine. It handles Shift, Caps Lock, Ctrl (a letter with Ctrl decodes to its control code, Ctrl+D to 4), the `0xE0` prefix and the six-byte Pause sequence. `Drivers::Keyboard::initialize` brings the controller up and prints the keyboard line.
+
+**`drivers/tty.ign`.** Line input, like a Unix terminal in canonical mode: echo, Backspace, Enter, and Ctrl+D for the end of input. It is the clearest example of the `cli`, check, `sti; hlt` pattern that avoids a lost wakeup: the queue is tested with interrupts off so a key cannot arrive between the test and the sleep. `readLine` serves the kernel terminal; `read` serves descriptor 0 of a program and keeps the rest of a line for the next read. Both return with the interrupt flag as they found it, because a system call must not let another process's call reuse the kernel's staging buffers halfway through.
 
 ## Part 8. Threads, scheduling and the shell
 
@@ -189,7 +191,7 @@ Doc 13.
 
 **`sched/scheduler.ign`.** The run queue, sleeping and the timer-driven preemption. The header has the call chain from the timer interrupt to a switch. Look at how a dead thread's stack is freed by the next thread (`reapZombie`), because a thread cannot free the stack it is running on. Sleeping and waking are here and not in a file of their own, because `sleep` calls `switchToNext` and `switchToNext` calls the wake-up scan. `join` blocks a thread until another one is gone: the thread that frees the dead one (`reapZombie`) makes its waiters ready, so a waiter runs once, not once per tick. `switchToNext` also swaps the x87 and SSE state.
 
-**`shell/terminal.ign`.** The terminal loop the boot thread becomes. It is the clearest example of the `cli`, check, `sti; hlt` pattern that avoids a lost wakeup: the queue is tested with interrupts off so a key cannot arrive between the test and the sleep.
+**`shell/terminal.ign`.** The terminal loop the boot thread becomes: a prompt, a line from `Drivers::Tty::readLine`, a command.
 
 **`shell/commands.ign` and `shell/thread_commands.ign`.** The commands: `uptime`, `ps`, `threads` and `run PROGRAM [ARG...]`. `reboot` and `shutdown` are programs in `/bin`. Any other line that is not blank runs as a program, so `cat /etc/motd` is `run cat /etc/motd`.
 
@@ -235,7 +237,7 @@ Doc 19.
 
 **`user/fstest/`.** A ring 3 program that checks each call and each error the way a Linux program sees them, and exits with the number of the first check that failed. The table in its header lists the checks.
 
-**`user/cat/`, `user/ls/`, `user/touch/`, `user/mkdir/`, `user/rm/`, `user/rmdir/` and `user/pwd/`.** The commands, each one a short Ignis program on `std::sys`. Each header has a table of what it does in each case and the exact error line, in the format of GNU coreutils (`ls: cannot access '/nope': No such file or directory`). `cat` maps a regular file with `mmap` and writes it out, 64 KiB per call at most, and falls back to `read` for anything else; `ls` lists with `Sys::readEntry`, which hides `.` and `..`; `touch` opens with `O_CREAT | O_RDONLY` and takes `-EISDIR` (an existing directory) as success, as GNU touch does. `Sys::errorText` in `user/lib/linux/sys.ign` is their `strerror`.
+**`user/cat/`, `user/ls/`, `user/touch/`, `user/mkdir/`, `user/rm/`, `user/rmdir/` and `user/pwd/`.** The commands, each one a short Ignis program on `std::sys`. Each header has a table of what it does in each case and the exact error line, in the format of GNU coreutils (`ls: cannot access '/nope': No such file or directory`). `cat` maps a regular file with `mmap` and writes it out, 64 KiB per call at most, and falls back to `read` for anything else; with no argument it copies the keyboard until Ctrl+D; `ls` lists with `Sys::readEntry`, which hides `.` and `..`; `touch` opens with `O_CREAT | O_RDONLY` and takes `-EISDIR` (an existing directory) as success, as GNU touch does. `Sys::errorText` in `user/lib/linux/sys.ign` is their `strerror`.
 
 ## Part 11. Boot self-tests
 
@@ -243,7 +245,7 @@ Doc 19.
 
 ## Part 12. Scripts
 
-**`scripts/keytest.sh`, `scripts/shelltest.sh`, `scripts/powertest.sh` and `scripts/screenshot.sh`.** Boot QEMU headless, wait for the prompt on the serial log, and drive the QEMU monitor (`sendkey`, `screendump`). `keytest.sh` also checks the echo. `shelltest.sh` types one command at a time, waits for the next prompt, and compares what each command printed, line for line, with the session in the script. `powertest.sh` runs QEMU without `-no-reboot`, types `reboot`, waits for the second boot, types `shutdown`, and requires QEMU to exit by itself. **`scripts/gen-font.py`** regenerates `drivers/font_8x16.ign` from the Spleen BDF file. **`flake.nix`** provides the toolchain.
+**`scripts/keytest.sh`, `scripts/shelltest.sh`, `scripts/powertest.sh` and `scripts/screenshot.sh`.** Boot QEMU headless, wait for the prompt on the serial log, and drive the QEMU monitor (`sendkey`, `screendump`). `keytest.sh` also checks the echo, and that each typed line ran as a program. `shelltest.sh` types one command at a time, waits for the next prompt, and compares what each command printed, line for line, with the session in the script; an entry can type more lines after its command, and Ctrl+D, for a program that reads the keyboard. `powertest.sh` runs QEMU without `-no-reboot`, types `reboot`, waits for the second boot, types `shutdown`, and requires QEMU to exit by itself. **`scripts/gen-font.py`** regenerates `drivers/font_8x16.ign` from the Spleen BDF file. **`flake.nix`** provides the toolchain.
 
 ---
 
@@ -372,9 +374,9 @@ vmm: self-test ok
 `Tests::Vmm::run` mapped a frame at a test address, wrote through it, read it through the direct map, and unmapped it.
 
 ```text
-modules: initramfs is /initramfs.tar, 194560 bytes at 0xffff80000a0ad000
+modules: initramfs is /initramfs.tar, 194560 bytes at 0xffff80000a0ab000
 ```
-The Limine module from `boot/limine.conf`. `initramfs` is the `module_string`, `/initramfs.tar` the path. `Mm::Modules::initialize` mapped its pages read only. The address is in the direct map, so the file sits at physical `0xa0ad000`. Doc 15.
+The Limine module from `boot/limine.conf`. `initramfs` is the `module_string`, `/initramfs.tar` the path. `Mm::Modules::initialize` mapped its pages read only. The address is in the direct map, so the file sits at physical `0xa0ab000`. Doc 15.
 
 ```text
 heap: self-test ok, 1092 KiB mapped, 0 bytes in use

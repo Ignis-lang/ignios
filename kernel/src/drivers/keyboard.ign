@@ -183,8 +183,8 @@ namespace Drivers::Keyboard {
     return KeyboardState::leftShift || KeyboardState::rightShift;
   }
 
-  /// Tracked for later key bindings; it does not change what `decode`
-  /// returns yet.
+  /// True while either Control key is down. With it a letter decodes to its
+  /// control code: Ctrl+A is 1, Ctrl+D is 4, Ctrl+Z is 26.
   function isControlHeld(): boolean {
     return KeyboardState::leftControl || KeyboardState::rightControl;
   }
@@ -194,11 +194,15 @@ namespace Drivers::Keyboard {
     return KeyboardState::capsLock;
   }
 
-  /// Applies Shift and Caps Lock to the pressed `key`. Caps Lock only
+  /// Applies Control, Shift and Caps Lock to the pressed `key`. Caps Lock only
   /// changes letters, and Shift reverses it for them.
   function translate(key: u8): u8 {
     let letter: u8 = unshifted(key);
     let isLetter: boolean = letter >= ('a' as u8) && letter <= ('z' as u8);
+
+    if (isLetter && isControlHeld()) {
+      return letter - 0x60;
+    }
 
     if (isLetter && KeyboardState::capsLock != isShiftHeld()) {
       return letter - 0x20;

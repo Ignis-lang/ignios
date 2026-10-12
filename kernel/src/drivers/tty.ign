@@ -1,0 +1,158 @@
+//!
+//! # Line Input
+//!
+//! Turns key presses into lines: echo, Backspace, Enter and Ctrl+D. The
+//! kernel terminal and a program reading descriptor 0 both get their input
+//! here.
+//!
+//! ## Overview
+//!
+//! Like a Unix terminal in canonical mode, input is edited a line at a time
+//! and handed over only when it is complete:
+//!
+//! | Key          | Effect                                                          |
+//! |--------------|-----------------------------------------------------------------|
+//! | printable    | stored and echoed, up to the capacity of the line               |
+//! | Backspace    | erases the last stored character and echoes `0x08`; nothing on an empty line |
+//! | Enter        | echoes a newline and ends the line, which keeps the `\n`        |
+//! | Ctrl+D       | on an empty line: end of input (0 bytes); otherwise ends the line without a `\n` |
+//! | anything else | ignored (Tab, other control codes)                             |
+//!
+//! `readLine` edits into a caller's buffer. `read` serves descriptor 0: it
+//! keeps one line and hands it out over as many reads as the caller's
+//! buffers need, so a short read buffer loses nothing.
+//!
+//! ## Waiting for a key
+//!
+//! The scancode queue is checked with interrupts off, then the processor
+//! sleeps with `sti; hlt`, so a key cannot arrive between the check and the
+//! sleep. Other threads keep running: the timer preempts the halted thread.
+//! Both functions return with the interrupt flag as they found it. A system
+//! call enters with interrupts off and must leave the same way, or another
+//! process could run its own call in between and reuse the kernel's staging
+//! buffers.
+//!
+//! Only one reader edits a line at a time; another one waits until it is
+//! done.
+
+import Arch from "@arch";
+import Lib from "@lib";
+import _ from "./console";
+import _ from "./keyboard";
+
+/// The line `read` hands out.
+record TtyState {
+  /// The line. The size must equal `Drivers::Tty::LINE_CAPACITY`.
+  static mut line: u8[256];
+
+  /// Its length, newline included.
+  static mut length: u64 = 0;
+
+  /// How much of it `read` has handed out.
+  static mut position: u64 = 0;
+
+  /// True while a reader is editing a line.
+  static mut busy: boolean = false;
+}
+
+/// The line input API.
+namespace Drivers::Tty {
+  /// Bytes of the line `read` keeps.
+  const LINE_CAPACITY: u64 = 256;
+
+  /// ASCII backspace.
+  const BACKSPACE: u8 = 0x08;
+
+  /// ASCII line feed, the byte Enter decodes to.
+  const NEWLINE: u8 = 0x0A;
+
+  /// Ctrl+D, end of transmission.
+  const END_OF_INPUT: u8 = 0x04;
+
+  /// First printable ASCII character, space.
+  const FIRST_PRINTABLE: u8 = 0x20;
+
+  /// Last printable ASCII character, tilde.
+  const LAST_PRINTABLE: u8 = 0x7E;
+
+  /// Edits one line into the `capacity` bytes at `buffer` and returns its
+  /// length: printable characters up to `capacity - 1`, then the `\n` of
+  /// Enter. Returns 0 for Ctrl+D on an empty line, and the characters without
+  /// a `\n` for Ctrl+D after some.
+  function readLine(buffer: *mut u8, capacity: u64): u64 {
+    let saved: u64 = Arch::Cpu::saveAndDisableInterrupts();
+
+    while (TtyState::busy) {
+      Arch::Cpu::waitForInterrupt();
+      Arch::Cpu::disableInterrupts();
+    }
+
+    TtyState::busy = true;
+
+    let mut length: u64 = 0;
+
+    while (true) {
+      Arch::Cpu::disableInterrupts();
+
+      if (Lib::ScancodeQueue::isEmpty()) {
+        Arch::Cpu::waitForInterrupt();
+        continue;
+      }
+
+      Arch::Cpu::enableInterrupts();
+
+      let character: u8 = Drivers::Keyboard::decode(Lib::ScancodeQueue::pop());
+
+      if (character == NEWLINE) {
+        Drivers::Console::writeChar(NEWLINE);
+        *(buffer + length) = NEWLINE;
+        length += 1;
+        break;
+      }
+
+      if (character == END_OF_INPUT) {
+        break;
+      }
+
+      if (character == BACKSPACE) {
+        if (length > 0) {
+          length -= 1;
+          Drivers::Console::writeChar(BACKSPACE);
+        }
+      } else if (character >= FIRST_PRINTABLE && character <= LAST_PRINTABLE && length + 1 < capacity) {
+        *(buffer + length) = character;
+        length += 1;
+        Drivers::Console::writeChar(character);
+      }
+    }
+
+    Arch::Cpu::disableInterrupts();
+    TtyState::busy = false;
+    Arch::Cpu::restoreInterrupts(saved);
+
+    return length;
+  }
+
+  /// Copies up to `count` bytes of keyboard input to `buffer` and writes the
+  /// number copied to `done`. Hands out what is left of the current line
+  /// first; when nothing is left, waits for a new line. `done` is 0 at the end
+  /// of input (Ctrl+D on an empty line).
+  function read(buffer: *mut u8, count: u64, done: *mut u64): void {
+    if (count == 0) {
+      *done = 0;
+      return;
+    }
+
+    if (TtyState::position >= TtyState::length) {
+      TtyState::length = readLine(&mut TtyState::line as *mut u8, LINE_CAPACITY);
+      TtyState::position = 0;
+    }
+
+    let left: u64 = TtyState::length - TtyState::position;
+    let copied: u64 = left < count ? left : count;
+
+    Lib::Mem::copy(buffer, (&mut TtyState::line as *u8) + TtyState::position, copied);
+    TtyState::position += copied;
+    *done = copied;
+  }
+}

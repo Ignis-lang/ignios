@@ -18,7 +18,7 @@
 //! | 80-85  | relative paths from a directory descriptor, `newfstatat`, `AT_EMPTY_PATH`, an empty path `-ENOENT` |
 //! | 90-95  | `getdents64` lists `.`, `..`, `a` and `b` with their types, then 0; a small buffer is `-EINVAL`; a file is `-ENOTDIR` |
 //! | 100    | 16 descriptors per process, then `-EMFILE`                          |
-//! | 110-112 | descriptors 0 to 2: `fstat` says character device `0x501`; `read(0)` is 0 |
+//! | 110-111 | descriptors 0 to 2: `fstat` says character device `0x501` (reading descriptor 0 waits for the keyboard; `make shelltest` checks it) |
 //! | 120-122 | a write at 2^62 or at 64 MiB is `-EFBIG`, one whose end overflows is `-EINVAL`; the file stays empty |
 //! | 123-124 | a bad buffer is `-EFAULT` for `read`, `write`, `fstat`, `newfstatat`, `getdents64`; a 48-byte `getdents64` buffer takes `.` and `..` |
 //! | 125    | `O_CREAT` on an existing directory is `-EISDIR`                      |
@@ -403,7 +403,6 @@ function checkCreateDirectory(): void {
 function checkConsole(): void {
   expect(Sys::fstat(Sys::STDOUT, stat()), 0, 110);
   require((half(stat(), 24) & MODE_TYPE_MASK) == MODE_CHARACTER && word(stat(), 40) == CONSOLE_RDEV, 111);
-  expect(Sys::read(Sys::STDIN, buffer(), 10), 0, 112);
 }
 
 /// Runs every check and prints one line when all passed.
