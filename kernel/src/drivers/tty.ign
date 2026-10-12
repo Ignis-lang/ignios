@@ -62,9 +62,10 @@ record TtyState {
   /// True while a reader is editing a line.
   static mut busy: boolean = false;
 
-  /// The token of a reader whose read must end at once, 0 for none
-  /// (`Drivers::Tty::cancel`).
-  static mut cancelled: u64 = 0;
+  /// One flag per token, 1 when the read of that reader must end at once
+  /// (`Drivers::Tty::cancel`). Token 0 is the kernel terminal, which is
+  /// never cancelled. The size must be `MAX_TOKENS`.
+  static mut cancelled: u8[65];
 }
 
 /// The line input API.
@@ -90,6 +91,9 @@ namespace Drivers::Tty {
   /// The token of a reader that cannot be cancelled, the kernel terminal.
   const NO_TOKEN: u64 = 0;
 
+  /// Tokens are 1 to 64, a process slot plus 1.
+  const MAX_TOKENS: u64 = 65;
+
   /// Edits one line into the `capacity` bytes at `buffer` and returns its
   /// length: printable characters up to `capacity - 1`, then the `\n` of
   /// Enter. Returns 0 for Ctrl+D on an empty line, and the characters without
@@ -104,8 +108,7 @@ namespace Drivers::Tty {
     let saved: u64 = Arch::Cpu::saveAndDisableInterrupts();
 
     while (TtyState::busy) {
-      if (token != NO_TOKEN && TtyState::cancelled == token) {
-        TtyState::cancelled = NO_TOKEN;
+      if (takeCancel(token)) {
         Arch::Cpu::restoreInterrupts(saved);
         return 0;
       }
@@ -121,8 +124,7 @@ namespace Drivers::Tty {
     while (true) {
       Arch::Cpu::disableInterrupts();
 
-      if (token != NO_TOKEN && TtyState::cancelled == token) {
-        TtyState::cancelled = NO_TOKEN;
+      if (takeCancel(token)) {
         length = 0;
         break;
       }
@@ -215,14 +217,34 @@ namespace Drivers::Tty {
   /// as soon as it runs again. Only that reader is affected, and only while
   /// it waits; `forget` withdraws a cancel nobody collected.
   function cancel(token: u64): void {
-    TtyState::cancelled = token;
+    if (token != NO_TOKEN && token < MAX_TOKENS) {
+      *flagOf(token) = 1;
+    }
   }
 
   /// Withdraws a cancel for `token` that its reader never collected, so a
   /// later reader with the same token is not stopped by it.
   function forget(token: u64): void {
-    if (TtyState::cancelled == token) {
-      TtyState::cancelled = NO_TOKEN;
+    if (token < MAX_TOKENS) {
+      *flagOf(token) = 0;
     }
+  }
+
+  /// True, and the flag cleared, when the read of `token` was cancelled.
+  /// Each token has its own flag, so cancelling one reader never undoes the
+  /// cancel of another.
+  function takeCancel(token: u64): boolean {
+    if (token == NO_TOKEN || token >= MAX_TOKENS || *flagOf(token) == 0) {
+      return false;
+    }
+
+    *flagOf(token) = 0;
+
+    return true;
+  }
+
+  /// The cancel flag of `token`.
+  function flagOf(token: u64): *mut u8 {
+    return (&mut TtyState::cancelled as *mut u8) + token;
   }
 }

@@ -35,7 +35,8 @@
 //! | 120-125 | `CURRENT_DIRECTORY` is `/`; `CHANGE_DIRECTORY` to `/nt`, then paths relative to `CURRENT` start there; the current directory is `BUSY`; a file is `NOT_DIRECTORY`; a buffer too small is `INVALID` |
 //! | 130-137 | `SPAWN` of `/bin/pwd` and `WAIT` for its status 0; a second `WAIT` is `NOT_FOUND`; waiting for itself is `INVALID`; a missing program `NOT_FOUND`, a directory `IS_DIRECTORY`, a text file `INVALID`; arguments that do not match their count `INVALID`; a bad argument pointer `BAD_ADDRESS`; the child starts in the parent's current directory (`rmdir sub` from `/nt` removes `/nt/sub`) |
 //! | 200-206 | `POWER` with an unknown action is `INVALID`; `WAIT` for an id that never existed is `NOT_FOUND`; an argument block with an empty string is accepted; a child's exit status 1 comes back; the 64-slot process table fills up (63 children at boot), the next start is refused, and after waiting starting works again; `CURRENT_DIRECTORY` into 1 byte; removing `.` or `/bin/..` is `INVALID` |
-//! | 170-175 | `KILL` of an unknown id is `NOT_FOUND`; a child sleeping 10 s, a child spinning in ring 3, a child waiting for the keyboard and a child waiting for its own child each end with status 137 right away; a process that kills itself ends with 137 |
+//! | 176-177 | killing a keyboard reader and then a sleeper ends both; a child killed before it ever runs creates nothing |
+//! | 170-175 | `KILL` of an unknown id is `NOT_FOUND`; a child sleeping 10 000 s (a missing wake-up hangs the boot instead of passing late), a child spinning in ring 3, a child waiting for the keyboard and a child waiting for its own child (which sleeps 10 000 s, and is then killed as an orphan and freed) each end with status 137 right away; a process that kills itself ends with 137 |
 //! | 160-163 | `WAIT_ANY`: no child is `NO_CHILD`; a bad status pointer `BAD_ADDRESS`; with a quick child and a napping one, it returns the quick one first and then blocks until the napping one ends, each with its id and status |
 //! | 140-143 | parents: a grandchild is not the caller's child (`NO_CHILD`); an orphan is freed when it ends (`NOT_FOUND` afterwards); a child that ended before its parent is freed with the parent (`NOT_FOUND`) |
 //! | 110-115 | `UNLINK` and `REMOVE_DIRECTORY`: a file, then `NOT_FOUND`; a directory as a file `IS_DIRECTORY`; a non-empty directory `NOT_EMPTY`; an open one `BUSY`; a file as a directory `NOT_DIRECTORY`; relative to a directory descriptor |
@@ -56,6 +57,12 @@ const LINE_LENGTH: u64 = 41;
 
 /// 4 KiB.
 const PAGE: u64 = 4096;
+
+/// The id `killChild` started last.
+record Last {
+  /// The id.
+  static mut child: u64 = 0;
+}
 
 /// What the checks share.
 record State {
@@ -490,9 +497,34 @@ function killChild(mode: str, length: u64, status: u64): void {
 
   let child: u64 = succeed(Sys::call5(Sys::SPAWN, at("/bin/nativetest"), 15, buffer(), 12 + length, 2), status);
 
+  Last::child = child;
+
   expect(Sys::call1(Sys::SLEEP, 50000000), Sys::OK, 0, status);
   expect(Sys::call1(Sys::KILL, child), Sys::OK, 0, status);
   expect(Sys::call1(Sys::WAIT, child), Sys::OK, 137, status);
+}
+
+/// Killing a keyboard reader and then another process still ends the
+/// reader: each reader has its own cancel flag.
+function checkKillTwo(): void {
+  let reader: u64 = succeed(spawn("/bin/nativetest", 15, "nativetest\0read", 16, 2), 176);
+  let sleeper: u64 = succeed(spawn("/bin/nativetest", 15, "nativetest\0sleep", 17, 2), 176);
+
+  expect(Sys::call1(Sys::SLEEP, 50000000), Sys::OK, 0, 176);
+  expect(Sys::call1(Sys::KILL, reader), Sys::OK, 0, 176);
+  expect(Sys::call1(Sys::KILL, sleeper), Sys::OK, 0, 176);
+  expect(Sys::call1(Sys::WAIT, sleeper), Sys::OK, 137, 176);
+  expect(Sys::call1(Sys::WAIT, reader), Sys::OK, 137, 176);
+}
+
+/// A child killed before it ever runs does nothing: `touch` must not create
+/// its file.
+function checkKillUnstarted(): void {
+  let child: u64 = succeed(spawn("/bin/touch", 10, "touch\0/nt/killed", 17, 2), 177);
+
+  expect(Sys::call1(Sys::KILL, child), Sys::OK, 0, 177);
+  expect(Sys::call1(Sys::WAIT, child), Sys::OK, 137, 177);
+  expect(open("/nt/killed", 10, Sys::OPEN_READ), Sys::NOT_FOUND, 0, 177);
 }
 
 /// `KILL`.
@@ -503,8 +535,17 @@ function checkKill(): void {
   killChild("read", 4, 173);
   killChild("waiter", 6, 174);
 
-  // The waiter's napping child became an orphan; let it end and be freed.
-  expect(Sys::call1(Sys::SLEEP, 300000000), Sys::OK, 0, 174);
+  // The waiter's child sleeps 10 000 s and became an orphan. It was started
+  // right after the waiter, so its id is the next one. Killing it ends it,
+  // and an orphan's slot is freed as soon as it ends.
+  let orphan: u64 = Last::child + 1;
+
+  expect(Sys::call1(Sys::KILL, orphan), Sys::OK, 0, 174);
+  expect(Sys::call1(Sys::SLEEP, 50000000), Sys::OK, 0, 174);
+  expect(Sys::call1(Sys::KILL, orphan), Sys::NOT_FOUND, 0, 174);
+
+  checkKillTwo();
+  checkKillUnstarted();
 
   let suicide: u64 = succeed(spawn("/bin/nativetest", 15, "nativetest\0suicide", 19, 2), 175);
 
@@ -517,7 +558,7 @@ function helper(mode: *u8): u64 {
   let length: u64 = Args::length(mode);
 
   if (length == 5 && same(@integerFromPointer(mode), "sleep", 5)) {
-    Sys::call1(Sys::SLEEP, 10000000000);
+    Sys::call1(Sys::SLEEP, 10000000000000);
     return 0;
   }
 
@@ -538,7 +579,7 @@ function helper(mode: *u8): u64 {
   }
 
   if (length == 6 && same(@integerFromPointer(mode), "waiter", 6)) {
-    succeed(spawn("/bin/nativetest", 15, "nativetest\0nap", 15, 2), 153);
+    succeed(spawn("/bin/nativetest", 15, "nativetest\0sleep", 17, 2), 153);
     Sys::call1(Sys::WAIT_ANY, buffer());
     return 0;
   }

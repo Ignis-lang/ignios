@@ -182,6 +182,7 @@ namespace Fs::Files {
     let file: *mut Fs::OpenFile = newOpenFile(CONSOLE, null, READ | WRITE);
 
     if (file == null) {
+      closeAll(table);
       return Fs::Vfs::NO_MEMORY;
     }
 

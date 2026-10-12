@@ -737,6 +737,9 @@ namespace Proc::Process {
   function userMain(slot: u64): void {
     let process: *mut ProcessEntry = slotPointer(slot);
 
+    // A process killed before it ever ran ends here, before any user code.
+    checkKill();
+
     Arch::UserMode::enter((*process).entry, (*process).stackPointer);
   }
 

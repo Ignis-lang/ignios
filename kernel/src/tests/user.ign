@@ -215,6 +215,10 @@ namespace Tests::User {
   function runFiles(): void {
     let freeBefore: u64 = Mm::Pmm::freeFrameCount();
     let heapBefore: u64 = Mm::Heap::allocatedBytes();
+    if (Proc::Programs::runNamed("fstest selfkill") != 137) {
+      @panic("user test: Linux kill(getpid(), SIGTERM) did not end the process with 137");
+    }
+
     let status: u64 = Proc::Programs::runNamed("fstest");
 
     if (status != 0) {
