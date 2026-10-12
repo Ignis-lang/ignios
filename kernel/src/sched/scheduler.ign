@@ -382,6 +382,27 @@ namespace Sched::Scheduler {
     Arch::Cpu::restoreInterrupts(saved);
   }
 
+  /// Makes the thread `id` ready if it waits in `sleep`, `join` or `park`,
+  /// so it can notice that it was killed. Each of those returns early; its
+  /// caller checks why. Does nothing to a thread that is ready or running.
+  function interrupt(id: u64): void {
+    let saved: u64 = Arch::Cpu::saveAndDisableInterrupts();
+    let mut slot: u64 = 0;
+
+    while (slot < Sched::Thread::MAX_THREADS) {
+      let thread: *mut Sched::Thread::Control = Sched::Thread::slotPointer(slot);
+      let state: u64 = (*thread).state;
+
+      if ((*thread).id == id && (state == Sched::Thread::BLOCKED || state == Sched::Thread::WAITING || state == Sched::Thread::PARKED)) {
+        makeReady(slot);
+      }
+
+      slot += 1;
+    }
+
+    Arch::Cpu::restoreInterrupts(saved);
+  }
+
   /// Makes every thread that waits for the thread `id` ready. Interrupts
   /// must be disabled.
   function wakeJoiners(id: u64): void {

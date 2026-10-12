@@ -40,6 +40,7 @@
 //! | 20     | `SPAWN`          | path, path length, arguments, argument bytes, argument count | the process id |
 //! | 21     | `WAIT`           | process id                                  | its exit status |
 //! | 22     | `WAIT_ANY`       | status pointer                              | the id of the child that ended; its status at the pointer |
+//! | 23     | `KILL`           | process id                                  | 0; the process ends with status 137 |
 //!
 //! Paths are a pointer and a length, not NUL-terminated strings. The
 //! directory argument is a descriptor open on a directory, `ROOT` (all bits
@@ -128,6 +129,9 @@ namespace Syscall::Native {
   /// Wait for any child to end.
   const NUMBER_WAIT_ANY: u64 = 22;
 
+  /// End a process.
+  const NUMBER_KILL: u64 = 23;
+
   /// Fills the table.
   function initialize(): void {
     let table: *mut u8 = tableBase();
@@ -155,6 +159,7 @@ namespace Syscall::Native {
     *(table + NUMBER_SPAWN) = Operation::SPAWN;
     *(table + NUMBER_WAIT) = Operation::WAIT;
     *(table + NUMBER_WAIT_ANY) = Operation::WAIT_ANY;
+    *(table + NUMBER_KILL) = Operation::KILL;
   }
 
   /// The first byte of the table.

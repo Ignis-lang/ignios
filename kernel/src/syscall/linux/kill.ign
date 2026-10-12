@@ -1,0 +1,44 @@
+//!
+//! # Linux kill
+//!
+//! `kill(pid, sig)`, number 62, for the signals IgniOS can act on. There are
+//! no signal handlers: a signal that ends a process ends it at once.
+//!
+//! | `pid`   | `sig`            | Effect                                       | Result    |
+//! |---------|------------------|----------------------------------------------|-----------|
+//! | > 0     | 9 (`SIGKILL`), 15 (`SIGTERM`) | the process ends with status 137 | 0         |
+//! | > 0     | 0                | only checks that the process exists          | 0         |
+//! | > 0     | any other        | nothing                                      | `-EINVAL` |
+//! | no such process |          |                                              | `-ESRCH`  |
+//! | <= 0    |                  | process groups do not exist                  | `-EINVAL` |
+//!
+//! A process that already ended but was not waited for still exists, as on
+//! Linux. Any process may signal any process: there are no users.
+
+import Proc from "@proc";
+import _ from "./errno";
+
+/// The `kill` handler.
+namespace Syscall::Linux {
+  /// Signal 0: check only.
+  const SIGNAL_CHECK: u64 = 0;
+
+  /// `SIGKILL`.
+  const SIGKILL: u64 = 9;
+
+  /// `SIGTERM`.
+  const SIGTERM: u64 = 15;
+
+  /// `kill(pid, sig)`.
+  function kill(pid: u64, signal: u64): u64 {
+    if ((pid as i64) <= 0 || (signal != SIGNAL_CHECK && signal != SIGKILL && signal != SIGTERM)) {
+      return Linux::failure(Linux::EINVAL);
+    }
+
+    if (signal == SIGNAL_CHECK) {
+      return Proc::Process::parentOf(pid) == Proc::Process::NO_PROCESS ? Linux::failure(Linux::ESRCH) : 0;
+    }
+
+    return Proc::Process::kill(pid) == Proc::Process::KILL_OK ? 0 : Linux::failure(Linux::ESRCH);
+  }
+}

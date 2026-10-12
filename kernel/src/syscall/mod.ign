@@ -52,6 +52,7 @@ import _ from "./core";
 import _ from "./dispatch";
 import _ from "./linux/errno";
 import _ from "./linux/files";
+import _ from "./linux/kill";
 import _ from "./linux/memory";
 import _ from "./linux/nanosleep";
 import _ from "./linux/reboot";

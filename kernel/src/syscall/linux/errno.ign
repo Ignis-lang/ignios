@@ -24,6 +24,9 @@ namespace Syscall::Linux {
   /// No such file or directory (2).
   const ENOENT: i64 = 2;
 
+  /// No such process (3).
+  const ESRCH: i64 = 3;
+
   /// Bad file descriptor (9): the descriptor is not open, or not for this.
   const EBADF: i64 = 9;
 

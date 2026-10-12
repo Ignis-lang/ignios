@@ -51,6 +51,15 @@
 //! slot is freed as soon as it ends. So no slot stays taken by a process
 //! nobody can collect.
 //!
+//! ## Killing
+//!
+//! `kill` marks a process (`killPending`) and wakes it if it waits in a
+//! sleep, a wait or a keyboard read. The process ends with `KILLED` (137)
+//! the next time it would return to ring 3: `checkKill` runs at the end of
+//! every system call and of every interrupt taken from ring 3. A process is
+//! never ended in the middle of kernel code, so no lock or half-done change
+//! is left behind.
+//!
 //! ## User Address Space of a Process
 //!
 //! ```text
@@ -109,6 +118,10 @@ record ProcessEntry {
   /// True for an orphan: its parent ended first, nobody can wait for it,
   /// and its slot is freed as soon as it ends.
   public detached: boolean;
+
+  /// True once another process killed this one: it ends with `KILLED` the
+  /// next time it leaves the kernel (`checkKill`).
+  public killPending: boolean;
 }
 
 /// The process table and the id counter.
@@ -139,6 +152,15 @@ namespace Proc::Process {
 
   /// `ProcessEntry::parent` of a process the kernel started.
   const NO_PARENT: u64 = 0;
+
+  /// The exit status of a killed process: 128 + 9, as a shell shows SIGKILL.
+  const KILLED: u64 = 137;
+
+  /// `kill` worked.
+  const KILL_OK: u64 = 0;
+
+  /// `kill` found no process with that id.
+  const KILL_NOT_FOUND: u64 = 1;
 
   /// The system call convention the process speaks: Linux x86_64 numbers and
   /// errno values.
@@ -401,6 +423,7 @@ namespace Proc::Process {
     (*process).abi = abi;
     (*process).parent = caller == NO_PROCESS ? NO_PARENT : caller;
     (*process).detached = false;
+    (*process).killPending = false;
 
     Proc::Memory::reset(slot);
 
@@ -565,6 +588,52 @@ namespace Proc::Process {
     }
   }
 
+  /// Kills process `id`: it ends with `KILLED` as soon as it would run user
+  /// code again. A process waiting in a sleep, a wait or a keyboard read is
+  /// woken so that it notices. Killing the calling process ends it at once
+  /// (no return). Killing a process that already ended changes nothing.
+  /// Returns `KILL_OK` or `KILL_NOT_FOUND`.
+  function kill(id: u64): u64 {
+    let saved: u64 = Arch::Cpu::saveAndDisableInterrupts();
+    let slot: u64 = findSlot(id);
+
+    if (slot == NO_PROCESS) {
+      Arch::Cpu::restoreInterrupts(saved);
+      return KILL_NOT_FOUND;
+    }
+
+    let process: *mut ProcessEntry = slotPointer(slot);
+
+    if ((*process).state == RUNNING) {
+      if (id == currentId()) {
+        killCurrent(KILLED);
+      }
+
+      (*process).killPending = true;
+      Sched::Scheduler::interrupt((*process).thread);
+      Fs::Files::cancelRead(slot);
+    }
+
+    Arch::Cpu::restoreInterrupts(saved);
+
+    return KILL_OK;
+  }
+
+  /// True when the running process was killed and has not ended yet.
+  function killRequested(): boolean {
+    let slot: u64 = currentSlot();
+
+    return slot != NO_PROCESS && (*slotPointer(slot)).killPending;
+  }
+
+  /// Ends the running process with `KILLED` when it was killed. The system
+  /// call and interrupt paths call it right before they return to ring 3.
+  function checkKill(): void {
+    if (killRequested()) {
+      killCurrent(KILLED);
+    }
+  }
+
   /// Wakes the thread of process `parent` if it is parked in `waitAny`.
   /// Nothing happens for `NO_PARENT` or a parent that is not parked.
   function wakeParent(parent: u64): void {
@@ -617,7 +686,7 @@ namespace Proc::Process {
         slot += 1;
       }
 
-      if (!found) {
+      if (!found || killRequested()) {
         Arch::Cpu::restoreInterrupts(saved);
         return NO_PROCESS;
       }

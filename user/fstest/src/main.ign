@@ -23,6 +23,7 @@
 //! | 123-124 | a bad buffer is `-EFAULT` for `read`, `write`, `fstat`, `newfstatat`, `getdents64`; a 48-byte `getdents64` buffer takes `.` and `..` |
 //! | 125    | `O_CREAT` on an existing directory is `-EISDIR`                      |
 //! | 140-147 | `getcwd` is `/`, then `/fstest` after `chdir`; a relative `openat` and `mkdirat` start there; a current directory cannot be removed (`-EBUSY`); `chdir` to a file `-ENOTDIR`, to nothing `-ENOENT`; `getcwd` into 2 bytes `-ERANGE`, into a bad pointer `-EFAULT` |
+//! | 230-233 | `kill`: pid 0 or a negative pid `-EINVAL`; an unknown signal `-EINVAL`; signal 0 of itself 0, of an unknown pid `-ESRCH`; signal 9 of an unknown pid `-ESRCH` |
 //! | 220-224 | `reboot` with a wrong first or second magic number, or an unknown command, is `-EINVAL`; `getcwd` into 1 byte `-ERANGE`, into 2 bytes 2; `unlinkat(".", AT_REMOVEDIR)` `-EINVAL`; `chdir("")` and `unlink("")` `-ENOENT` |
 //! | 130-138 | `unlinkat`: a file, then `-ENOENT`; a directory without `AT_REMOVEDIR` `-EISDIR`; a non-empty one `-ENOTEMPTY`; an open one `-EBUSY`, then 0 once closed; a file with `AT_REMOVEDIR` `-ENOTDIR`; `/` and an unknown flag `-EINVAL`; a file named with a trailing `/` `-ENOTDIR`; an open file `-EBUSY` |
 //!
@@ -407,6 +408,18 @@ function checkLimits(): void {
   expect(Sys::unlink("" as *u8), 0 - Sys::ENOENT, 224);
 }
 
+/// `kill(2)` without ending anything.
+function checkKillCall(): void {
+  let me: u64 = Sys::getPid() as u64;
+
+  expect(Sys::call2(62, 0, 9), 0 - Sys::EINVAL, 230);
+  expect(Sys::call2(62, 0xFFFFFFFFFFFFFFFF, 9), 0 - Sys::EINVAL, 230);
+  expect(Sys::call2(62, me, 2), 0 - Sys::EINVAL, 231);
+  expect(Sys::call2(62, me, 0), 0, 232);
+  expect(Sys::call2(62, 999999, 0), -3, 232);
+  expect(Sys::call2(62, 999999, 9), -3, 233);
+}
+
 /// `O_CREAT` on an existing directory is `-EISDIR`, as on Linux.
 function checkCreateDirectory(): void {
   expect(Sys::open("/etc" as *u8, Sys::O_CREAT | Sys::O_RDONLY, 0x1A4), 0 - Sys::EISDIR, 125);
@@ -433,6 +446,7 @@ function main(count: u64, values: *u64): u64 {
   checkRemove();
   checkCurrentDirectory();
   checkLimits();
+  checkKillCall();
 
   Io::print("fstest: openat, read, write, lseek, close, fstat, newfstatat, getdents64 and mkdirat behave as on Linux\n");
 

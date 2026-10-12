@@ -35,6 +35,7 @@
 //! | 120-125 | `CURRENT_DIRECTORY` is `/`; `CHANGE_DIRECTORY` to `/nt`, then paths relative to `CURRENT` start there; the current directory is `BUSY`; a file is `NOT_DIRECTORY`; a buffer too small is `INVALID` |
 //! | 130-137 | `SPAWN` of `/bin/pwd` and `WAIT` for its status 0; a second `WAIT` is `NOT_FOUND`; waiting for itself is `INVALID`; a missing program `NOT_FOUND`, a directory `IS_DIRECTORY`, a text file `INVALID`; arguments that do not match their count `INVALID`; a bad argument pointer `BAD_ADDRESS`; the child starts in the parent's current directory (`rmdir sub` from `/nt` removes `/nt/sub`) |
 //! | 200-206 | `POWER` with an unknown action is `INVALID`; `WAIT` for an id that never existed is `NOT_FOUND`; an argument block with an empty string is accepted; a child's exit status 1 comes back; 7 children fill the process table, the 8th is refused, and after waiting starting works again; `CURRENT_DIRECTORY` into 1 byte; removing `.` or `/bin/..` is `INVALID` |
+//! | 170-175 | `KILL` of an unknown id is `NOT_FOUND`; a child sleeping 10 s, a child spinning in ring 3, a child waiting for the keyboard and a child waiting for its own child each end with status 137 right away; a process that kills itself ends with 137 |
 //! | 160-163 | `WAIT_ANY`: no child is `NO_CHILD`; a bad status pointer `BAD_ADDRESS`; with a quick child and a napping one, it returns the quick one first and then blocks until the napping one ends, each with its id and status |
 //! | 140-143 | parents: a grandchild is not the caller's child (`NO_CHILD`); an orphan is freed when it ends (`NOT_FOUND` afterwards); a child that ended before its parent is freed with the parent (`NOT_FOUND`) |
 //! | 110-115 | `UNLINK` and `REMOVE_DIRECTORY`: a file, then `NOT_FOUND`; a directory as a file `IS_DIRECTORY`; a non-empty directory `NOT_EMPTY`; an open one `BUSY`; a file as a directory `NOT_DIRECTORY`; relative to a directory descriptor |
@@ -463,9 +464,87 @@ function checkWaitAny(): void {
   expect(Sys::call1(Sys::WAIT_ANY, statusAddress), Sys::NO_CHILD, 0, 163);
 }
 
-/// The helper modes of `checkParents`. Returns the exit status.
+/// Starts `nativetest MODE`, lets it run 50 ms, kills it, and requires
+/// status 137 from `WAIT`.
+function killChild(mode: str, length: u64, status: u64): void {
+  let arguments: *mut u8 = @pointerFromInteger<*mut u8>(buffer());
+  let prefix: str = "nativetest";
+  let mut index: u64 = 0;
+
+  while (index < 10) {
+    *(arguments + index) = *(prefix as *u8 + index);
+    index += 1;
+  }
+
+  *(arguments + 10) = 0;
+  index = 0;
+
+  while (index < length) {
+    *(arguments + 11 + index) = *(mode as *u8 + index);
+    index += 1;
+  }
+
+  *(arguments + 11 + length) = 0;
+
+  let child: u64 = succeed(Sys::call5(Sys::SPAWN, at("/bin/nativetest"), 15, buffer(), 12 + length, 2), status);
+
+  expect(Sys::call1(Sys::SLEEP, 50000000), Sys::OK, 0, status);
+  expect(Sys::call1(Sys::KILL, child), Sys::OK, 0, status);
+  expect(Sys::call1(Sys::WAIT, child), Sys::OK, 137, status);
+}
+
+/// `KILL`.
+function checkKill(): void {
+  expect(Sys::call1(Sys::KILL, 999999), Sys::NOT_FOUND, 0, 170);
+  killChild("sleep", 5, 171);
+  killChild("spin", 4, 172);
+  killChild("read", 4, 173);
+  killChild("waiter", 6, 174);
+
+  // The waiter's napping child became an orphan; let it end and be freed.
+  expect(Sys::call1(Sys::SLEEP, 300000000), Sys::OK, 0, 174);
+
+  let suicide: u64 = succeed(spawn("/bin/nativetest", 15, "nativetest\0suicide", 19, 2), 175);
+
+  expect(Sys::call1(Sys::WAIT, suicide), Sys::OK, 137, 175);
+}
+
+/// The helper modes of `checkParents` and `checkKill`. Returns the exit
+/// status.
 function helper(mode: *u8): u64 {
   let length: u64 = Args::length(mode);
+
+  if (length == 5 && same(@integerFromPointer(mode), "sleep", 5)) {
+    Sys::call1(Sys::SLEEP, 10000000000);
+    return 0;
+  }
+
+  if (length == 4 && same(@integerFromPointer(mode), "spin", 4)) {
+    let mut turns: u64 = 0;
+
+    while (true) {
+      turns = @readVolatile<u64>(&mut turns as *mut u64) + 1;
+      @writeVolatile<u64>(&mut turns as *mut u64, turns);
+    }
+
+    return 0;
+  }
+
+  if (length == 4 && same(@integerFromPointer(mode), "read", 4)) {
+    Sys::call3(Sys::READ, Sys::STDIN, buffer(), 100);
+    return 0;
+  }
+
+  if (length == 6 && same(@integerFromPointer(mode), "waiter", 6)) {
+    succeed(spawn("/bin/nativetest", 15, "nativetest\0nap", 15, 2), 153);
+    Sys::call1(Sys::WAIT_ANY, buffer());
+    return 0;
+  }
+
+  if (length == 7 && same(@integerFromPointer(mode), "suicide", 7)) {
+    Sys::call1(Sys::KILL, succeed(Sys::call0(Sys::PROCESS_ID), 154));
+    return 0;
+  }
 
   if (length == 3 && same(@integerFromPointer(mode), "nap", 3)) {
     Sys::call1(Sys::SLEEP, 200000000);
@@ -530,6 +609,7 @@ function main(count: u64, values: *u64): u64 {
   checkLimits();
   checkParents();
   checkWaitAny();
+  checkKill();
 
   Io::print("nativetest: every native call, its arguments and its status codes behave as specified\n");
 

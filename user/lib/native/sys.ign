@@ -153,6 +153,9 @@ export namespace Sys {
   /// Wait for any child.
   const WAIT_ANY: u64 = 22;
 
+  /// End a process.
+  const KILL: u64 = 23;
+
   /// Descriptor 0, the console, which reads as empty.
   const STDIN: u64 = 0;
 

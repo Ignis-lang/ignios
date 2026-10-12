@@ -50,6 +50,7 @@ import Proc from "@proc";
 import Sched from "@sched";
 import _ from "./linux/errno";
 import _ from "./linux/files";
+import _ from "./linux/kill";
 import _ from "./linux/memory";
 import _ from "./linux/nanosleep";
 import _ from "./linux/reboot";
@@ -76,9 +77,17 @@ namespace Syscall {
 
     if (abi == Proc::Process::ABI_NATIVE) {
       Native::run(operation, frame);
-      return;
+    } else {
+      runLinux(operation, frame);
     }
 
+    // About to return to ring 3: a process that was killed, also while it
+    // waited in this call, ends here.
+    Proc::Process::checkKill();
+  }
+
+  /// Runs `operation` with the Linux registers of `frame`.
+  function runLinux(operation: u8, frame: *mut Arch::InterruptFrame): void {
     let first: u64 = (*frame).rdi;
     let second: u64 = (*frame).rsi;
     let third: u64 = (*frame).rdx;
@@ -120,6 +129,8 @@ namespace Syscall {
       (*frame).rax = Linux::changeDirectory(first);
     } else if (operation == Operation::CURRENT_DIRECTORY) {
       (*frame).rax = Linux::currentDirectory(first, second);
+    } else if (operation == Operation::KILL) {
+      (*frame).rax = Linux::kill(first, second);
     } else if (operation == Operation::GET_PID) {
       (*frame).rax = Proc::Process::currentId();
     } else if (operation == Operation::YIELD) {

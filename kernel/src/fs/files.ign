@@ -182,6 +182,7 @@ namespace Fs::Files {
     }
 
     *directoryPointer(table) = 0;
+    Drivers::Tty::forget(table + 1);
 
     let mut descriptor: u64 = 0;
 
@@ -325,7 +326,7 @@ namespace Fs::Files {
     }
 
     if ((*file).kind == CONSOLE) {
-      Drivers::Tty::read(buffer, count, done);
+      Drivers::Tty::readAs(buffer, count, done, table + 1);
       return Fs::Vfs::OK;
     }
 
@@ -553,6 +554,14 @@ namespace Fs::Files {
     (*file).references = 1;
 
     return file;
+  }
+
+  /// Stops a keyboard read of `table` that is waiting, at once. The kernel
+  /// calls it when it kills the process.
+  function cancelRead(table: u64): void {
+    if (table < MAX_TABLES) {
+      Drivers::Tty::cancel(table + 1);
+    }
   }
 
   /// The current directory of `table`: the root until `setCurrentDirectory`.

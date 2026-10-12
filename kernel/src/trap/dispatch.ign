@@ -89,7 +89,17 @@ namespace Trap {
     // user-set AC flag that would turn SMAP off for this handler.
     Arch::Protection::forbidUserAccess();
     countAccessFlag(frame);
+    route(frame);
 
+    // About to return to ring 3: a process that was killed ends here.
+    if (((*frame).cs & SELECTOR_RING_MASK) == SELECTOR_RING_MASK) {
+      Proc::Process::checkKill();
+    }
+  }
+
+  /// Runs the handler of the vector in `frame`. See the module header for
+  /// the routing.
+  function route(frame: *mut Arch::InterruptFrame): void {
     let vector: u64 = (*frame).vector;
 
     if (vector == Apic::Lapic::spuriousVector()) {
