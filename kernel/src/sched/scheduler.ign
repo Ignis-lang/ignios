@@ -21,13 +21,28 @@
 //! still running on it, so the dead thread is recorded and the next thread to
 //! run frees it right after the switch.
 //!
-//! Mutual exclusion is "interrupts off": every public operation runs inside
-//! `Arch::Cpu::saveAndDisableInterrupts` and `Arch::Cpu::restoreInterrupts`. That is
-//! enough because the kernel has one processor, and the only other code that
-//! could touch the table in the middle of an operation is an interrupt
-//! handler. Each thread keeps the interrupt state it saved on its own stack,
-//! so a thread that switches out with interrupts off and is resumed later
-//! restores its own state, not the state of the thread that ran before.
+//! One spinlock, the run queue lock (rank `Lib::Rank::RUN_QUEUE`), guards
+//! the queue, the thread table and every thread's state. It is taken with
+//! interrupts already off, and each thread keeps the interrupt state it saved
+//! on its own stack, so a thread that switches out with interrupts off and is
+//! resumed later restores its own state, not the state of the thread that
+//! ran before.
+//!
+//! The lock is held across a context switch and released by the thread
+//! switched in: right after `Arch::Context::switchTo` returns in it, or in
+//! `threadBegin` for a new thread. Until then the outgoing thread's
+//! registers are not saved, and no other processor may pick it up. A tick
+//! that finds any spinlock held on its CPU touches no scheduler state and
+//! puts the switch off to the first tick after the release.
+//!
+//! ```text
+//!   thread A                        thread B
+//!   lockRunQueue()
+//!   state = READY, enqueue
+//!   switchToNext() ── switchTo ──►  (returns in its own switchToNext,
+//!                                    or starts in threadBegin)
+//!                                   unlockRunQueue()
+//! ```
 //!
 //! A thread may own an address space, the physical address of a PML4 made by
 //! `Mm::AddressSpace::create`. Every switch loads the incoming thread's PML4, or
@@ -49,7 +64,8 @@
 //!                                     ├─ Apic::Lapic::endOfInterrupt
 //!                                     └─ Sched::Scheduler::onTick       (interrupts still off)
 //!                                           ├─ count the tick against the thread
-//!                                           ├─ wake sleepers
+//!                                           ├─ a spinlock held? stop here
+//!                                           ├─ take the run queue lock, wake sleepers
 //!                                           └─ slice over and others ready?
 //!                                                  makeReady(current); switchToNext()
 //!
@@ -61,6 +77,7 @@
 //! See concept doc 13.
 
 import Arch from "@arch";
+import Lib from "@lib";
 import Mm from "@mm";
 import Time from "@time";
 import _ from "./thread";
@@ -101,6 +118,11 @@ record SchedulerState {
 
   /// Ticks that would have switched threads but found a spinlock held.
   static mut deferred: u64;
+
+  /// The run queue lock, rank `Lib::Rank::RUN_QUEUE`. It guards the queue,
+  /// the thread table and every thread's state, and is held across a context
+  /// switch: the thread switched in releases it.
+  static mut lock: Arch::SpinLock;
 }
 
 /// The scheduler API.
@@ -112,6 +134,7 @@ namespace Sched::Scheduler {
   /// Builds the table with the boot thread running and the idle thread
   /// ready. The kernel page tables and the PMM must be up.
   function initialize(): void {
+    Arch::Spin::initialize(runQueueLock(), Lib::Rank::RUN_QUEUE);
     Sched::Thread::initializeBootThread();
 
     SchedulerState::current = Sched::Thread::BOOT_SLOT;
@@ -126,12 +149,12 @@ namespace Sched::Scheduler {
   /// Lets the timer interrupt switch threads. Until it is called, threads
   /// change only when one of them yields, sleeps or exits.
   function enablePreemption(): void {
-    let saved: u64 = Arch::Cpu::saveAndDisableInterrupts();
+    Arch::Spin::lockIrq(runQueueLock());
 
     SchedulerState::sliceLeft = TIME_SLICE_TICKS;
     SchedulerState::preemptive = true;
 
-    Arch::Cpu::restoreInterrupts(saved);
+    Arch::Spin::unlockIrq(runQueueLock());
   }
 
   /// Called from the timer interrupt after the end-of-interrupt, with
@@ -150,18 +173,33 @@ namespace Sched::Scheduler {
     let current: *mut Sched::Thread::Control = Sched::Thread::slotPointer(SchedulerState::current);
 
     (*current).runTicks += 1;
+
+    // A spinlock is held on this CPU: the interrupted code may be in the
+    // middle of the run queue itself, so the tick touches nothing shared and
+    // switches nothing. The slice stays used up, so the switch happens on
+    // the first tick after the release; sleepers wake on that tick too.
+    if (Arch::Spin::holdsAny()) {
+      if (SchedulerState::sliceLeft > 0) {
+        SchedulerState::sliceLeft -= 1;
+      }
+
+      if (SchedulerState::sliceLeft == 0 && SchedulerState::current != Sched::Thread::IDLE_SLOT) {
+        SchedulerState::deferred += 1;
+      }
+
+      return;
+    }
+
+    lockRunQueue();
     wakeSleepers();
 
-    // A spinlock is held on this CPU: no switch now. The slice stays used
-    // up, so the switch happens on the first tick after the release.
-    let held: boolean = Arch::Spin::holdsAny();
-
     if (SchedulerState::current == Sched::Thread::IDLE_SLOT) {
-      if (SchedulerState::queueLength > 0 && !held) {
+      if (SchedulerState::queueLength > 0) {
         makeReady(Sched::Thread::IDLE_SLOT);
         switchToNext();
       }
 
+      unlockRunQueue();
       return;
     }
 
@@ -170,22 +208,20 @@ namespace Sched::Scheduler {
     }
 
     if (SchedulerState::sliceLeft > 0) {
-      return;
-    }
-
-    if (held) {
-      SchedulerState::deferred += 1;
+      unlockRunQueue();
       return;
     }
 
     if (SchedulerState::queueLength == 0) {
       SchedulerState::sliceLeft = TIME_SLICE_TICKS;
+      unlockRunQueue();
       return;
     }
 
     SchedulerState::preemptions += 1;
     makeReady(SchedulerState::current);
     switchToNext();
+    unlockRunQueue();
   }
 
   /// Creates a thread that runs `entry(argument)` and puts it at the end of
@@ -200,15 +236,17 @@ namespace Sched::Scheduler {
   /// thread then owns: it is destroyed when the thread ends, and also when
   /// the thread cannot be created. 0 means the kernel's own address space.
   function spawnIn(entry: u64, argument: u64, root: u64): u64 {
-    let saved: u64 = Arch::Cpu::saveAndDisableInterrupts();
+    Arch::Spin::lockIrq(runQueueLock());
+
     let slot: u64 = Sched::Thread::findFreeSlot();
 
     if (slot == Sched::Thread::NO_THREAD || !Sched::Thread::createThread(slot, entry, argument, root)) {
+      Arch::Spin::unlockIrq(runQueueLock());
+
       if (root != 0) {
         Mm::AddressSpace::destroy(root);
       }
 
-      Arch::Cpu::restoreInterrupts(saved);
       return Sched::Thread::NO_THREAD;
     }
 
@@ -216,7 +254,7 @@ namespace Sched::Scheduler {
 
     let id: u64 = (*Sched::Thread::slotPointer(slot)).id;
 
-    Arch::Cpu::restoreInterrupts(saved);
+    Arch::Spin::unlockIrq(runQueueLock());
 
     return id;
   }
@@ -228,6 +266,7 @@ namespace Sched::Scheduler {
 
     let saved: u64 = Arch::Cpu::saveAndDisableInterrupts();
 
+    lockRunQueue();
     wakeSleepers();
 
     if (SchedulerState::queueLength > 0) {
@@ -235,6 +274,7 @@ namespace Sched::Scheduler {
       switchToNext();
     }
 
+    unlockRunQueue();
     Arch::Cpu::restoreInterrupts(saved);
   }
 
@@ -248,16 +288,18 @@ namespace Sched::Scheduler {
       return;
     }
 
-    let saved: u64 = Arch::Cpu::saveAndDisableInterrupts();
-    let current: *mut Sched::Thread::Control = Sched::Thread::slotPointer(SchedulerState::current);
-
     if (SchedulerState::current == Sched::Thread::IDLE_SLOT) {
       @panic("scheduler: the idle thread cannot sleep");
     }
 
+    let saved: u64 = Arch::Cpu::saveAndDisableInterrupts();
+    let current: *mut Sched::Thread::Control = Sched::Thread::slotPointer(SchedulerState::current);
+
+    lockRunQueue();
     (*current).wakeTick = Time::Timer::ticks() + ticks;
     (*current).state = Sched::Thread::BLOCKED;
     switchToNext();
+    unlockRunQueue();
 
     Arch::Cpu::restoreInterrupts(saved);
   }
@@ -271,8 +313,6 @@ namespace Sched::Scheduler {
   function join(id: u64): void {
     noSpinlockHeld();
 
-    let saved: u64 = Arch::Cpu::saveAndDisableInterrupts();
-
     if (id == currentId()) {
       @panic("scheduler: a thread cannot wait for itself");
     }
@@ -280,6 +320,10 @@ namespace Sched::Scheduler {
     if (SchedulerState::current == Sched::Thread::IDLE_SLOT) {
       @panic("scheduler: the idle thread cannot wait");
     }
+
+    let saved: u64 = Arch::Cpu::saveAndDisableInterrupts();
+
+    lockRunQueue();
 
     if (Sched::Thread::isAlive(id)) {
       let current: *mut Sched::Thread::Control = Sched::Thread::slotPointer(SchedulerState::current);
@@ -289,6 +333,7 @@ namespace Sched::Scheduler {
       switchToNext();
     }
 
+    unlockRunQueue();
     Arch::Cpu::restoreInterrupts(saved);
   }
 
@@ -305,6 +350,7 @@ namespace Sched::Scheduler {
       @panic("scheduler: the boot or idle thread cannot exit");
     }
 
+    lockRunQueue();
     (*Sched::Thread::slotPointer(SchedulerState::current)).state = Sched::Thread::DEAD;
     SchedulerState::zombie = SchedulerState::current + 1;
     switchToNext();
@@ -313,10 +359,13 @@ namespace Sched::Scheduler {
   }
 
   /// Called by the trampoline in a thread's first moments, still with
-  /// interrupts disabled: the thread that ran before may have died.
+  /// interrupts disabled and the run queue lock that the switch handed over
+  /// held: frees the thread that ran before if it died, then releases the
+  /// lock.
   @externName("ignis_thread_begin")
   function threadBegin(): void {
     reapZombie();
+    unlockRunQueue();
   }
 
   /// The id of the running thread.
@@ -345,7 +394,9 @@ namespace Sched::Scheduler {
   }
 
   /// Frees the stack and the slot of the thread that died just before the
-  /// current one was switched in. Interrupts must be disabled.
+  /// current one was switched in. The run queue lock is held: the stack and
+  /// the address space are freed under it (page tables, heap and frames
+  /// rank above it), and nothing in that path may sleep.
   function reapZombie(): void {
     let marker: u64 = SchedulerState::zombie;
 
@@ -377,14 +428,16 @@ namespace Sched::Scheduler {
   function park(): void {
     noSpinlockHeld();
 
-    let saved: u64 = Arch::Cpu::saveAndDisableInterrupts();
-
     if (SchedulerState::current == Sched::Thread::IDLE_SLOT) {
       @panic("scheduler: the idle thread cannot park");
     }
 
+    let saved: u64 = Arch::Cpu::saveAndDisableInterrupts();
+
+    lockRunQueue();
     (*Sched::Thread::slotPointer(SchedulerState::current)).state = Sched::Thread::PARKED;
     switchToNext();
+    unlockRunQueue();
 
     Arch::Cpu::restoreInterrupts(saved);
   }
@@ -392,7 +445,8 @@ namespace Sched::Scheduler {
   /// Makes the thread `id` ready when it is parked. Does nothing otherwise,
   /// so a wake for a thread that is not waiting is harmless.
   function wake(id: u64): void {
-    let saved: u64 = Arch::Cpu::saveAndDisableInterrupts();
+    Arch::Spin::lockIrq(runQueueLock());
+
     let mut slot: u64 = 0;
 
     while (slot < Sched::Thread::MAX_THREADS) {
@@ -405,14 +459,15 @@ namespace Sched::Scheduler {
       slot += 1;
     }
 
-    Arch::Cpu::restoreInterrupts(saved);
+    Arch::Spin::unlockIrq(runQueueLock());
   }
 
   /// Makes the thread `id` ready if it waits in `sleep`, `join` or `park`,
   /// so it can notice that it was killed. Each of those returns early; its
   /// caller checks why. Does nothing to a thread that is ready or running.
   function interrupt(id: u64): void {
-    let saved: u64 = Arch::Cpu::saveAndDisableInterrupts();
+    Arch::Spin::lockIrq(runQueueLock());
+
     let mut slot: u64 = 0;
 
     while (slot < Sched::Thread::MAX_THREADS) {
@@ -426,7 +481,7 @@ namespace Sched::Scheduler {
       slot += 1;
     }
 
-    Arch::Cpu::restoreInterrupts(saved);
+    Arch::Spin::unlockIrq(runQueueLock());
   }
 
   /// Panics when this CPU holds a spinlock: a thread must not give up the
@@ -447,8 +502,56 @@ namespace Sched::Scheduler {
     return SchedulerState::deferred;
   }
 
-  /// Makes every thread that waits for the thread `id` ready. Interrupts
-  /// must be disabled.
+  /// True while a thread with this id is in the table, dead or not yet
+  /// freed included. Takes the run queue lock.
+  function isAlive(id: u64): boolean {
+    Arch::Spin::lockIrq(runQueueLock());
+
+    let alive: boolean = Sched::Thread::isAlive(id);
+
+    Arch::Spin::unlockIrq(runQueueLock());
+
+    return alive;
+  }
+
+  /// Takes the run queue lock with `lockIrq`, for code outside the scheduler
+  /// that reads the thread table (the `threads` command). Nothing in between
+  /// may sleep.
+  function lockTable(): void {
+    Arch::Spin::lockIrq(runQueueLock());
+  }
+
+  /// Releases what `lockTable` took.
+  function unlockTable(): void {
+    Arch::Spin::unlockIrq(runQueueLock());
+  }
+
+  /// Takes the run queue lock. Interrupts must already be off: the caller
+  /// keeps its own interrupt state on its own stack, because the lock may
+  /// be released by another thread after a switch.
+  function lockRunQueue(): void {
+    Arch::Spin::lock(runQueueLock());
+  }
+
+  /// Releases the run queue lock, in the thread that took it or in the
+  /// thread a switch handed it to.
+  function unlockRunQueue(): void {
+    Arch::Spin::unlock(runQueueLock());
+  }
+
+  /// `SchedulerState::lock`.
+  function runQueueLock(): *mut Arch::SpinLock {
+    return &mut SchedulerState::lock as *mut Arch::SpinLock;
+  }
+
+  /// True when this CPU holds the run queue lock and no other spinlock, the
+  /// state every switch needs.
+  function holdsOnlyRunQueue(): boolean {
+    return SchedulerState::lock.locked != 0 && Arch::CpuLocal::preemptCount() == 1 && Arch::CpuLocal::spinTop() == Lib::Rank::RUN_QUEUE;
+  }
+
+  /// Makes every thread that waits for the thread `id` ready. The run queue
+  /// lock is held.
   function wakeJoiners(id: u64): void {
     let mut slot: u64 = 0;
 
@@ -483,9 +586,15 @@ namespace Sched::Scheduler {
   /// Picks the next thread, which is the head of the run queue or the idle
   /// thread, and switches to it. The caller has already put the current
   /// thread in the state it leaves in: ready and queued, blocked, or dead.
-  /// Interrupts must be disabled. Returns when the calling thread is switched
-  /// back in.
+  /// Interrupts must be disabled and the caller holds the run queue lock and
+  /// no other spinlock. Returns when the calling thread is switched back in,
+  /// holding the run queue lock again: the thread that switched to it took
+  /// it, and the caller releases it.
   function switchToNext(): void {
+    if (!holdsOnlyRunQueue()) {
+      @panic("scheduler: a switch needs the run queue lock and no other spinlock");
+    }
+
     wakeSleepers();
 
     let outgoing: u64 = SchedulerState::current;
@@ -517,7 +626,8 @@ namespace Sched::Scheduler {
     reapZombie();
   }
 
-  /// Moves every sleeper whose time has come to the run queue.
+  /// Moves every sleeper whose time has come to the run queue. The run queue
+  /// lock is held.
   function wakeSleepers(): void {
     let now: u64 = Time::Timer::ticks();
     let mut slot: u64 = 0;
@@ -534,7 +644,7 @@ namespace Sched::Scheduler {
   }
 
   /// Marks `slot` ready and queues it. The idle thread is never queued: it
-  /// runs when the queue is empty.
+  /// runs when the queue is empty. The run queue lock is held.
   function makeReady(slot: u64): void {
     (*Sched::Thread::slotPointer(slot)).state = Sched::Thread::READY;
 

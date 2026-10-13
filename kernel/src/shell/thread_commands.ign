@@ -51,7 +51,7 @@ namespace Shell::ThreadCommands {
   /// Prints one row per thread in the table: id, state, the ticks it was
   /// running at, and the tick a sleeper wakes at.
   function printThreads(): void {
-    let saved: u64 = Arch::Cpu::saveAndDisableInterrupts();
+    Sched::Scheduler::lockTable();
 
     Drivers::Console::writeLine("  id  state     ticks   wake");
 
@@ -74,7 +74,7 @@ namespace Shell::ThreadCommands {
       slot += 1;
     }
 
-    Arch::Cpu::restoreInterrupts(saved);
+    Sched::Scheduler::unlockTable();
   }
 
   /// Starts two threads that print a line every 0.5 s and 0.7 s, and a third

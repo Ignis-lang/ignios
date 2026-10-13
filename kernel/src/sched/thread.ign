@@ -177,9 +177,9 @@ namespace Sched::Thread {
   const STACK_REGION: u64 = 0xFFFFB00000000000;
 
   /// True while a thread with this id is in the table, dead or not yet
-  /// freed included.
+  /// freed included. The caller holds the run queue lock; elsewhere use
+  /// `Sched::Scheduler::isAlive`.
   function isAlive(id: u64): boolean {
-    let saved: u64 = Arch::Cpu::saveAndDisableInterrupts();
     let mut alive: boolean = false;
     let mut slot: u64 = 0;
 
@@ -192,8 +192,6 @@ namespace Sched::Thread {
 
       slot += 1;
     }
-
-    Arch::Cpu::restoreInterrupts(saved);
 
     return alive;
   }

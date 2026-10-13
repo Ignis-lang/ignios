@@ -117,6 +117,31 @@ namespace Arch::Spin {
     }
   }
 
+  /// Releases `spin` while `above`, the lock taken right after it, stays
+  /// held: the one release out of order, for a thread that must hold the next
+  /// lock before it lets the first go (`Sched::Wait::sleepOn` holds the run
+  /// queue before it releases the wait queue). `above` then ranks as if it
+  /// had been taken without `spin`. Panics unless `releaseUnderAllowed`.
+  function releaseUnder(spin: *mut Arch::SpinLock, above: *mut Arch::SpinLock): void {
+    if (!releaseUnderAllowed(spin, above)) {
+      @panic("spinlock: releaseUnder needs the lock taken right before the last one");
+    }
+
+    (*above).previousRank = (*spin).previousRank;
+    release(@integerFromPointer(&mut (*spin).locked as *mut u64));
+
+    if (Arch::CpuLocal::isReady()) {
+      Arch::CpuLocal::setPreemptCount(Arch::CpuLocal::preemptCount() - 1);
+    }
+  }
+
+  /// True when `releaseUnder(spin, above)` may run now: both are held,
+  /// `above` is the last lock taken, and `spin` the one taken right before
+  /// it.
+  function releaseUnderAllowed(spin: *mut Arch::SpinLock, above: *mut Arch::SpinLock): boolean {
+    return (*spin).locked != 0 && releaseAllowed(above) && (*above).previousRank == (*spin).rank;
+  }
+
   /// `lock` with interrupts disabled on this CPU until `unlockIrq`.
   function lockIrq(spin: *mut Arch::SpinLock): void {
     let saved: u64 = Arch::Cpu::saveAndDisableInterrupts();

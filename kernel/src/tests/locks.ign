@@ -10,7 +10,7 @@
 //! | irq variant        | `lockIrq` turns interrupts off and `unlockIrq` restores them   |
 //! | no preemption      | with a spinlock held across more than a time slice, no thread switch happens, and one happens soon after the release |
 //! | mutual exclusion   | three threads add 1 to a counter three times each, waiting more than a time slice between the read and the write: the total is 9 |
-//! | ranks              | while a lock of rank 20 is held, ranks 10 and 20 are refused and 30 is allowed; only the last lock taken may be released; a free lock may not be; after the release everything is allowed again; `canSleep` needs exactly one lock taken with `lockIrq` |
+//! | ranks              | while a lock of rank 20 is held, ranks 10 and 20 are refused and 30 is allowed; only the last lock taken may be released; a free lock may not be; after the release everything is allowed again; `canSleep` needs exactly one lock taken with `lockIrq`; `releaseUnder` and `holdsOnlyRunQueue`, the rules of the scheduler's lock hand-over |
 //! | mutex              | a contender sleeps on a mutex its holder keeps while sleeping, and gets it only after the holder is done, and may not release it meanwhile; mutex ranks and release order; no mutex under a spinlock |
 //!
 //! The rank and release checks of `lock` and `unlock` panic through the
@@ -201,6 +201,8 @@ namespace Tests::Locks {
     if (sleepWithInterrupts || !sleepWithIrqLock || sleepWithTwo) {
       @panic("locks self-test: canSleep allowed a sleep that could lose its wake-up");
     }
+
+    checkHandOver();
   }
 
   /// Holds a spinlock for more than a time slice while a helper thread wants
@@ -413,6 +415,55 @@ namespace Tests::Locks {
   /// `LocksTestState::mutex`.
   function mutex(): *mut Sched::Mutex {
     return &mut LocksTestState::mutex as *mut Sched::Mutex;
+  }
+
+  /// The two rules the scheduler's lock hand-over rests on: `releaseUnder`
+  /// lets only the lock taken right before the last one go, after which the
+  /// last one ranks as if taken alone; and a switch needs the run queue lock
+  /// and no other spinlock (`holdsOnlyRunQueue`). Leaves interrupts as it
+  /// found them.
+  function checkHandOver(): void {
+    let wasOn: boolean = Arch::Cpu::interruptsEnabled();
+
+    Arch::Cpu::disableInterrupts();
+    Arch::Spin::lock(counterLock());
+    Arch::Spin::lock(innerLock());
+
+    let underWrongOrder: boolean = Arch::Spin::releaseUnderAllowed(innerLock(), counterLock());
+    let underRightOrder: boolean = Arch::Spin::releaseUnderAllowed(counterLock(), innerLock());
+
+    Arch::Spin::releaseUnder(counterLock(), innerLock());
+
+    let underReleased: boolean = LocksTestState::counterLock.locked == 0 && Arch::CpuLocal::preemptCount() == 1;
+
+    Arch::Spin::unlock(innerLock());
+
+    let allReleased: boolean = !Arch::Spin::holdsAny() && Arch::Spin::rankAllows(10);
+
+    if (underWrongOrder || !underRightOrder || !underReleased || !allReleased) {
+      @panic("locks self-test: releaseUnder broke the rank chain");
+    }
+
+    Arch::Spin::lock(counterLock());
+    Sched::Scheduler::lockRunQueue();
+
+    let switchWithOther: boolean = Sched::Scheduler::holdsOnlyRunQueue();
+
+    Sched::Scheduler::unlockRunQueue();
+    Arch::Spin::unlock(counterLock());
+    Sched::Scheduler::lockRunQueue();
+
+    let switchAlone: boolean = Sched::Scheduler::holdsOnlyRunQueue();
+
+    Sched::Scheduler::unlockRunQueue();
+
+    if (wasOn) {
+      Arch::Cpu::enableInterrupts();
+    }
+
+    if (switchWithOther || !switchAlone) {
+      @panic("locks self-test: a switch was allowed with another spinlock held");
+    }
   }
 
   /// `LocksTestState::twinMutex`.

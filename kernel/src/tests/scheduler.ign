@@ -287,7 +287,7 @@ namespace Tests::Scheduler {
     let mut id: u64 = first;
 
     while (id <= last) {
-      while (Sched::Thread::isAlive(id)) {
+      while (Sched::Scheduler::isAlive(id)) {
         Sched::Scheduler::sleep(1);
       }
 

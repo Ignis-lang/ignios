@@ -43,6 +43,7 @@
 //! another CPU, so its ranks follow the thread, not the CPU.
 
 import Arch from "@arch";
+import Lib from "@lib";
 import _ from "./scheduler";
 import _ from "./thread";
 
@@ -99,24 +100,32 @@ namespace Sched::Wait {
       @panic("wait queue: sleepOn needs its spinlock taken with lockIrq");
     }
 
+    if (Arch::CpuLocal::preemptCount() != 1) {
+      @panic("wait queue: a thread tried to sleep while holding another spinlock");
+    }
+
     let saved: u64 = (*spin).savedFlags;
 
     (*Sched::Thread::slotPointer(slot)).state = Sched::Thread::QUEUED;
     append(queue, slot);
-    Arch::Spin::unlock(spin);
 
-    if (Arch::Spin::holdsAny()) {
-      @panic("wait queue: a thread tried to sleep while holding another spinlock");
-    }
-
+    // The run queue is taken before `spin` is let go. A waker needs `spin`
+    // to find this thread and then the run queue to make it ready, and the
+    // run queue is released only after this thread's registers are saved,
+    // by the thread switched in. So no other processor can run this thread
+    // before it has left this one.
+    Sched::Scheduler::lockRunQueue();
+    Arch::Spin::releaseUnder(spin, Sched::Scheduler::runQueueLock());
     Sched::Scheduler::switchToNext();
+    Sched::Scheduler::unlockRunQueue();
 
     Arch::Spin::lock(spin);
     (*spin).savedFlags = saved;
   }
 
   /// Wakes the first thread of `queue`. The caller holds the queue's
-  /// spinlock. Returns false when nobody was waiting.
+  /// spinlock, which ranks below the run queue. Returns false when nobody
+  /// was waiting.
   function wakeOne(queue: *mut Sched::WaitQueue): boolean {
     if (Arch::Cpu::interruptsEnabled()) {
       @panic("wait queue: wake needs the queue's spinlock taken with lockIrq");
@@ -126,10 +135,15 @@ namespace Sched::Wait {
       let slot: u64 = pop(queue);
       let thread: *mut Sched::Thread::Control = Sched::Thread::slotPointer(slot);
 
+      Sched::Scheduler::lockRunQueue();
+
       if ((*thread).state == Sched::Thread::QUEUED) {
         Sched::Scheduler::makeReady(slot);
+        Sched::Scheduler::unlockRunQueue();
         return true;
       }
+
+      Sched::Scheduler::unlockRunQueue();
     }
 
     return false;
@@ -193,10 +207,9 @@ namespace Sched::Wait {
 
 /// The mutex API.
 namespace Sched::Mutex {
-  /// The rank of every mutex's guard spinlock: above the ranks subsystems
-  /// use, since a guard is held only for a few instructions and never while
-  /// another spinlock is taken.
-  const GUARD_RANK: u64 = 1000;
+  /// The rank of every mutex's guard spinlock: below the run queue, which
+  /// waking a waiter takes under it.
+  const GUARD_RANK: u64 = Lib::Rank::MUTEX_GUARD;
 
   /// Makes `mutex` free with `rank`. Panics for rank 0.
   function initialize(mutex: *mut Sched::Mutex, rank: u64): void {
