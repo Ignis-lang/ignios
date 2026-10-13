@@ -192,6 +192,30 @@ namespace Syscall::Core {
     protection: u64,
     address: *mut u64
   ): u64 {
+    // A file mapping copies the node's data, which a write from another
+    // process could move: the VFS lock is held until the copy is done.
+    if (!anonymous) {
+      Fs::Vfs::lock();
+    }
+
+    let result: u64 = mapFrom(anonymous, descriptor, offset, length, protection, address);
+
+    if (!anonymous) {
+      Fs::Vfs::unlock();
+    }
+
+    return result;
+  }
+
+  /// The body of `map`, with the VFS lock held for a file mapping.
+  function mapFrom(
+    anonymous: boolean,
+    descriptor: u64,
+    offset: u64,
+    length: u64,
+    protection: u64,
+    address: *mut u64
+  ): u64 {
     if (length == 0 || offset % 4096 != 0 || (protection & ~(Proc::Memory::READ | Proc::Memory::WRITE | Proc::Memory::EXECUTE)) != 0) {
       return Fs::Vfs::INVALID;
     }

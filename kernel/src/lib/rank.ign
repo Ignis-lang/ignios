@@ -62,6 +62,7 @@ namespace Lib::MutexRank {
   /// have several threads.
   const VFS: u64 = 30;
 
-  /// A process's address space and region table.
+  /// A process's address space and region table. Reserved: a process has
+  /// one thread, which alone uses them, until processes get several.
   const ADDRESS_SPACE: u64 = 40;
 }

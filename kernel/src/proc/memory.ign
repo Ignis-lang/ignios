@@ -66,7 +66,11 @@ namespace Proc {
 }
 
 /// The region tables and the next address of every slot. Each size must
-/// equal `MAX_SLOTS`.
+/// equal `MAX_SLOTS`. A slot's entries are used only by the process's own
+/// thread, and by the kernel before that thread starts or after it ended
+/// (`launch`, `finishCurrent`), so they take no lock; the page table edits
+/// under them take the page table spinlock. A per-process lock comes with
+/// processes of several threads.
 record MemoryState {
   /// The region table of each slot: the address of a heap array of
   /// `capacities[s]` regions, 0 before the first `map`.
