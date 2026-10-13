@@ -8,6 +8,8 @@
  *                          the stack the SYSCALL entry switches to
  *   gs:[16]  user rsp      scratch: the user stack pointer between "syscall"
  *                          and the push that saves it in the frame
+ *   gs:[24]  preempt count above 0 while this CPU holds a spinlock
+ *   gs:[32]  spin top      the highest rank of the spinlocks it holds
  *
  * These offsets are used by usermode_asm.S too. Arch::CpuLocal::initialize
  * points IA32_GS_BASE at the block and sets IA32_KERNEL_GS_BASE to 0. See

@@ -189,6 +189,7 @@ function kmain(): void {
   Sched::Scheduler::enablePreemption();
 
   Tests::Scheduler::runPreemptive();
+  Tests::Locks::run();
   Tests::User::run();
   Tests::CpuLocal::run();
 

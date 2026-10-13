@@ -1,0 +1,167 @@
+//!
+//! # Spinlocks
+//!
+//! A lock a processor waits for by spinning, for short critical sections that
+//! never sleep.
+//!
+//! ## Overview
+//!
+//! The lock word is taken with `xchg`, which is atomic on x86 without a `lock`
+//! prefix: it writes 1 and returns the old value, and the caller owns the lock
+//! when the old value was 0. A waiter spins on plain loads with `pause` until
+//! the word reads 0, then tries again, so it does not keep the cache line
+//! busy with writes.
+//!
+//! ```text
+//!   lock:    preemptCount += 1        no thread switch on this CPU from here
+//!            check the rank
+//!            loop { if xchg(&locked, 1) == 0 break; while locked != 0 pause }
+//!            previousRank := spinTop, spinTop := rank
+//!   unlock:  spinTop must be rank, then spinTop := previousRank
+//!            locked := 0              a store; x86 keeps it after the section
+//!            preemptCount -= 1
+//! ```
+//!
+//! `lockIrq` also disables interrupts on this CPU first and `unlockIrq`
+//! restores them. Data an interrupt handler also touches needs it: otherwise
+//! the handler, interrupting the holder on the same CPU, would spin forever.
+//!
+//! ## Preemption
+//!
+//! While a spinlock is held the per-CPU preemption counter is above 0, and
+//! the timer tick does not switch threads (`Sched::Scheduler::onTick`). A
+//! thread preempted while holding a spinlock would make every other thread
+//! that wants it spin until it runs again. Sleeping while holding one is a
+//! bug, and the scheduler panics on it.
+//!
+//! ## Ranks
+//!
+//! Every lock has a rank above 0. A CPU may only take a lock whose rank is
+//! above the highest one it holds, and must release in reverse order; both
+//! rules panic with a message that names them. Two paths that took the same
+//! two locks in opposite orders could deadlock on two CPUs; the rank rule
+//! turns that into a boot failure on one. The previous highest rank is kept
+//! in the lock itself, so no stack is needed.
+//!
+//! Before `Arch::CpuLocal::initialize` there is no per-CPU block; the lock
+//! still takes its word but keeps no counter or rank.
+
+import _ from "./cpu";
+import _ from "./cpu_local";
+
+namespace Arch {
+  /// A spinlock. Set it up with `Arch::Spin::initialize` before use.
+  @cLayout
+  record SpinLock {
+    /// 1 while held.
+    public locked: u64;
+
+    /// The rank, above 0.
+    public rank: u64;
+
+    /// The highest rank this CPU held before taking the lock.
+    public previousRank: u64;
+
+    /// The interrupt flag `lockIrq` found, for `unlockIrq`.
+    public savedFlags: u64;
+  }
+}
+
+/// The spinlock API.
+namespace Arch::Spin {
+  /// Makes `spin` free with `rank`. Panics for rank 0.
+  function initialize(spin: *mut Arch::SpinLock, rank: u64): void {
+    if (rank == 0) {
+      @panic("spinlock: a lock needs a rank above 0");
+    }
+
+    (*spin).locked = 0;
+    (*spin).rank = rank;
+    (*spin).previousRank = 0;
+    (*spin).savedFlags = 0;
+  }
+
+  /// Takes `spin`, spinning until it is free. Preemption is off until
+  /// `unlock`. Panics when the rank is not above every spinlock rank this
+  /// CPU holds.
+  function lock(spin: *mut Arch::SpinLock): void {
+    Arch::CpuLocal::setPreemptCount(Arch::CpuLocal::preemptCount() + 1);
+
+    if (!rankAllows((*spin).rank)) {
+      @panic("spinlock: rank order violated, a lock must rank above every spinlock held");
+    }
+
+    let address: u64 = @integerFromPointer(&mut (*spin).locked as *mut u64);
+
+    while (exchange(address) != 0) {
+      while (@readVolatile<u64>(&mut (*spin).locked as *mut u64) != 0) {
+        Arch::Cpu::pause();
+      }
+    }
+
+    (*spin).previousRank = Arch::CpuLocal::spinTop();
+    Arch::CpuLocal::setSpinTop((*spin).rank);
+  }
+
+  /// Releases `spin`. Panics when it is not the last spinlock taken.
+  function unlock(spin: *mut Arch::SpinLock): void {
+    if (Arch::CpuLocal::isReady() && Arch::CpuLocal::spinTop() != (*spin).rank) {
+      @panic("spinlock: released out of order, the last lock taken must be released first");
+    }
+
+    Arch::CpuLocal::setSpinTop((*spin).previousRank);
+    release(@integerFromPointer(&mut (*spin).locked as *mut u64));
+
+    let count: u64 = Arch::CpuLocal::preemptCount();
+
+    if (count > 0) {
+      Arch::CpuLocal::setPreemptCount(count - 1);
+    }
+  }
+
+  /// `lock` with interrupts disabled on this CPU until `unlockIrq`.
+  function lockIrq(spin: *mut Arch::SpinLock): void {
+    let saved: u64 = Arch::Cpu::saveAndDisableInterrupts();
+
+    lock(spin);
+    (*spin).savedFlags = saved;
+  }
+
+  /// `unlock`, then the interrupt flag as `lockIrq` found it.
+  function unlockIrq(spin: *mut Arch::SpinLock): void {
+    let saved: u64 = (*spin).savedFlags;
+
+    unlock(spin);
+    Arch::Cpu::restoreInterrupts(saved);
+  }
+
+  /// True when this CPU may take a lock of `rank` now: the rank is above 0
+  /// and above every spinlock rank it holds.
+  function rankAllows(rank: u64): boolean {
+    return rank > 0 && rank > Arch::CpuLocal::spinTop();
+  }
+
+  /// True while this CPU holds a spinlock.
+  function holdsAny(): boolean {
+    return Arch::CpuLocal::preemptCount() > 0;
+  }
+
+  /// Writes 1 to the word at `address` and returns its old value, atomically
+  /// (`xchg` with memory is always locked). The memory clobber also keeps the
+  /// compiler from moving loads and stores of the critical section above it.
+  function exchange(address: u64): u64 {
+    return asm (address in rdi) -> (old: u64 in rax) clobber(memory) {
+      mov {old}, 1
+      xchg {old}, qword ptr [{address}]
+    };
+  }
+
+  /// Writes 0 to the word at `address`. On x86 a store is not reordered with
+  /// the loads and stores before it, so the clobber, a compiler barrier, is
+  /// all a release needs.
+  function release(address: u64): void {
+    asm (address in rdi) clobber(memory) {
+      mov qword ptr [{address}], 0
+    }
+  }
+}

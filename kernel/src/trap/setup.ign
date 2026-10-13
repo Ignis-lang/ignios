@@ -35,6 +35,10 @@ namespace Trap::Setup {
   function initializeGdt(): void {
     Arch::Gdt::initialize();
 
+    // Right after the GDT load, which resets the GS base: from here on locks
+    // can keep their per-CPU state behind GS.
+    Arch::CpuLocal::initialize();
+
     Drivers::Serial::write("gdt: cs=");
     Drivers::Serial::writeHex(Arch::Gdt::currentCode() as u64);
     Drivers::Serial::write(" tr=");

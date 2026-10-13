@@ -57,6 +57,12 @@ extern CpuLocalAsm {
 }
 
 /// The per-CPU data API.
+/// Whether the block is reachable through GS yet.
+record CpuLocalState {
+  /// True once `Arch::CpuLocal::initialize` has run.
+  static mut ready: boolean = false;
+}
+
 namespace Arch::CpuLocal {
   /// MSR number of IA32_GS_BASE, the GS base in effect.
   const GS_BASE_MSR: u32 = 0xC0000101;
@@ -76,6 +82,49 @@ namespace Arch::CpuLocal {
 
     Arch::Cpu::writeMsr(GS_BASE_MSR, block);
     Arch::Cpu::writeMsr(KERNEL_GS_BASE_MSR, 0);
+    CpuLocalState::ready = true;
+  }
+
+  /// True once `initialize` ran: before that GS names no block, and the lock
+  /// bookkeeping below is skipped (early boot runs on one CPU with
+  /// interrupts off, so there is nothing to protect).
+  function isReady(): boolean {
+    return CpuLocalState::ready;
+  }
+
+  /// The preemption counter of this CPU (`gs:[24]`): above 0 while a spinlock
+  /// is held. The timer tick does not switch threads then. 0 before
+  /// `initialize`.
+  function preemptCount(): u64 {
+    if (!CpuLocalState::ready) {
+      return 0;
+    }
+
+    return asm () -> (value: u64 in rax) { mov {value}, qword ptr gs:[24] };
+  }
+
+  /// Sets the preemption counter. No effect before `initialize`.
+  function setPreemptCount(value: u64): void {
+    if (CpuLocalState::ready) {
+      asm (value in rax) clobber(memory) { mov qword ptr gs:[24], {value} }
+    }
+  }
+
+  /// The highest rank of the spinlocks this CPU holds (`gs:[32]`), 0 for
+  /// none. 0 before `initialize`.
+  function spinTop(): u64 {
+    if (!CpuLocalState::ready) {
+      return 0;
+    }
+
+    return asm () -> (value: u64 in rax) { mov {value}, qword ptr gs:[32] };
+  }
+
+  /// Sets the highest spinlock rank held. No effect before `initialize`.
+  function setSpinTop(value: u64): void {
+    if (CpuLocalState::ready) {
+      asm (value in rax) clobber(memory) { mov qword ptr gs:[32], {value} }
+    }
   }
 
   /// The address of this processor's block.

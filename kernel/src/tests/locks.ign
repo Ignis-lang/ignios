@@ -1,0 +1,230 @@
+//!
+//! # Lock Self-Test
+//!
+//! Checks the lock primitives on one CPU with preemption on.
+//!
+//! ## Overview
+//!
+//! | Check              | What it proves                                                  |
+//! |--------------------|-----------------------------------------------------------------|
+//! | irq variant        | `lockIrq` turns interrupts off and `unlockIrq` restores them   |
+//! | no preemption      | with a spinlock held across more than a time slice, no thread switch happens, and one happens soon after the release |
+//! | mutual exclusion   | three threads add 1 to a counter three times each, waiting more than a time slice between the read and the write: the total is 9 |
+//! | ranks              | while a lock of rank 20 is held, ranks 10 and 20 are refused and 30 is allowed; after the release everything is allowed again |
+//!
+//! The mutual exclusion check stretches each critical section past a time
+//! slice, so a tick that would switch threads falls inside it: without the
+//! lock the threads interleave and lose updates. On one CPU the preemption
+//! counter alone already keeps them apart; the `xchg` itself is only
+//! exercised by contention on several CPUs (phase C3 of the concurrency
+//! proposal).
+
+import Arch from "@arch";
+import Drivers from "@drivers";
+import Sched from "@sched";
+import Time from "@time";
+
+/// The state the threads share.
+record LocksTestState {
+  /// The lock of the counter, rank 20.
+  static mut counterLock: Arch::SpinLock;
+
+  /// A second lock, rank 30, for the rank checks.
+  static mut innerLock: Arch::SpinLock;
+
+  /// The counter the workers add to.
+  static mut counter: u64;
+
+  /// Set to 1 to stop the helper thread.
+  static mut stop: u64;
+}
+
+namespace Tests::Locks {
+  /// Rank of `counterLock`.
+  const COUNTER_RANK: u64 = 20;
+
+  /// Rank of `innerLock`.
+  const INNER_RANK: u64 = 30;
+
+  /// Workers of the mutual exclusion check.
+  const WORKERS: u64 = 3;
+
+  /// Increments per worker.
+  const ROUNDS: u64 = 3;
+
+  /// Ticks past a time slice that a critical section lasts.
+  const STRETCH: u64 = 2;
+
+  /// Runs every check and prints one line. Panics on the first failure.
+  /// Leaves the interrupt flag as it found it: the boot steps after it (the
+  /// PS/2 setup) expect interrupts off.
+  function run(): void {
+    let saved: u64 = Arch::Cpu::saveAndDisableInterrupts();
+
+    Arch::Spin::initialize(counterLock(), COUNTER_RANK);
+    Arch::Spin::initialize(innerLock(), INNER_RANK);
+
+    checkIrq();
+    checkRanks();
+
+    let deferred: u64 = checkNoPreemption();
+
+    checkMutualExclusion();
+
+    // The checks turned interrupts on. `restoreInterrupts` only turns them
+    // back on when they were on, so they go off first.
+    Arch::Cpu::disableInterrupts();
+    Arch::Cpu::restoreInterrupts(saved);
+
+    Drivers::Console::write("locks: spinlock self-test ok, interrupts restored, ");
+    Drivers::Console::writeDecimal(deferred);
+    Drivers::Console::writeLine(" switches deferred while a lock was held, no lost update, rank order enforced");
+  }
+
+  /// `lockIrq` and `unlockIrq`.
+  function checkIrq(): void {
+    Arch::Cpu::enableInterrupts();
+    Arch::Spin::lockIrq(counterLock());
+
+    if (Arch::Cpu::interruptsEnabled() || !Arch::Spin::holdsAny()) {
+      @panic("locks self-test: lockIrq left interrupts on or the lock not counted");
+    }
+
+    Arch::Spin::unlockIrq(counterLock());
+
+    if (!Arch::Cpu::interruptsEnabled() || Arch::Spin::holdsAny()) {
+      @panic("locks self-test: unlockIrq did not restore interrupts or the count");
+    }
+  }
+
+  /// The rank rule.
+  function checkRanks(): void {
+    Arch::Spin::lock(counterLock());
+
+    if (Arch::Spin::rankAllows(10) || Arch::Spin::rankAllows(COUNTER_RANK) || !Arch::Spin::rankAllows(INNER_RANK)) {
+      @panic("locks self-test: the rank check let a lower rank in, or kept a higher one out");
+    }
+
+    Arch::Spin::lock(innerLock());
+    Arch::Spin::unlock(innerLock());
+    Arch::Spin::unlock(counterLock());
+
+    if (!Arch::Spin::rankAllows(10)) {
+      @panic("locks self-test: ranks stayed taken after the release");
+    }
+  }
+
+  /// Holds a spinlock for more than a time slice while a helper thread wants
+  /// the processor: no switch may happen. Returns the deferred switches.
+  function checkNoPreemption(): u64 {
+    LocksTestState::stop = 0;
+
+    let helper: u64 = Sched::Scheduler::spawn(Arch::ContextAsm::ignis_function_address(helperLoop), 0);
+    let deferredBefore: u64 = Sched::Scheduler::deferredCount();
+
+    Arch::Cpu::enableInterrupts();
+    Arch::Spin::lock(counterLock());
+
+    let switches: u64 = Sched::Scheduler::switchCount();
+
+    waitTicks(Sched::Scheduler::TIME_SLICE_TICKS + STRETCH);
+
+    let switchedWhileHeld: boolean = Sched::Scheduler::switchCount() != switches;
+
+    Arch::Spin::unlock(counterLock());
+
+    if (switchedWhileHeld) {
+      @panic("locks self-test: a thread switch happened while a spinlock was held");
+    }
+
+    let deferred: u64 = Sched::Scheduler::deferredCount() - deferredBefore;
+
+    if (deferred == 0) {
+      @panic("locks self-test: no switch was deferred, the check did not cover a slice end");
+    }
+
+    waitTicks(2);
+
+    if (Sched::Scheduler::switchCount() == switches) {
+      @panic("locks self-test: no switch happened after the spinlock was released");
+    }
+
+    @writeVolatile<u64>(&mut LocksTestState::stop as *mut u64, 1);
+    Sched::Scheduler::join(helper);
+
+    return deferred;
+  }
+
+  /// Three workers increment the counter under the lock.
+  function checkMutualExclusion(): void {
+    LocksTestState::counter = 0;
+
+    let first: u64 = Sched::Scheduler::spawn(Arch::ContextAsm::ignis_function_address(worker), 0);
+    let mut index: u64 = 1;
+
+    while (index < WORKERS) {
+      Sched::Scheduler::spawn(Arch::ContextAsm::ignis_function_address(worker), index);
+      index += 1;
+    }
+
+    index = 0;
+
+    while (index < WORKERS) {
+      Sched::Scheduler::join(first + index);
+      index += 1;
+    }
+
+    if (LocksTestState::counter != WORKERS * ROUNDS) {
+      Drivers::Console::write("locks self-test: counter ");
+      Drivers::Console::writeDecimal(LocksTestState::counter);
+      Drivers::Console::writeLine("");
+      @panic("locks self-test: an update was lost under the spinlock");
+    }
+  }
+
+  /// A worker: read, wait past a time slice, write, `ROUNDS` times.
+  function worker(index: u64): void {
+    let mut round: u64 = 0;
+
+    while (round < ROUNDS) {
+      Arch::Spin::lock(counterLock());
+
+      let value: u64 = @readVolatile<u64>(&mut LocksTestState::counter as *mut u64);
+
+      waitTicks(Sched::Scheduler::TIME_SLICE_TICKS + STRETCH);
+      @writeVolatile<u64>(&mut LocksTestState::counter as *mut u64, value + 1);
+      Arch::Spin::unlock(counterLock());
+      round += 1;
+    }
+  }
+
+  /// Spins until `stop`, so there is always a thread that wants the
+  /// processor.
+  function helperLoop(argument: u64): void {
+    while (@readVolatile<u64>(&mut LocksTestState::stop as *mut u64) == 0) {
+      Arch::Cpu::pause();
+    }
+  }
+
+  /// Waits, with interrupts on and without giving up the processor, until
+  /// `ticks` timer ticks have passed.
+  function waitTicks(ticks: u64): void {
+    let end: u64 = Time::Timer::ticks() + ticks;
+
+    Arch::Cpu::enableInterrupts();
+
+    while (Time::Timer::ticks() < end) {
+      Arch::Cpu::pause();
+    }
+  }
+
+  /// `LocksTestState::counterLock`.
+  function counterLock(): *mut Arch::SpinLock {
+    return &mut LocksTestState::counterLock as *mut Arch::SpinLock;
+  }
+
+  /// `LocksTestState::innerLock`.
+  function innerLock(): *mut Arch::SpinLock {
+    return &mut LocksTestState::innerLock as *mut Arch::SpinLock;
+  }
+}

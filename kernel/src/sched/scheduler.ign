@@ -98,6 +98,9 @@ record SchedulerState {
 
   /// True once `enablePreemption` has been called.
   static mut preemptive: boolean;
+
+  /// Ticks that would have switched threads but found a spinlock held.
+  static mut deferred: u64;
 }
 
 /// The scheduler API.
@@ -135,8 +138,10 @@ namespace Sched::Scheduler {
   /// interrupts still disabled by the interrupt gate. Counts the tick
   /// against the running thread, wakes sleepers, and switches threads when
   /// the time slice is over or the idle thread is running while another
-  /// thread is ready. The interrupt then returns in whichever thread was
-  /// switched in, which finishes its own interrupt return later.
+  /// thread is ready, unless this CPU holds a spinlock: then the switch
+  /// waits for the first tick after the release. The interrupt then returns
+  /// in whichever thread was switched in, which finishes its own interrupt
+  /// return later.
   function onTick(): void {
     if (!SchedulerState::started || !SchedulerState::preemptive) {
       return;
@@ -147,8 +152,12 @@ namespace Sched::Scheduler {
     (*current).runTicks += 1;
     wakeSleepers();
 
+    // A spinlock is held on this CPU: no switch now. The slice stays used
+    // up, so the switch happens on the first tick after the release.
+    let held: boolean = Arch::Spin::holdsAny();
+
     if (SchedulerState::current == Sched::Thread::IDLE_SLOT) {
-      if (SchedulerState::queueLength > 0) {
+      if (SchedulerState::queueLength > 0 && !held) {
         makeReady(Sched::Thread::IDLE_SLOT);
         switchToNext();
       }
@@ -156,9 +165,16 @@ namespace Sched::Scheduler {
       return;
     }
 
-    SchedulerState::sliceLeft -= 1;
+    if (SchedulerState::sliceLeft > 0) {
+      SchedulerState::sliceLeft -= 1;
+    }
 
     if (SchedulerState::sliceLeft > 0) {
+      return;
+    }
+
+    if (held) {
+      SchedulerState::deferred += 1;
       return;
     }
 
@@ -208,6 +224,8 @@ namespace Sched::Scheduler {
   /// Gives the processor to the next ready thread and goes to the end of the
   /// queue. Returns at once when no other thread is ready.
   function yield(): void {
+    noSpinlockHeld();
+
     let saved: u64 = Arch::Cpu::saveAndDisableInterrupts();
 
     wakeSleepers();
@@ -223,6 +241,8 @@ namespace Sched::Scheduler {
   /// Blocks the calling thread for at least `ticks` timer ticks. Sleeping
   /// zero ticks is a yield. The idle thread must not sleep.
   function sleep(ticks: u64): void {
+    noSpinlockHeld();
+
     if (ticks == 0) {
       yield();
       return;
@@ -249,6 +269,8 @@ namespace Sched::Scheduler {
   /// waiters ready. A thread cannot wait for itself, and the idle thread
   /// must not wait.
   function join(id: u64): void {
+    noSpinlockHeld();
+
     let saved: u64 = Arch::Cpu::saveAndDisableInterrupts();
 
     if (id == currentId()) {
@@ -351,6 +373,8 @@ namespace Sched::Scheduler {
   /// between the check and the park on this processor (see the concurrency
   /// proposal for several processors).
   function park(): void {
+    noSpinlockHeld();
+
     let saved: u64 = Arch::Cpu::saveAndDisableInterrupts();
 
     if (SchedulerState::current == Sched::Thread::IDLE_SLOT) {
@@ -401,6 +425,19 @@ namespace Sched::Scheduler {
     }
 
     Arch::Cpu::restoreInterrupts(saved);
+  }
+
+  /// Panics when this CPU holds a spinlock: a thread must not give up the
+  /// processor with one held, or others would spin until it runs again.
+  function noSpinlockHeld(): void {
+    if (Arch::Spin::holdsAny()) {
+      @panic("scheduler: a thread tried to sleep or yield while holding a spinlock");
+    }
+  }
+
+  /// Ticks whose switch was put off because a spinlock was held.
+  function deferredCount(): u64 {
+    return SchedulerState::deferred;
   }
 
   /// Makes every thread that waits for the thread `id` ready. Interrupts
