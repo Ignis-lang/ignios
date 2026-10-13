@@ -17,6 +17,7 @@ Early, and only tested in QEMU with OVMF.
 | CPU | Own GDT and TSS (IST stack for double faults), IDT with exception reports; x87 and SSE enabled with per-thread FXSAVE state; SMEP and SMAP on when the CPU has them; per-CPU data behind the GS base with `swapgs` |
 | Interrupts | ACPI MADT parsed; keyboard routed through the IOAPIC to vector 0x21 with local APIC end of interrupt; 8259 remapped to 0x20-0x2F and fully masked; idle loop sleeps with `sti; hlt` |
 | Timer | Local APIC timer calibrated against PIT channel 2, periodic 100 Hz tick on vector 0x30; `uptime` at the prompt prints the time since boot |
+| Locks | Spinlocks with a per-CPU preemption counter and lock ranks, wait queues and a sleeping mutex (phase C1 of the concurrency proposal; the subsystems still rely on interrupts off on one CPU) |
 | Threads | Kernel threads with their own stacks and a guard page, a round-robin run queue, `yield`, `sleep`, `exit` and `join`, an idle thread, and preemption by the timer tick with 100 ms time slices; `ps` lists the threads and `threads` starts a demo; the boot thread runs the terminal |
 | Input | PS/2 keyboard, scancode set 1, US layout, Shift and Caps Lock, line editing at a `>` prompt |
 | Memory | Bitmap frame allocator over the Limine memory map (4 KiB frames and 2 MiB runs, frees of unmanaged frames rejected); own 4-level page tables (kernel image per segment with W^X, direct map with 2 MiB pages, write-combining framebuffer, NX and write protection on); kernel heap in the higher half behind the compiler's allocation handlers |
@@ -89,7 +90,7 @@ The kernel is split into subsystems. Each one is a directory under `kernel/src/`
 | `kernel/src/fs/` | `Fs` | `@fs` | the initramfs (ustar) and the in-memory file tree |
 | `kernel/src/apic/` | `Apic` | `@apic` | local APIC and IOAPIC |
 | `kernel/src/time/` | `Time` | `@time` | APIC timer calibration, the tick counter, uptime |
-| `kernel/src/sched/` | `Sched` | `@sched` | the thread table and stacks, the run queue, sleep and timer preemption |
+| `kernel/src/sched/` | `Sched` | `@sched` | the thread table and stacks, the run queue, sleep and timer preemption, wait queues and mutexes |
 | `kernel/src/proc/` | `Proc` | `@proc` | process table, ELF loader, running a program from a path with arguments |
 | `kernel/src/power/` | `Power` | `@power` | ACPI power-off (S5) and reset |
 | `kernel/src/syscall/` | `Syscall` | `@syscall` | dispatch, the kernel operations, the Linux ABI table and handlers |

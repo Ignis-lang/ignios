@@ -38,7 +38,7 @@ Each subsystem is a directory under `kernel/src/` with a `mod.ign` facade. The f
 | Directory | Namespace | Alias | Imports | Owns |
 |---|---|---|---|---|
 | `lib/` | `Lib` | `@lib` | nothing | `Mem`, `Format`, `ScancodeQueue` |
-| `arch/` | `Arch` | `@arch` | nothing | `Cpu`, `Port`, `Gdt`, `Idt`, `Pic`, `Pit`, `Context`, `UserMode`, `InterruptFrame`, all `.S` files |
+| `arch/` | `Arch` | `@arch` | nothing | `Cpu`, `Port`, `Gdt`, `Idt`, `Pic`, `Pit`, `Context`, `UserMode`, `InterruptFrame`, `Spin`, all `.S` files |
 | `boot/` | `Boot` | `@boot` | nothing | `Limine`, `Hhdm` |
 | `drivers/` | `Drivers` | `@drivers` | Arch, Boot, Lib | `Serial`, `Console`, `Color`, `Font`, `Ps2`, `Keyboard` |
 | `acpi/` | `Acpi` | `@acpi` | Boot, Drivers | `Rsdp`, `Xsdt`, `Madt`, `Fadt`, `Table` |
@@ -46,7 +46,7 @@ Each subsystem is a directory under `kernel/src/` with a `mod.ign` facade. The f
 | `fs/` | `Fs` | `@fs` | Drivers, Lib, Mm | `Tar`, `Initramfs`, `Vfs`, `Files` |
 | `apic/` | `Apic` | `@apic` | Acpi, Arch, Drivers, Mm | `Lapic`, `Ioapic` |
 | `time/` | `Time` | `@time` | Apic, Arch, Drivers | `Timer` |
-| `sched/` | `Sched` | `@sched` | Arch, Mm, Time | `Thread`, `Scheduler` |
+| `sched/` | `Sched` | `@sched` | Arch, Mm, Time | `Thread`, `Scheduler`, `Wait`, `Mutex` |
 | `proc/` | `Proc` | `@proc` | Arch, Boot, Drivers, Fs, Lib, Mm, Sched | `Process`, `Elf`, `Programs`, `Memory` |
 | `power/` | `Power` | `@power` | Acpi, Arch, Drivers | power off and reset |
 | `syscall/` | `Syscall` | `@syscall` | Arch, Drivers, Fs, Lib, Mm, Power, Proc, Sched, Time | `Operation`, `Core`, `Linux`, `Native` |
@@ -72,7 +72,7 @@ Each subsystem is a directory under `kernel/src/` with a `mod.ign` facade. The f
 | 5 | Memory | `boot/hhdm.ign`, `mm/pmm.ign`, `mm/vmm.ign`, `mm/heap.ign`, `mm/address_space.ign` |
 | 6 | ACPI, APIC, the timer and power | `acpi/*.ign`, `power/mod.ign`, `arch/x86_64/pic.ign`, `apic/lapic.ign`, `apic/ioapic.ign`, `arch/x86_64/pit.ign`, `time/timer.ign` |
 | 7 | Keyboard | `drivers/ps2.ign`, `lib/scancode_queue.ign`, `drivers/keyboard.ign`, `drivers/tty.ign` |
-| 8 | Threads, scheduling and the shell | `arch/x86_64/context.ign`, `context_asm.S`, `sched/thread.ign`, `sched/scheduler.ign`, `shell/*.ign` |
+| 8 | Threads, scheduling, locks and the shell | `arch/x86_64/context.ign`, `context_asm.S`, `sched/thread.ign`, `sched/scheduler.ign`, `arch/x86_64/spinlock.ign`, `sched/sync.ign`, `shell/*.ign` |
 | 9 | User mode | `arch/x86_64/usermode.ign`, `usermode_asm.S`, `proc/process.ign`, `syscall/*.ign`, `proc/elf.ign`, `mm/modules.ign`, `proc/programs.ign`, `user/` |
 | 10 | Files | `initramfs/`, `fs/tar.ign`, `fs/initramfs.ign`, `fs/vfs.ign`, `fs/files.ign`, `syscall/linux/files.ign`, `user/fstest/`, `user/cat/`, `user/ls/`, `user/touch/`, `user/mkdir/` |
 | 11 | Boot self-tests | `tests/*.ign`, `arch/x86_64/user_test_asm.S` |
@@ -192,6 +192,8 @@ Doc 13.
 
 **`sched/scheduler.ign`.** The run queue, sleeping and the timer-driven preemption. The header has the call chain from the timer interrupt to a switch. Look at how a dead thread's stack is freed by the next thread (`reapZombie`), because a thread cannot free the stack it is running on. Sleeping and waking are here and not in a file of their own, because `sleep` calls `switchToNext` and `switchToNext` calls the wake-up scan. `join` blocks a thread until another one is gone: the thread that frees the dead one (`reapZombie`) makes its waiters ready, so a waiter runs once, not once per tick. `switchToNext` also swaps the x87 and SSE state.
 
+**`arch/x86_64/spinlock.ign` and `sched/sync.ign`.** The lock primitives, phase C1 of the concurrency proposal; no subsystem uses them yet. A spinlock takes its word with `xchg` and, while held, raises the per-CPU preemption counter (`gs:[24]`) so the timer tick defers any thread switch; `lockIrq` also turns interrupts off for data a handler touches. Every lock has a rank: a CPU takes spinlocks in rising rank order and releases them in reverse, and a violation panics, which turns a lock-order deadlock into a boot failure. `sync.ign` adds wait queues, where a thread queues itself and releases the spinlock with interrupts off so no wake-up is lost, and a mutex whose waiters sleep. Mutex ranks follow the thread, and a mutex cannot be taken while a spinlock is held. The scheduler panics when a thread yields or sleeps with a spinlock held. Doc 24.
+
 **`shell/terminal.ign`.** Where the boot thread ends up: it runs `/bin/sh` and waits for it, and when the shell ends it becomes the kernel terminal, a prompt, a line from `Drivers::Tty::readLine`, a command.
 
 **`shell/commands.ign` and `shell/thread_commands.ign`.** The commands: `uptime`, `ps`, `threads` and `run PROGRAM [ARG...]`. `reboot` and `shutdown` are programs in `/bin`. Any other line that is not blank runs as a program, so `cat /etc/motd` is `run cat /etc/motd`.
@@ -244,7 +246,7 @@ Doc 19.
 
 ## Part 11. Boot self-tests
 
-**`tests/`.** One file per check, run by `kmain` where the subsystem is ready. Each prints one line and panics on the first violation, so a boot that continues has passed it. The tests use only the public functions of the subsystems. `pmm.ign`, `vmm.ign`, `heap.ign`, `address_space.ign`, `timer.ign` and `context.ign` check the primitives, `initramfs.ign` feeds the ustar reader one malformed header per error code, `vfs.ign` walks the path rules and every status code of the file tree, `user.ign` also runs `/bin/fstest`, `/bin/mmtest` with its four forbidden accesses, and the programs `run` must refuse, `address_space.ign` including a 2 MiB user page. `protection.ign` checks that SMAP and SMEP fault. `scheduler.ign` runs round-robin order, sleeping, a full table, one address space per thread and preemption of threads that never yield. `user.ign` and `arch/x86_64/user_test_asm.S` hold sixteen throwaway ring 3 programs. Seven behave (exit, registers, spin, a spin with RFLAGS.AC set, system calls, the x87 and SSE check that runs as two processes, and a 200 ms nap that `wait` must block on) and nine do something forbidden. The kernel must kill each of the nine with the right status. `cpu_local.ign` runs last and checks that every way in and out of ring 3 left the GS bases balanced.
+**`tests/`.** One file per check, run by `kmain` where the subsystem is ready. Each prints one line and panics on the first violation, so a boot that continues has passed it. The tests use only the public functions of the subsystems. `pmm.ign`, `vmm.ign`, `heap.ign`, `address_space.ign`, `timer.ign` and `context.ign` check the primitives, `initramfs.ign` feeds the ustar reader one malformed header per error code, `vfs.ign` walks the path rules and every status code of the file tree, `user.ign` also runs `/bin/fstest`, `/bin/mmtest` with its four forbidden accesses, and the programs `run` must refuse, `address_space.ign` including a 2 MiB user page. `protection.ign` checks that SMAP and SMEP fault. `scheduler.ign` runs round-robin order, sleeping, a full table, one address space per thread and preemption of threads that never yield. `locks.ign` checks the spinlock, the preemption counter, lock ranks, wait queues and the mutex, each against the bug it guards. `user.ign` and `arch/x86_64/user_test_asm.S` hold sixteen throwaway ring 3 programs. Seven behave (exit, registers, spin, a spin with RFLAGS.AC set, system calls, the x87 and SSE check that runs as two processes, and a 200 ms nap that `wait` must block on) and nine do something forbidden. The kernel must kill each of the nine with the right status. `cpu_local.ign` runs last and checks that every way in and out of ring 3 left the GS bases balanced.
 
 ## Part 12. Scripts
 
@@ -494,8 +496,11 @@ scheduler: address-space self-test ok, each thread ran in its own CR3 and every 
 
 ```text
 scheduler: preemption self-test ok, two threads that never yield shared the processor, 6 preemptions
+locks: spinlock self-test ok, interrupts restored, 3 switches deferred while a lock was held, no lost update, rank order enforced
+locks: mutex and wait queue self-test ok, a contender slept until the holder was done, three waiters woke together and a kill did not wake them
 ```
 `Sched::Scheduler::enablePreemption` was called, then `Tests::Scheduler::runPreemptive`. The timer took the processor away from spinning threads at least twice (the number varies).
+`Tests::Locks::run` then checked the lock primitives. It held a spinlock across more than a time slice while a helper thread wanted the processor: no switch happened, three ticks deferred theirs, and a switch followed the release. Three workers incremented a counter under a spinlock, each read-to-write section longer than a time slice, and the total came out right. A mutex contender slept until its holder, sleeping with the mutex, was done; three threads queued on a wait queue ignored a kill-style interrupt and all woke on `wakeAll`. Doc 24.
 
 ### User mode self-tests
 
