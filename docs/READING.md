@@ -30,6 +30,7 @@ The concept documents explain the x86_64 and kernel background, and this guide r
 | 18 | Per-CPU data and `swapgs` | 19 | Files: initramfs, VFS and descriptors |
 | 20 | Memory mappings: `mmap` and a user heap | 21 | The native IgniOS ABI |
 | 22 | Processes from user space and the shell | 23 | The process lifecycle: parents, waiting and killing |
+| 24 | Locks: spinlocks, ranks, wait queues and mutexes | | |
 
 ## The subsystems
 
