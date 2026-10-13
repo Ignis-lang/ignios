@@ -22,8 +22,9 @@
 //! `map` and `unmap` do the same for `Proc::Memory`: the descriptor checks of
 //! a file mapping and the status of the region table, as kernel codes.
 //!
-//! System calls run with interrupts off on the only processor, so one
-//! staging buffer is enough.
+//! The staging buffer of `read` and `write` is the COPY part of the calling
+//! thread's scratch area (`Syscall::Scratch`), so a call preempted or
+//! blocked halfway keeps it while other threads run their own calls.
 
 import Fs from "@fs";
 import Mm from "@mm";

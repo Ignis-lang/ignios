@@ -159,10 +159,16 @@ ignis_syscall_entry:
     push rax
 
     /* The ABI wants DF clear at a call. rdi = the frame. The rax slot holds
-     * the call number and rdi, rsi, rdx, r10, r8, r9 the arguments. */
+     * the call number and rdi, rsi, rdx, r10, r8, r9 the arguments. The
+     * call runs with interrupts on: the timer may preempt it like any other
+     * kernel code, and the locks of what it touches keep that safe. They go
+     * off again before the frame is unwound, since the swapgs below and the
+     * user stack pointer must not meet an interrupt. */
     cld
     mov rdi, rsp
+    sti
     call ignis_syscall_dispatch
+    cli
 
     /* Reload everything from the frame, so the result the dispatcher stored
      * in the rax slot becomes the return value. */

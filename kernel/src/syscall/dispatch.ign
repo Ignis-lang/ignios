@@ -17,7 +17,7 @@
 //!   kernel:  ignis_syscall_entry          switch to the kernel stack, build the frame
 //!                │
 //!                ▼
-//!            Syscall::dispatch(frame)
+//!            sti; Syscall::dispatch(frame); cli
 //!                ├─ lookup(abi, frame.rax)     number -> operation (Operation::WRITE ...)
 //!                ├─ run the operation          arguments from rdi, rsi, rdx, r10, r8, r9
 //!                └─ frame.rax := result        value or -errno
@@ -25,6 +25,12 @@
 //!                ▼
 //!            ignis_syscall_entry          reload registers, sysretq
 //! ```
+//!
+//! A system call runs with interrupts on and may be preempted anywhere, as
+//! kernel threads are. What it shares with other threads is behind locks
+//! (`Lib::Rank`): the process table and the VFS take mutexes, memory and the
+//! scheduler take spinlocks, and its argument copies live in the thread's
+//! own scratch area (`Syscall::Scratch`).
 //!
 //! Each process has an ABI, its personality. The ABI owns a table that turns a
 //! system call number into an operation of the kernel, a small number that does
@@ -68,8 +74,8 @@ namespace Syscall {
     Native::initialize();
   }
 
-  /// Called by the entry stub with interrupts off, on the kernel stack of
-  /// the calling thread.
+  /// Called by the entry stub with interrupts on, on the kernel stack of the
+  /// calling thread.
   @externName("ignis_syscall_dispatch")
   function dispatch(frame: *mut Arch::InterruptFrame): void {
     let abi: u64 = Proc::Process::currentAbi();
