@@ -19,6 +19,7 @@
 //! themselves cannot run at boot without stopping it.
 //! | wait queue         | three threads sleep on a queue; an interrupt (what `kill` does) does not wake them; `wakeAll` wakes all three |
 //! | scratch            | two threads fill their system call scratch areas, yield, and find their own bytes |
+//! | wake tokens        | a wake sent before a park, and an interrupt sent before a 10000 s sleep, end the wait at once |
 //!
 //! The mutual exclusion check stretches each critical section past a time
 //! slice, so a tick that would switch threads falls inside it: without the
@@ -68,6 +69,12 @@ record LocksTestState {
 
   /// Per scratch worker: the address of its scratch area.
   static mut scratchAddress: u64[2];
+
+  /// Set by the boot thread once the token worker may wait.
+  static mut tokenGo: u64;
+
+  /// Set by the token worker once its wait returned.
+  static mut tokenDone: u64;
 
   /// 1 when the contender was allowed to release the holder's mutex.
   static mut contenderCouldUnlock: u64;
@@ -136,6 +143,7 @@ namespace Tests::Locks {
     checkMutex();
     checkWaitQueue();
     checkScratch();
+    checkTokens();
 
     // The checks turned interrupts on. `restoreInterrupts` only turns them
     // back on when they were on, so they go off first.
@@ -147,6 +155,70 @@ namespace Tests::Locks {
     Drivers::Console::writeLine(" switches deferred while a lock was held, no lost update, rank order enforced");
     Drivers::Console::writeLine("locks: mutex and wait queue self-test ok, a contender slept until the holder was done, three waiters woke together and a kill did not wake them");
     Drivers::Console::writeLine("locks: scratch self-test ok, two threads kept their own system call scratch across switches");
+    Drivers::Console::writeLine("locks: wake token self-test ok, a wake before a park and a kill before a 10000 s sleep were not lost");
+  }
+
+  /// A wake that lands before the park, and an interrupt (what `kill` does)
+  /// that lands before a 10000 s sleep, must each end the wait at once. A
+  /// lost one is rescued with a second wake or interrupt, then fails the
+  /// test, so a broken token cannot hang the boot.
+  function checkTokens(): void {
+    checkToken(Arch::ContextAsm::ignis_function_address(tokenParker), true);
+    checkToken(Arch::ContextAsm::ignis_function_address(tokenSleeper), false);
+  }
+
+  /// Starts `entry`, sends it a wake or an interrupt while it is still
+  /// ready, lets it wait, and checks that it was done within a few ticks.
+  function checkToken(entry: u64, wake: boolean): void {
+    LocksTestState::tokenGo = 0;
+    LocksTestState::tokenDone = 0;
+
+    let worker: u64 = Sched::Scheduler::spawn(entry, 0);
+
+    if (wake) {
+      Sched::Scheduler::wake(worker);
+    } else {
+      Sched::Scheduler::interrupt(worker);
+    }
+
+    @writeVolatile<u64>(&mut LocksTestState::tokenGo as *mut u64, 1);
+    Sched::Scheduler::sleep(5);
+
+    let done: u64 = @readVolatile<u64>(&mut LocksTestState::tokenDone as *mut u64);
+
+    if (done == 0) {
+      if (wake) {
+        Sched::Scheduler::wake(worker);
+      } else {
+        Sched::Scheduler::interrupt(worker);
+      }
+    }
+
+    Sched::Scheduler::join(worker);
+
+    if (done == 0) {
+      @panic("locks self-test: a wake or a kill that came before the wait was lost");
+    }
+  }
+
+  /// Waits for `tokenGo`, then parks.
+  function tokenParker(argument: u64): void {
+    while (@readVolatile<u64>(&mut LocksTestState::tokenGo as *mut u64) == 0) {
+      Sched::Scheduler::yield();
+    }
+
+    Sched::Scheduler::park();
+    @writeVolatile<u64>(&mut LocksTestState::tokenDone as *mut u64, 1);
+  }
+
+  /// Waits for `tokenGo`, then sleeps 10000 s.
+  function tokenSleeper(argument: u64): void {
+    while (@readVolatile<u64>(&mut LocksTestState::tokenGo as *mut u64) == 0) {
+      Sched::Scheduler::yield();
+    }
+
+    Sched::Scheduler::sleep(1000000);
+    @writeVolatile<u64>(&mut LocksTestState::tokenDone as *mut u64, 1);
   }
 
   /// Two threads fill their scratch areas with different patterns, yield

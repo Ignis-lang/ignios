@@ -296,9 +296,13 @@ namespace Sched::Scheduler {
     let current: *mut Sched::Thread::Control = Sched::Thread::slotPointer(SchedulerState::current);
 
     lockRunQueue();
-    (*current).wakeTick = Time::Timer::ticks() + ticks;
-    (*current).state = Sched::Thread::BLOCKED;
-    switchToNext();
+
+    if (!takeInterrupt(current)) {
+      (*current).wakeTick = Time::Timer::ticks() + ticks;
+      (*current).state = Sched::Thread::BLOCKED;
+      switchToNext();
+    }
+
     unlockRunQueue();
 
     Arch::Cpu::restoreInterrupts(saved);
@@ -325,9 +329,9 @@ namespace Sched::Scheduler {
 
     lockRunQueue();
 
-    if (Sched::Thread::isAlive(id)) {
-      let current: *mut Sched::Thread::Control = Sched::Thread::slotPointer(SchedulerState::current);
+    let current: *mut Sched::Thread::Control = Sched::Thread::slotPointer(SchedulerState::current);
 
+    if (Sched::Thread::isAlive(id) && !takeInterrupt(current)) {
       (*current).joinTarget = id;
       (*current).state = Sched::Thread::WAITING;
       switchToNext();
@@ -423,10 +427,10 @@ namespace Sched::Scheduler {
   }
 
   /// Parks the running thread until another thread calls `wake` on it, and
-  /// returns then. The caller checks its condition with interrupts off and
-  /// parks without turning them on in between, so a `wake` cannot slip in
-  /// between the check and the park on this processor (see the concurrency
-  /// proposal for several processors).
+  /// returns then. A `wake` that came after the caller checked its condition
+  /// but before the park left a token, and the park returns at once, so no
+  /// wake-up is lost. The caller checks its condition again in a loop:
+  /// a stale token can end a park early.
   function park(): void {
     noSpinlockHeld();
 
@@ -436,16 +440,24 @@ namespace Sched::Scheduler {
 
     let saved: u64 = Arch::Cpu::saveAndDisableInterrupts();
 
+    let current: *mut Sched::Thread::Control = Sched::Thread::slotPointer(SchedulerState::current);
+
     lockRunQueue();
-    (*Sched::Thread::slotPointer(SchedulerState::current)).state = Sched::Thread::PARKED;
-    switchToNext();
+
+    if ((*current).wakePending != 0) {
+      (*current).wakePending = 0;
+    } else if (!takeInterrupt(current)) {
+      (*current).state = Sched::Thread::PARKED;
+      switchToNext();
+    }
+
     unlockRunQueue();
 
     Arch::Cpu::restoreInterrupts(saved);
   }
 
-  /// Makes the thread `id` ready when it is parked. Does nothing otherwise,
-  /// so a wake for a thread that is not waiting is harmless.
+  /// Makes the thread `id` ready when it is parked. Otherwise leaves a token
+  /// that its next `park` consumes and returns on.
   function wake(id: u64): void {
     Arch::Spin::lockIrq(runQueueLock());
 
@@ -454,8 +466,12 @@ namespace Sched::Scheduler {
     while (slot < Sched::Thread::MAX_THREADS) {
       let thread: *mut Sched::Thread::Control = Sched::Thread::slotPointer(slot);
 
-      if ((*thread).state == Sched::Thread::PARKED && (*thread).id == id) {
-        makeReady(slot);
+      if ((*thread).id == id && (*thread).state != Sched::Thread::UNUSED) {
+        if ((*thread).state == Sched::Thread::PARKED) {
+          makeReady(slot);
+        } else {
+          (*thread).wakePending = 1;
+        }
       }
 
       slot += 1;
@@ -466,7 +482,10 @@ namespace Sched::Scheduler {
 
   /// Makes the thread `id` ready if it waits in `sleep`, `join` or `park`,
   /// so it can notice that it was killed. Each of those returns early; its
-  /// caller checks why. Does nothing to a thread that is ready or running.
+  /// caller checks why. A thread that is ready or running gets a token
+  /// instead, and its next `sleep`, `join` or `park` returns at once, so a
+  /// kill that lands between a check and a wait is not lost. A thread in a
+  /// wait queue is left alone.
   function interrupt(id: u64): void {
     Arch::Spin::lockIrq(runQueueLock());
 
@@ -476,14 +495,42 @@ namespace Sched::Scheduler {
       let thread: *mut Sched::Thread::Control = Sched::Thread::slotPointer(slot);
       let state: u64 = (*thread).state;
 
-      if ((*thread).id == id && (state == Sched::Thread::BLOCKED || state == Sched::Thread::WAITING || state == Sched::Thread::PARKED)) {
-        makeReady(slot);
+      if ((*thread).id == id) {
+        if (state == Sched::Thread::BLOCKED || state == Sched::Thread::WAITING || state == Sched::Thread::PARKED) {
+          makeReady(slot);
+        } else if (state == Sched::Thread::READY || state == Sched::Thread::RUNNING) {
+          (*thread).interrupted = 1;
+        }
       }
 
       slot += 1;
     }
 
     Arch::Spin::unlockIrq(runQueueLock());
+  }
+
+  /// Clears `thread`'s interrupt token and returns true when it was set. The
+  /// run queue lock is held.
+  function takeInterrupt(thread: *mut Sched::Thread::Control): boolean {
+    if ((*thread).interrupted == 0) {
+      return false;
+    }
+
+    (*thread).interrupted = 0;
+
+    return true;
+  }
+
+  /// Records which process slot the running thread runs: the slot plus 1, or
+  /// 0 for none. Only the thread itself writes it, so it is
+  /// read without a lock.
+  function setProcess(slotPlusOne: u64): void {
+    (*Sched::Thread::slotPointer(SchedulerState::current)).process = slotPlusOne;
+  }
+
+  /// What `setProcess` recorded for the running thread.
+  function currentProcess(): u64 {
+    return (*Sched::Thread::slotPointer(SchedulerState::current)).process;
   }
 
   /// Panics when this CPU holds a spinlock: a thread must not give up the

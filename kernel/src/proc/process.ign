@@ -131,6 +131,11 @@ record ProcessState {
 
   /// The id the next process gets.
   static mut nextId: u64;
+
+  /// Guards every slot's state, id, parent, detached flag and status, and
+  /// `nextId`, rank `Lib::MutexRank::PROCESS_TABLE`. A process's own
+  /// `killPending`, `abi`, entry and stack pointer are read without it.
+  static mut lock: Sched::Mutex;
 }
 
 /// The process API.
@@ -208,6 +213,7 @@ namespace Proc::Process {
   /// Process ids start at 1.
   function initialize(): void {
     ProcessState::nextId = 1;
+    Sched::Mutex::initialize(tableLock(), Lib::MutexRank::PROCESS_TABLE);
   }
 
   /// Starts a process whose whole image is `length` bytes of machine code
@@ -400,16 +406,15 @@ namespace Proc::Process {
     abi: u64,
     directory: *mut Fs::Node
   ): u64 {
-    let saved: u64 = Arch::Cpu::saveAndDisableInterrupts();
-
-    // Read before the new slot turns RUNNING: `currentSlot` matches slots by
-    // thread, and the new slot's thread field still holds a stale value.
     let caller: u64 = currentId();
+
+    Sched::Mutex::lock(tableLock());
+
     let slot: u64 = findFreeSlot();
 
     if (slot == NO_PROCESS) {
       Mm::AddressSpace::destroy(root);
-      Arch::Cpu::restoreInterrupts(saved);
+      Sched::Mutex::unlock(tableLock());
       return NO_PROCESS;
     }
 
@@ -430,7 +435,7 @@ namespace Proc::Process {
     if (Fs::Files::openStandard(slot) != Fs::Vfs::OK) {
       (*process).state = FREE;
       Mm::AddressSpace::destroy(root);
-      Arch::Cpu::restoreInterrupts(saved);
+      Sched::Mutex::unlock(tableLock());
       return NO_PROCESS;
     }
 
@@ -441,7 +446,7 @@ namespace Proc::Process {
     if (thread == Sched::Thread::NO_THREAD) {
       Fs::Files::closeAll(slot);
       (*process).state = FREE;
-      Arch::Cpu::restoreInterrupts(saved);
+      Sched::Mutex::unlock(tableLock());
       return NO_PROCESS;
     }
 
@@ -450,7 +455,7 @@ namespace Proc::Process {
 
     let id: u64 = (*process).id;
 
-    Arch::Cpu::restoreInterrupts(saved);
+    Sched::Mutex::unlock(tableLock());
 
     return id;
   }
@@ -462,30 +467,35 @@ namespace Proc::Process {
   ///
   /// The caller blocks in `Sched::Scheduler::join` on the process thread and
   /// runs again only once that thread is gone, which happens after
-  /// `finishCurrent` recorded the status. Interrupts stay off from the lookup
-  /// to the block, so the thread cannot end in between unnoticed.
+  /// `finishCurrent` recorded the status. The table lock is let go during
+  /// the join, so the slot is checked again after it: the id must still be
+  /// there, ended.
   function wait(id: u64): u64 {
-    let saved: u64 = Arch::Cpu::saveAndDisableInterrupts();
+    Sched::Mutex::lock(tableLock());
+
     let slot: u64 = findSlot(id);
 
     if (slot == NO_PROCESS) {
-      Arch::Cpu::restoreInterrupts(saved);
+      Sched::Mutex::unlock(tableLock());
       return NO_PROCESS;
     }
 
     let process: *mut ProcessEntry = slotPointer(slot);
+    let thread: u64 = (*process).thread;
 
-    Sched::Scheduler::join((*process).thread);
+    Sched::Mutex::unlock(tableLock());
+    Sched::Scheduler::join(thread);
+    Sched::Mutex::lock(tableLock());
 
     if ((*process).state != EXITED || (*process).id != id) {
-      Arch::Cpu::restoreInterrupts(saved);
+      Sched::Mutex::unlock(tableLock());
       return NO_PROCESS;
     }
 
     let status: u64 = (*process).status;
 
     (*process).state = FREE;
-    Arch::Cpu::restoreInterrupts(saved);
+    Sched::Mutex::unlock(tableLock());
 
     return status;
   }
@@ -502,7 +512,8 @@ namespace Proc::Process {
     return (*slotPointer(slot)).id;
   }
 
-  /// The system call convention of the running process.
+  /// The system call convention of the running process. Set at launch and
+  /// never changed, so read without the table lock.
   function currentAbi(): u64 {
     let slot: u64 = currentSlot();
 
@@ -545,15 +556,24 @@ namespace Proc::Process {
 
     let process: *mut ProcessEntry = slotPointer(slot);
 
-    (*process).status = status;
-    (*process).state = (*process).detached ? FREE : EXITED;
+    // The descriptors and regions go first: once the slot is EXITED, or FREE
+    // for an orphan, another process may be launched into it.
     Fs::Files::closeAll(slot);
     Proc::Memory::reset(slot);
-    releaseChildren((*process).id);
+
+    Sched::Mutex::lock(tableLock());
+
+    let id: u64 = (*process).id;
+
+    (*process).status = status;
+    (*process).state = (*process).detached ? FREE : EXITED;
+    releaseChildren(id);
     wakeParent((*process).parent);
+    Sched::Scheduler::setProcess(0);
+    Sched::Mutex::unlock(tableLock());
 
     Drivers::Console::write("process ");
-    Drivers::Console::writeDecimal((*process).id);
+    Drivers::Console::writeDecimal(id);
 
     if (killed) {
       Drivers::Console::write(" killed, status ");
@@ -569,7 +589,7 @@ namespace Proc::Process {
 
   /// Frees the children of `parent` that already ended, which nobody can
   /// wait for any more, and turns the ones still running into orphans that
-  /// are freed when they end. Interrupts must be off.
+  /// are freed when they end. The table lock is held.
   function releaseChildren(parent: u64): void {
     let mut slot: u64 = 0;
 
@@ -595,27 +615,30 @@ namespace Proc::Process {
   /// (no return). Killing a process that already ended changes nothing.
   /// Returns `KILL_OK` or `KILL_NOT_FOUND`.
   function kill(id: u64): u64 {
-    let saved: u64 = Arch::Cpu::saveAndDisableInterrupts();
+    if (id == currentId()) {
+      killCurrent(KILLED);
+    }
+
+    Sched::Mutex::lock(tableLock());
+
     let slot: u64 = findSlot(id);
 
     if (slot == NO_PROCESS) {
-      Arch::Cpu::restoreInterrupts(saved);
+      Sched::Mutex::unlock(tableLock());
       return KILL_NOT_FOUND;
     }
 
     let process: *mut ProcessEntry = slotPointer(slot);
 
     if ((*process).state == RUNNING) {
-      if (id == currentId()) {
-        killCurrent(KILLED);
-      }
-
+      // The flag goes first: the interrupt and the read cancel make the
+      // process look at it.
       (*process).killPending = true;
       Sched::Scheduler::interrupt((*process).thread);
       Fs::Files::cancelRead(slot);
     }
 
-    Arch::Cpu::restoreInterrupts(saved);
+    Sched::Mutex::unlock(tableLock());
 
     return KILL_OK;
   }
@@ -635,8 +658,9 @@ namespace Proc::Process {
     }
   }
 
-  /// Wakes the thread of process `parent` if it is parked in `waitAny`.
-  /// Nothing happens for `NO_PARENT` or a parent that is not parked.
+  /// Wakes the thread of process `parent` if it is parked in `waitAny`, or
+  /// leaves it a token for its next park. Nothing happens for `NO_PARENT`.
+  /// The table lock is held.
   function wakeParent(parent: u64): void {
     if (parent == NO_PARENT) {
       return;
@@ -651,51 +675,66 @@ namespace Proc::Process {
 
   /// Waits until any child of the running process has ended, writes its
   /// exit status to `status`, frees its slot and returns its id. Returns
-  /// `NO_PROCESS` when the process has no child at all. The scan and the
-  /// park happen with interrupts off, so a child that ends in between still
-  /// finds its parent parked and wakes it.
+  /// `NO_PROCESS` when the process has no child at all, or was killed. A
+  /// child that ends between the scan and the park leaves a wake token, and
+  /// the park returns at once.
   function waitAny(status: *mut u64): u64 {
-    let saved: u64 = Arch::Cpu::saveAndDisableInterrupts();
     let me: u64 = currentId();
 
     while (true) {
       let mut found: boolean = false;
+      let mut endedId: u64 = NO_PROCESS;
+      let mut endedThread: u64 = 0;
+      let mut endedSlot: u64 = 0;
       let mut slot: u64 = 0;
 
-      while (slot < MAX_PROCESSES) {
+      Sched::Mutex::lock(tableLock());
+
+      while (slot < MAX_PROCESSES && endedId == NO_PROCESS) {
         let child: *mut ProcessEntry = slotPointer(slot);
 
         if ((*child).state != FREE && (*child).parent == me) {
           found = true;
 
           if ((*child).state == EXITED) {
-            let id: u64 = (*child).id;
-
-            // The child's thread may still be dying: wait until it is gone
-            // and its address space freed, as `wait` does.
-            Sched::Scheduler::join((*child).thread);
-
-            if ((*child).state == EXITED && (*child).id == id) {
-              *status = (*child).status;
-              (*child).state = FREE;
-              Arch::Cpu::restoreInterrupts(saved);
-              return id;
-            }
+            endedId = (*child).id;
+            endedThread = (*child).thread;
+            endedSlot = slot;
           }
         }
 
         slot += 1;
       }
 
-      if (!found || killRequested()) {
-        Arch::Cpu::restoreInterrupts(saved);
+      Sched::Mutex::unlock(tableLock());
+
+      if (endedId != NO_PROCESS) {
+        // The child's thread may still be dying: wait until it is gone and
+        // its address space freed, as `wait` does. Only the parent collects
+        // its children, so the slot still holds the child afterwards.
+        Sched::Scheduler::join(endedThread);
+        Sched::Mutex::lock(tableLock());
+
+        let child: *mut ProcessEntry = slotPointer(endedSlot);
+
+        if ((*child).state == EXITED && (*child).id == endedId) {
+          *status = (*child).status;
+          (*child).state = FREE;
+          Sched::Mutex::unlock(tableLock());
+          return endedId;
+        }
+
+        Sched::Mutex::unlock(tableLock());
+      } else if (!found || killRequested()) {
         return NO_PROCESS;
+      } else {
+        Sched::Scheduler::park();
       }
 
-      Sched::Scheduler::park();
+      if (killRequested()) {
+        return NO_PROCESS;
+      }
     }
-
-    Arch::Cpu::restoreInterrupts(saved);
 
     return NO_PROCESS;
   }
@@ -703,11 +742,12 @@ namespace Proc::Process {
   /// The parent of process `id`: `NO_PARENT` for one the kernel started or
   /// an orphan, `NO_PROCESS` when no process has that id.
   function parentOf(id: u64): u64 {
-    let saved: u64 = Arch::Cpu::saveAndDisableInterrupts();
+    Sched::Mutex::lock(tableLock());
+
     let slot: u64 = findSlot(id);
     let parent: u64 = slot == NO_PROCESS ? NO_PROCESS : (*slotPointer(slot)).parent;
 
-    Arch::Cpu::restoreInterrupts(saved);
+    Sched::Mutex::unlock(tableLock());
 
     return parent;
   }
@@ -715,7 +755,8 @@ namespace Proc::Process {
   /// The number of slots in use, ended processes waiting for `wait`
   /// included. The self-tests check it to prove nothing is left behind.
   function usedSlots(): u64 {
-    let saved: u64 = Arch::Cpu::saveAndDisableInterrupts();
+    Sched::Mutex::lock(tableLock());
+
     let mut count: u64 = 0;
     let mut slot: u64 = 0;
 
@@ -727,7 +768,7 @@ namespace Proc::Process {
       slot += 1;
     }
 
-    Arch::Cpu::restoreInterrupts(saved);
+    Sched::Mutex::unlock(tableLock());
 
     return count;
   }
@@ -737,31 +778,30 @@ namespace Proc::Process {
   function userMain(slot: u64): void {
     let process: *mut ProcessEntry = slotPointer(slot);
 
+    Sched::Scheduler::setProcess(slot + 1);
+
     // A process killed before it ever ran ends here, before any user code.
     checkKill();
 
     Arch::UserMode::enter((*process).entry, (*process).stackPointer);
   }
 
-  /// The slot of the process whose thread is running, or `NO_PROCESS`.
+  /// The slot of the process whose thread is running, or `NO_PROCESS`: what
+  /// the thread recorded in `userMain`, cleared again when the process
+  /// ends. Read without a lock, since only the thread itself writes it.
   function currentSlot(): u64 {
-    let thread: u64 = Sched::Scheduler::currentId();
-    let mut slot: u64 = 0;
+    let slotPlusOne: u64 = Sched::Scheduler::currentProcess();
 
-    while (slot < MAX_PROCESSES) {
-      let process: *mut ProcessEntry = slotPointer(slot);
+    return slotPlusOne == 0 ? NO_PROCESS : slotPlusOne - 1;
+  }
 
-      if ((*process).state == RUNNING && (*process).thread == thread) {
-        return slot;
-      }
-
-      slot += 1;
-    }
-
-    return NO_PROCESS;
+  /// `ProcessState::lock`.
+  function tableLock(): *mut Sched::Mutex {
+    return &mut ProcessState::lock as *mut Sched::Mutex;
   }
 
   /// The slot of the process with this id that is not free, or `NO_PROCESS`.
+  /// The table lock is held.
   function findSlot(id: u64): u64 {
     let mut slot: u64 = 0;
 
@@ -778,7 +818,8 @@ namespace Proc::Process {
     return NO_PROCESS;
   }
 
-  /// The first free slot, or `NO_PROCESS` when the table is full.
+  /// The first free slot, or `NO_PROCESS` when the table is full. The table
+  /// lock is held.
   function findFreeSlot(): u64 {
     let mut slot: u64 = 0;
 

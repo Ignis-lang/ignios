@@ -126,6 +126,18 @@ namespace Sched::Thread {
     /// thread has its own, so a system call may block at any point while
     /// another thread runs one.
     public scratch: u64;
+
+    /// The process slot the thread runs, plus 1; 0 for a kernel thread. Only
+    /// the thread itself sets it (`Sched::Scheduler::setProcess`).
+    public process: u64;
+
+    /// 1 when `wake` came while the thread was not parked: its next `park`
+    /// returns at once.
+    public wakePending: u64;
+
+    /// 1 when `interrupt` came while the thread was not waiting: its next
+    /// `sleep`, `join` or `park` returns at once.
+    public interrupted: u64;
   }
 
   /// Bytes of every thread's scratch area.
@@ -316,6 +328,9 @@ namespace Sched::Thread {
     (*thread).runTicks = 0;
     (*thread).waitNext = 0;
     (*thread).mutexTop = 0;
+    (*thread).process = 0;
+    (*thread).wakePending = 0;
+    (*thread).interrupted = 0;
     (*thread).root = root;
     (*thread).savedRsp = Arch::Context::prepareStack(base + STACK_SPAN, entry, argument);
     resetFpuArea(slot);
