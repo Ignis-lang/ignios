@@ -1,0 +1,68 @@
+//!
+//! # Rank
+//!
+//! The rank of every kernel lock, in one place.
+//!
+//! ## Overview
+//!
+//! A CPU takes spinlocks in rising rank order, and a thread takes mutexes in
+//! rising rank order (`Arch::Spin`, `Sched::Mutex`, concept doc 24). The two
+//! orders are separate: a mutex is never taken while a spinlock is held, so
+//! every mutex comes before every spinlock anyway.
+//!
+//! A rank sits above the ranks of every lock that may be held when it is
+//! taken. The chains that decide the order:
+//!
+//! ```text
+//!   spinlocks
+//!   mutex guard (20) ──► run queue (60)              waking a waiter
+//!   heap (70) ──► page tables (75) ──► frames (80)   the heap grows
+//!   anything ──► console (90) ──► serial (91)        printing
+//!
+//!   mutexes
+//!   process table (10) ──► descriptor table (20) ──► VFS (30) ──► address space (40)
+//! ```
+//!
+//! Gaps are left so a new lock fits between two existing ones.
+
+/// Spinlock ranks.
+namespace Lib::Rank {
+  /// The guard spinlock inside every `Sched::Mutex`.
+  const MUTEX_GUARD: u64 = 20;
+
+  /// The spinlock of a subsystem's wait queue.
+  const WAIT_QUEUE: u64 = 30;
+
+  /// The scheduler's run queue and thread states.
+  const RUN_QUEUE: u64 = 60;
+
+  /// The kernel heap.
+  const HEAP: u64 = 70;
+
+  /// Every page table edit, kernel and user.
+  const PAGE_TABLES: u64 = 75;
+
+  /// The physical frame allocator.
+  const FRAMES: u64 = 80;
+
+  /// The framebuffer console.
+  const CONSOLE: u64 = 90;
+
+  /// The serial port.
+  const SERIAL: u64 = 91;
+}
+
+/// Mutex ranks.
+namespace Lib::MutexRank {
+  /// The process table.
+  const PROCESS_TABLE: u64 = 10;
+
+  /// A process's descriptor table.
+  const DESCRIPTORS: u64 = 20;
+
+  /// The whole VFS tree.
+  const VFS: u64 = 30;
+
+  /// A process's address space and region table.
+  const ADDRESS_SPACE: u64 = 40;
+}

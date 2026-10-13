@@ -11,9 +11,11 @@
 //! in address order through a pointer stored in their payload, which lets
 //! `free` merge a block with both neighbours. A request for a larger
 //! alignment splits the space in front of the aligned payload off as a free
-//! block of its own. `allocate` and `free` run with interrupts disabled,
-//! which is all the mutual exclusion the single processor needs: no other
-//! thread can run in the middle of a list update.
+//! block of its own. `allocate` and `free` hold a spinlock taken with
+//! `lockIrq` (rank `Lib::Rank::HEAP`), so neither another thread, another
+//! processor nor an interrupt handler on this one runs in the middle of a
+//! list update. Growing the heap maps pages and takes frames under that
+//! lock; both of their locks rank above it.
 //!
 //! The compiler's allocation handlers sit on top of it, so escaping capturing
 //! closures allocate here.
@@ -75,10 +77,11 @@
 //! See concept doc 10.
 
 import Arch from "@arch";
+import Lib from "@lib";
 import _ from "./pmm";
 import _ from "./vmm";
 
-/// Heap state, touched only with interrupts disabled.
+/// Heap state, touched only with `HeapState::lock` held.
 record HeapState {
   /// Virtual address just past the last mapped heap page. The heap occupies
   /// `BASE` up to this value.
@@ -89,6 +92,11 @@ record HeapState {
 
   /// Bytes in live blocks, headers included.
   static mut allocatedBytes: u64 = 0;
+
+  /// Taken with `lockIrq` by `allocate` and `free`, rank `Lib::Rank::HEAP`.
+  /// Growing the heap maps pages and takes frames under it, which rank
+  /// higher.
+  static mut lock: Arch::SpinLock;
 }
 
 /// The heap API. `allocate` and `free` are the only entry points the rest of
@@ -127,6 +135,8 @@ namespace Mm::Heap {
 
   /// Prepares an empty heap. Nothing is mapped until the first allocation.
   function initialize(): void {
+    Arch::Spin::initialize(heapLock(), Lib::Rank::HEAP);
+
     if (Mm::Vmm::translate(BASE) != Mm::Vmm::NOT_MAPPED) {
       @panic("heap: the heap base is already mapped");
     }
@@ -141,15 +151,16 @@ namespace Mm::Heap {
   /// alignment is larger than the whole heap (`LIMIT_SIZE`), or when the heap
   /// cannot grow any further.
   function allocate(size: u64, align: u64): *mut u8 {
-    let saved: u64 = Arch::Cpu::saveAndDisableInterrupts();
+    Arch::Spin::lockIrq(heapLock());
+
     let pointer: *mut u8 = allocateLocked(size, align);
 
-    Arch::Cpu::restoreInterrupts(saved);
+    Arch::Spin::unlockIrq(heapLock());
 
     return pointer;
   }
 
-  /// The body of `allocate`. Interrupts must be disabled. A size of 0 is served
+  /// The body of `allocate`, with the heap lock held. A size of 0 is served
   /// as a 1-byte request, so every allocation returns a distinct pointer.
   function allocateLocked(size: u64, align: u64): *mut u8 {
     if (align == 0 || (align & (align - 1)) != 0) {
@@ -186,7 +197,7 @@ namespace Mm::Heap {
       return;
     }
 
-    let saved: u64 = Arch::Cpu::saveAndDisableInterrupts();
+    Arch::Spin::lockIrq(heapLock());
 
     let payload: u64 = @integerFromPointer(pointer);
     let block: u64 = payload - HEADER_SIZE;
@@ -198,7 +209,12 @@ namespace Mm::Heap {
     HeapState::allocatedBytes -= readSize(block);
     insertFree(block, readSize(block));
 
-    Arch::Cpu::restoreInterrupts(saved);
+    Arch::Spin::unlockIrq(heapLock());
+  }
+
+  /// `HeapState::lock`.
+  function heapLock(): *mut Arch::SpinLock {
+    return &mut HeapState::lock as *mut Arch::SpinLock;
   }
 
   /// Bytes in live blocks, headers included.

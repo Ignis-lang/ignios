@@ -11,6 +11,7 @@
 //! | `Lib::Mem`           | `mem.ign`            | `memcpy`, `memset`, `memmove`, `memcmp`          |
 //! | `Lib::Format`        | `format.ign`         | decimal and hexadecimal text through a callback  |
 //! | `Lib::ScancodeQueue` | `scancode_queue.ign` | lock-free ring buffer between IRQ1 and the shell |
+//! | `Lib::Rank`          | `rank.ign`           | the rank of every spinlock and mutex             |
 //!
 //! ## Dependencies
 //!
@@ -28,6 +29,7 @@
 
 import _ from "./format";
 import _ from "./mem";
+import _ from "./rank";
 import _ from "./scancode_queue";
 
 /// Aggregate namespace of the library. The files above contribute

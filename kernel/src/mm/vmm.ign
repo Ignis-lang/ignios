@@ -127,6 +127,10 @@ import _ from "./pmm";
 record VmmState {
   /// Physical address of the kernel PML4, the value loaded into CR3.
   static mut root: u64 = 0;
+
+  /// Taken with `lockIrq` around every page table edit, kernel or user, rank
+  /// `Lib::Rank::PAGE_TABLES`. Lookups do not take it.
+  static mut lock: Arch::SpinLock;
 }
 
 /// Boundaries defined by `kernel/linker.ld`. A symbol declared here has an
@@ -271,6 +275,8 @@ namespace Mm::Vmm {
   /// 4. The upper half is populated, then CR3 is loaded. The load drops every
   ///    TLB entry that is not global, so the old Limine mappings are gone.
   function initialize(framebuffer: *mut Boot::Limine::Framebuffer): void {
+    Arch::Spin::initialize(tableLock(), Lib::Rank::PAGE_TABLES);
+
     Arch::Cpu::writeMsr(EFER_MSR, Arch::Cpu::readMsr(EFER_MSR) | EFER_NO_EXECUTE_ENABLE);
     Arch::Cpu::writeCr0(Arch::Cpu::readCr0() | CR0_WRITE_PROTECT);
 
@@ -341,6 +347,17 @@ namespace Mm::Vmm {
   /// in `flags` the intermediate entries allow user access too, because the
   /// processor needs the U/S bit set at every level.
   function mapIn(root: u64, virtualAddress: u64, physical: u64, flags: u64): boolean {
+    Arch::Spin::lockIrq(tableLock());
+
+    let done: boolean = mapInLocked(root, virtualAddress, physical, flags);
+
+    Arch::Spin::unlockIrq(tableLock());
+
+    return done;
+  }
+
+  /// The body of `mapIn`, with the page table lock held.
+  function mapInLocked(root: u64, virtualAddress: u64, physical: u64, flags: u64): boolean {
     if (virtualAddress % PAGE_SIZE != 0 || physical % PAGE_SIZE != 0) {
       return false;
     }
@@ -378,6 +395,17 @@ namespace Mm::Vmm {
   /// `USER` in `flags` the PML4 and PDPT entries above the page allow user
   /// access too, as in `mapIn`.
   function mapLargeIn(root: u64, virtualAddress: u64, physical: u64, flags: u64): boolean {
+    Arch::Spin::lockIrq(tableLock());
+
+    let done: boolean = mapLargeInLocked(root, virtualAddress, physical, flags);
+
+    Arch::Spin::unlockIrq(tableLock());
+
+    return done;
+  }
+
+  /// The body of `mapLargeIn`, with the page table lock held.
+  function mapLargeInLocked(root: u64, virtualAddress: u64, physical: u64, flags: u64): boolean {
     if (virtualAddress % LARGE_PAGE_SIZE != 0 || physical % LARGE_PAGE_SIZE != 0) {
       return false;
     }
@@ -403,6 +431,17 @@ namespace Mm::Vmm {
 
   /// `unmap` in the address space whose PML4 is the frame `root`.
   function unmapIn(root: u64, virtualAddress: u64): boolean {
+    Arch::Spin::lockIrq(tableLock());
+
+    let done: boolean = unmapInLocked(root, virtualAddress);
+
+    Arch::Spin::unlockIrq(tableLock());
+
+    return done;
+  }
+
+  /// The body of `unmapIn`, with the page table lock held.
+  function unmapInLocked(root: u64, virtualAddress: u64): boolean {
     let entry: *mut u64 = findSmallEntry(root, virtualAddress);
 
     if (entry == null || (*entry & PRESENT) == 0) {
@@ -729,6 +768,11 @@ namespace Mm::Vmm {
     Lib::Mem::fill(Boot::Hhdm::toVirtual(frame), 0, PAGE_SIZE);
 
     return frame;
+  }
+
+  /// `VmmState::lock`.
+  function tableLock(): *mut Arch::SpinLock {
+    return &mut VmmState::lock as *mut Arch::SpinLock;
   }
 
   /// The direct-map pointer to the table in the frame at `physical`.
