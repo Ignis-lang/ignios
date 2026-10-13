@@ -26,7 +26,7 @@
 //!   kmain
 //!   │
 //!   ├─ Drivers::Serial::initialize ........ COM1 up, first log line       drivers/   doc 06
-//!   ├─ Trap::Setup::initializeGdt ......... own GDT, TSS, CS/SS/DS        trap/      doc 03
+//!   ├─ Trap::Setup::initializeGdt ......... own GDT, TSS, CS/SS/DS, GS    trap/      doc 03, 18
 //!   ├─ Trap::Setup::initializeIdt ......... 50 gates (49 thunks + spur.)  trap/      doc 04
 //!   ├─ Trap::Setup::initializeFpu ......... x87 and SSE on, initial state trap/      doc 16
 //!   ├─ Boot::Limine::require* ............. base revision, framebuffer    boot/      doc 01
@@ -43,7 +43,7 @@
 //!   ├─ Trap::Setup::initializeProtection +
 //!   │  Tests::Protection .................. SMEP and SMAP on, probed      trap/      doc 17
 //!   ├─ Sched::Scheduler::initialize, Proc::Process::initialize, Syscall::initialize
-//!   ├─ Trap::Setup::initializeUserMode .... GS base, EFER.SCE, MSRs       trap/      doc 14, 18
+//!   ├─ Trap::Setup::initializeUserMode .... EFER.SCE, SYSCALL MSRs        trap/      doc 14
 //!   ├─ Acpi::initialize/report ............ RSDP, XSDT, MADT              acpi/      doc 12
 //!   ├─ Arch::Pic::initialize .............. remap and mask the 8259       arch/      doc 05
 //!   ├─ Apic::Lapic::initialize ............ local APIC on                 apic/      doc 05

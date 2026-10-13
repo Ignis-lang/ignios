@@ -105,17 +105,15 @@ namespace Arch::Spin {
 
   /// Releases `spin`. Panics when it is not the last spinlock taken.
   function unlock(spin: *mut Arch::SpinLock): void {
-    if (Arch::CpuLocal::isReady() && Arch::CpuLocal::spinTop() != (*spin).rank) {
-      @panic("spinlock: released out of order, the last lock taken must be released first");
+    if (!releaseAllowed(spin)) {
+      @panic("spinlock: released out of order or not held, the last lock taken must be released first");
     }
 
     Arch::CpuLocal::setSpinTop((*spin).previousRank);
     release(@integerFromPointer(&mut (*spin).locked as *mut u64));
 
-    let count: u64 = Arch::CpuLocal::preemptCount();
-
-    if (count > 0) {
-      Arch::CpuLocal::setPreemptCount(count - 1);
+    if (Arch::CpuLocal::isReady()) {
+      Arch::CpuLocal::setPreemptCount(Arch::CpuLocal::preemptCount() - 1);
     }
   }
 
@@ -139,6 +137,21 @@ namespace Arch::Spin {
   /// and above every spinlock rank it holds.
   function rankAllows(rank: u64): boolean {
     return rank > 0 && rank > Arch::CpuLocal::spinTop();
+  }
+
+  /// True when `spin` may be released now: it is held, and on this CPU it is
+  /// the last spinlock taken. Before the per-CPU block exists only the first
+  /// condition is checked.
+  function releaseAllowed(spin: *mut Arch::SpinLock): boolean {
+    if ((*spin).locked == 0) {
+      return false;
+    }
+
+    if (!Arch::CpuLocal::isReady()) {
+      return true;
+    }
+
+    return Arch::CpuLocal::preemptCount() > 0 && Arch::CpuLocal::spinTop() == (*spin).rank;
   }
 
   /// True while this CPU holds a spinlock.

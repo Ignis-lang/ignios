@@ -185,6 +185,8 @@ run-headless: $(IMAGE) $(OVMF_VARS_COPY)
 	grep -q '^i64 minimum = -9223372036854775808[^0-9]' $(SERIAL_LOG)
 	grep -q '^argv: hello one two[^ ]' $(SERIAL_LOG)
 	grep -q '^user: nativetest passed' $(SERIAL_LOG)
+	grep -q '^locks: spinlock self-test ok' $(SERIAL_LOG)
+	grep -q '^locks: mutex and wait queue self-test ok' $(SERIAL_LOG)
 	grep -q '^user: [1-9][0-9]* interrupts from ring 3 with RFLAGS.AC set ran their handlers with AC clear' $(SERIAL_LOG)
 
 # Boots without a display until the console prompt appears on COM1, then

@@ -10,8 +10,13 @@
 //! | irq variant        | `lockIrq` turns interrupts off and `unlockIrq` restores them   |
 //! | no preemption      | with a spinlock held across more than a time slice, no thread switch happens, and one happens soon after the release |
 //! | mutual exclusion   | three threads add 1 to a counter three times each, waiting more than a time slice between the read and the write: the total is 9 |
-//! | ranks              | while a lock of rank 20 is held, ranks 10 and 20 are refused and 30 is allowed; after the release everything is allowed again |
-//! | mutex              | a contender sleeps on a mutex its holder keeps while sleeping, and gets it only after the holder is done; mutex ranks; no mutex under a spinlock |
+//! | ranks              | while a lock of rank 20 is held, ranks 10 and 20 are refused and 30 is allowed; only the last lock taken may be released; a free lock may not be; after the release everything is allowed again; `canSleep` needs exactly one lock taken with `lockIrq` |
+//! | mutex              | a contender sleeps on a mutex its holder keeps while sleeping, and gets it only after the holder is done, and may not release it meanwhile; mutex ranks and release order; no mutex under a spinlock |
+//!
+//! The rank and release checks of `lock` and `unlock` panic through the
+//! predicates the test calls (`rankAllows`, `releaseAllowed`, `canLock`,
+//! `unlockAllowed`), so a broken predicate fails the test. The panics
+//! themselves cannot run at boot without stopping it.
 //! | wait queue         | three threads sleep on a queue; an interrupt (what `kill` does) does not wake them; `wakeAll` wakes all three |
 //!
 //! The mutual exclusion check stretches each critical section past a time
@@ -54,6 +59,17 @@ record LocksTestState {
 
   /// What the contender saw of `holderDone` once it had the mutex.
   static mut contenderSaw: u64;
+
+  /// 1 when the contender was allowed to release the holder's mutex.
+  static mut contenderCouldUnlock: u64;
+
+  /// A second mutex, rank 60, for the release order check.
+  static mut outerMutex: Sched::Mutex;
+
+  /// A mutex of the same rank as `mutex`, which the contender holds while it
+  /// asks whether it may release `mutex`: the rank rule then allows it, so
+  /// only the owner check can refuse.
+  static mut twinMutex: Sched::Mutex;
 
   /// The spinlock of the wait queue check, rank 40.
   static mut queueLock: Arch::SpinLock;
@@ -147,11 +163,43 @@ namespace Tests::Locks {
     }
 
     Arch::Spin::lock(innerLock());
+
+    if (Arch::Spin::releaseAllowed(counterLock()) || !Arch::Spin::releaseAllowed(innerLock())) {
+      @panic("locks self-test: the release order check is wrong");
+    }
+
     Arch::Spin::unlock(innerLock());
+
+    if (!Arch::Spin::releaseAllowed(counterLock())) {
+      @panic("locks self-test: the last lock taken could not be released");
+    }
+
     Arch::Spin::unlock(counterLock());
 
-    if (!Arch::Spin::rankAllows(10)) {
-      @panic("locks self-test: ranks stayed taken after the release");
+    if (!Arch::Spin::rankAllows(10) || Arch::Spin::releaseAllowed(counterLock())) {
+      @panic("locks self-test: ranks stayed taken, or a free lock could be released");
+    }
+
+    // sleepOn needs its spinlock taken with lockIrq, and no other one.
+    Arch::Cpu::enableInterrupts();
+    Arch::Spin::lock(counterLock());
+
+    let sleepWithInterrupts: boolean = Sched::Wait::canSleep();
+
+    Arch::Spin::unlock(counterLock());
+    Arch::Spin::lockIrq(counterLock());
+
+    let sleepWithIrqLock: boolean = Sched::Wait::canSleep();
+
+    Arch::Spin::lockIrq(innerLock());
+
+    let sleepWithTwo: boolean = Sched::Wait::canSleep();
+
+    Arch::Spin::unlockIrq(innerLock());
+    Arch::Spin::unlockIrq(counterLock());
+
+    if (sleepWithInterrupts || !sleepWithIrqLock || sleepWithTwo) {
+      @panic("locks self-test: canSleep allowed a sleep that could lose its wake-up");
     }
   }
 
@@ -227,10 +275,12 @@ namespace Tests::Locks {
   /// the mutex until the holder is done. Then the rank rules of mutexes.
   function checkMutex(): void {
     Sched::Mutex::initialize(mutex(), MUTEX_RANK);
+    Sched::Mutex::initialize(twinMutex(), MUTEX_RANK);
     LocksTestState::holding = 0;
     LocksTestState::queuedSeen = 0;
     LocksTestState::holderDone = 0;
     LocksTestState::contenderSaw = 0;
+    LocksTestState::contenderCouldUnlock = 0;
 
     let holder: u64 = Sched::Scheduler::spawn(Arch::ContextAsm::ignis_function_address(mutexHolder), 0);
     let contender: u64 = Sched::Scheduler::spawn(Arch::ContextAsm::ignis_function_address(mutexContender), 0);
@@ -246,7 +296,19 @@ namespace Tests::Locks {
       @panic("locks self-test: the contender got the mutex while the holder held it");
     }
 
+    if (LocksTestState::contenderCouldUnlock != 0) {
+      @panic("locks self-test: a thread was allowed to release a mutex it does not hold");
+    }
+
     Sched::Mutex::lock(mutex());
+    Sched::Mutex::initialize(outerMutex(), MUTEX_RANK + 10);
+    Sched::Mutex::lock(outerMutex());
+
+    if (Sched::Mutex::unlockAllowed(mutex()) || !Sched::Mutex::unlockAllowed(outerMutex())) {
+      @panic("locks self-test: the mutex release order check is wrong");
+    }
+
+    Sched::Mutex::unlock(outerMutex());
 
     if (Sched::Mutex::canLock(MUTEX_RANK - 10) || Sched::Mutex::canLock(MUTEX_RANK) || !Sched::Mutex::canLock(MUTEX_RANK + 10) || !Sched::Mutex::isHeldByCaller(mutex())) {
       @panic("locks self-test: the mutex rank rule is wrong");
@@ -282,6 +344,14 @@ namespace Tests::Locks {
     while (@readVolatile<u64>(&mut LocksTestState::holding as *mut u64) == 0) {
       Sched::Scheduler::yield();
     }
+
+    Sched::Mutex::lock(twinMutex());
+
+    if (Sched::Mutex::unlockAllowed(mutex())) {
+      LocksTestState::contenderCouldUnlock = 1;
+    }
+
+    Sched::Mutex::unlock(twinMutex());
 
     Sched::Mutex::lock(mutex());
     LocksTestState::contenderSaw = LocksTestState::holderDone;
@@ -343,6 +413,16 @@ namespace Tests::Locks {
   /// `LocksTestState::mutex`.
   function mutex(): *mut Sched::Mutex {
     return &mut LocksTestState::mutex as *mut Sched::Mutex;
+  }
+
+  /// `LocksTestState::twinMutex`.
+  function twinMutex(): *mut Sched::Mutex {
+    return &mut LocksTestState::twinMutex as *mut Sched::Mutex;
+  }
+
+  /// `LocksTestState::outerMutex`.
+  function outerMutex(): *mut Sched::Mutex {
+    return &mut LocksTestState::outerMutex as *mut Sched::Mutex;
   }
 
   /// `LocksTestState::queueLock`.

@@ -95,6 +95,10 @@ namespace Sched::Wait {
       @panic("wait queue: the idle thread cannot sleep");
     }
 
+    if (Arch::Cpu::interruptsEnabled()) {
+      @panic("wait queue: sleepOn needs its spinlock taken with lockIrq");
+    }
+
     let saved: u64 = (*spin).savedFlags;
 
     (*Sched::Thread::slotPointer(slot)).state = Sched::Thread::QUEUED;
@@ -114,6 +118,10 @@ namespace Sched::Wait {
   /// Wakes the first thread of `queue`. The caller holds the queue's
   /// spinlock. Returns false when nobody was waiting.
   function wakeOne(queue: *mut Sched::WaitQueue): boolean {
+    if (Arch::Cpu::interruptsEnabled()) {
+      @panic("wait queue: wake needs the queue's spinlock taken with lockIrq");
+    }
+
     while ((*queue).head != 0) {
       let slot: u64 = pop(queue);
       let thread: *mut Sched::Thread::Control = Sched::Thread::slotPointer(slot);
@@ -137,6 +145,15 @@ namespace Sched::Wait {
     }
 
     return woken;
+  }
+
+  /// True when the running thread could call `sleepOn` now, holding the
+  /// queue's spinlock: interrupts are off (it was taken with `lockIrq`) and
+  /// exactly that one spinlock is held. With interrupts on, a timer tick
+  /// between the release and the switch could make the queued thread ready
+  /// while it is still in the queue, and its wake-up would be lost.
+  function canSleep(): boolean {
+    return !Arch::Cpu::interruptsEnabled() && Arch::CpuLocal::preemptCount() == 1;
   }
 
   /// True when nobody waits on `queue`.
@@ -227,12 +244,8 @@ namespace Sched::Mutex {
   function unlock(mutex: *mut Sched::Mutex): void {
     let thread: *mut Sched::Thread::Control = Sched::Thread::slotPointer(Sched::Scheduler::currentSlot());
 
-    if ((*mutex).locked == 0 || (*mutex).owner != Sched::Scheduler::currentId()) {
-      @panic("mutex: released by a thread that does not hold it");
-    }
-
-    if ((*thread).mutexTop != (*mutex).rank) {
-      @panic("mutex: released out of order, the last mutex taken must be released first");
+    if (!unlockAllowed(mutex)) {
+      @panic("mutex: released by a thread that does not hold it, or out of order");
     }
 
     (*thread).mutexTop = (*mutex).previousRank;
@@ -253,6 +266,14 @@ namespace Sched::Mutex {
     let thread: *mut Sched::Thread::Control = Sched::Thread::slotPointer(Sched::Scheduler::currentSlot());
 
     return !Arch::Spin::holdsAny() && rank > 0 && rank > (*thread).mutexTop;
+  }
+
+  /// True when the running thread may release `mutex` now: it holds it, and
+  /// it is the last mutex the thread took.
+  function unlockAllowed(mutex: *mut Sched::Mutex): boolean {
+    let thread: *mut Sched::Thread::Control = Sched::Thread::slotPointer(Sched::Scheduler::currentSlot());
+
+    return isHeldByCaller(mutex) && (*thread).mutexTop == (*mutex).rank;
   }
 
   /// True when the running thread holds `mutex`.

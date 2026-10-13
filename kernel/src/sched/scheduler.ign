@@ -297,6 +297,8 @@ namespace Sched::Scheduler {
   /// runs.
   @externName("ignis_thread_exit")
   function exitCurrent(): never {
+    noSpinlockHeld();
+
     Arch::Cpu::disableInterrupts();
 
     if (SchedulerState::current == Sched::Thread::BOOT_SLOT || SchedulerState::current == Sched::Thread::IDLE_SLOT) {
