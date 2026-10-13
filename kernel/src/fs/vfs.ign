@@ -70,6 +70,7 @@ import Mm from "@mm";
 import Sched from "@sched";
 import _ from "./initramfs";
 import _ from "./tar";
+import _ from "./tty";
 
 namespace Fs {
   /// A file or a directory of the tree.
@@ -216,6 +217,7 @@ namespace Fs::Vfs {
   /// the kernel cannot run without its files.
   function initialize(): void {
     Sched::Mutex::initialize(vfsLock(), Lib::MutexRank::VFS);
+    Fs::Tty::initialize();
 
     let root: *mut Fs::Node = newNode(DIRECTORY, "" as *u8, 0, DIRECTORY_MODE);
 

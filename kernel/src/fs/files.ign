@@ -56,11 +56,12 @@
 //! | `NOT_SEEKABLE`   | seeking the console                             | `ESPIPE` |
 //!
 //! Reading the console waits for a line typed at the keyboard
-//! (`Drivers::Tty`); Ctrl+D on an empty line reads as the end of input.
+//! (`Fs::Tty`); Ctrl+D on an empty line reads as the end of input.
 
 import Drivers from "@drivers";
 import Lib from "@lib";
 import Mm from "@mm";
+import _ from "./tty";
 import _ from "./vfs";
 
 namespace Fs {
@@ -219,7 +220,7 @@ namespace Fs::Files {
     }
 
     *directoryPointer(table) = 0;
-    Drivers::Tty::forget(table + 1);
+    Fs::Tty::forget(table + 1);
 
     let mut descriptor: u64 = 0;
 
@@ -403,7 +404,7 @@ namespace Fs::Files {
     }
 
     if ((*file).kind == CONSOLE) {
-      Drivers::Tty::readAs(buffer, count, done, table + 1);
+      Fs::Tty::readAs(buffer, count, done, table + 1);
       return Fs::Vfs::OK;
     }
 
@@ -700,7 +701,7 @@ namespace Fs::Files {
   /// calls it when it kills the process.
   function cancelRead(table: u64): void {
     if (table < MAX_TABLES) {
-      Drivers::Tty::cancel(table + 1);
+      Fs::Tty::cancel(table + 1);
     }
   }
 

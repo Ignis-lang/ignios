@@ -12,6 +12,7 @@
 //! | `Fs::Initramfs` | `initramfs.ign` | finds the initramfs module and validates it     |
 //! | `Fs::Vfs`       | `vfs.ign`       | the file tree: lookup, create, read, write      |
 //! | `Fs::Files`     | `files.ign`     | descriptor tables and open files, the console   |
+//! | `Fs::Tty`       | `tty.ign`       | line editing of the console: echo, Ctrl+D, wait |
 //!
 //! ## Dependencies
 //!
@@ -19,7 +20,8 @@
 //! |-----------|--------------------------------------------------|
 //! | `Mm`      | the initramfs is a Limine module                 |
 //! | `Lib`     | `memcpy` and `memmove` for paths                 |
-//! | `Drivers` | the boot report                                  |
+//! | `Drivers` | the boot report, the console and keyboard        |
+//! | `Sched`   | the VFS mutex, keyboard readers' wait queue      |
 //!
 //! `Fs` sits above `Mm` and below `Proc`: a process opens files, and the
 //! files need memory.
@@ -27,6 +29,7 @@
 import _ from "./files";
 import _ from "./initramfs";
 import _ from "./tar";
+import _ from "./tty";
 import _ from "./vfs";
 
 /// Aggregate namespace of the file code. The files above contribute the

@@ -8,7 +8,7 @@
 //! `Shell::Terminal::run` is where the boot thread ends up. It first runs the
 //! user space shell, `/bin/sh`, and waits for it; the kernel terminal below
 //! is the fallback once it ends (Ctrl+D or `exit`). The terminal prints a
-//! prompt, reads one line with `Drivers::Tty::readLine` (which echoes it and
+//! prompt, reads one line with `Fs::Tty::readLine` (which echoes it and
 //! handles Backspace without ever erasing the prompt) and runs it as a
 //! command (`Shell::Commands::run`). The keyboard interrupt fills the
 //! scancode queue whether the terminal is waiting or not, so keys typed while
@@ -16,6 +16,7 @@
 //! ignored.
 
 import Drivers from "@drivers";
+import Fs from "@fs";
 import Proc from "@proc";
 import _ from "./commands";
 
@@ -38,7 +39,7 @@ namespace Shell::Terminal {
 
   /// Runs `/bin/sh` and waits for it. When it ends, or cannot start, the
   /// kernel terminal takes over: it reads one line at a time with
-  /// `Drivers::Tty::readLine`, which echoes it
+  /// `Fs::Tty::readLine`, which echoes it
   /// and handles Backspace, and runs it as a command, forever. The terminal
   /// runs in the boot thread, so the keyboard keeps working while other
   /// threads run. Input past `LINE_CAPACITY` characters is ignored; Ctrl+D on
@@ -58,7 +59,7 @@ namespace Shell::Terminal {
     while (true) {
       printPrompt();
 
-      let length: u64 = Drivers::Tty::readLine(&mut line as *mut u8, LINE_CAPACITY + 1);
+      let length: u64 = Fs::Tty::readLine(&mut line as *mut u8, LINE_CAPACITY + 1);
 
       if (length == 0 || line[length - 1] != NEWLINE) {
         Drivers::Console::writeChar(NEWLINE);

@@ -24,13 +24,16 @@
 //!
 //! ## Waiting for a key
 //!
-//! The scancode queue is checked with interrupts off, then the processor
-//! sleeps with `sti; hlt`, so a key cannot arrive between the check and the
-//! sleep. Other threads keep running: the timer preempts the halted thread.
-//! Both functions return with the interrupt flag as they found it. A system
-//! call enters with interrupts off and must leave the same way, or another
-//! process could run its own call in between and reuse the kernel's staging
-//! buffers.
+//! One spinlock, taken with `lockIrq` (rank `Lib::Rank::WAIT_QUEUE`), guards
+//! the line, the busy flag and the cancel flags. A reader that finds no key
+//! sleeps on the wait queue with that lock held (`Sched::Wait::sleepOn`),
+//! and the keyboard interrupt wakes it (`keysArrived`, called by the trap
+//! dispatcher after IRQ1). The check and the sleep are one step under the
+//! lock, so a key that arrives in between still wakes the reader, on any
+//! processor. A key is decoded and echoed with the lock let go.
+//!
+//! This is the logic of `/dev/console`, so it lives in `Fs`: it needs the
+//! scheduler to wait, and `Drivers` sits below it.
 //!
 //! A reader may give a token (`readAs`, `readLineAs`); `cancel` with that
 //! token makes its read end at once with 0 bytes. The kernel uses it to stop
@@ -44,13 +47,13 @@
 //! new line is longer than its buffer, is the rest of the new line dropped.
 
 import Arch from "@arch";
+import Drivers from "@drivers";
 import Lib from "@lib";
-import _ from "./console";
-import _ from "./keyboard";
+import Sched from "@sched";
 
 /// The line `read` hands out.
 record TtyState {
-  /// The line. The size must equal `Drivers::Tty::LINE_CAPACITY`.
+  /// The line. The size must equal `Fs::Tty::LINE_CAPACITY`.
   static mut line: u8[256];
 
   /// Its length, newline included.
@@ -63,13 +66,19 @@ record TtyState {
   static mut busy: boolean = false;
 
   /// One flag per token, 1 when the read of that reader must end at once
-  /// (`Drivers::Tty::cancel`). Token 0 is the kernel terminal, which is
-  /// never cancelled. The size must be `MAX_TOKENS`.
+  /// (`Fs::Tty::cancel`). Token 0 is the kernel terminal, which is never
+  /// cancelled. The size must be `MAX_TOKENS`.
   static mut cancelled: u8[65];
+
+  /// Guards every field above.
+  static mut lock: Arch::SpinLock;
+
+  /// Readers waiting for a key, for the line to be free, or for a cancel.
+  static mut waiters: Sched::WaitQueue;
 }
 
 /// The line input API.
-namespace Drivers::Tty {
+namespace Fs::Tty {
   /// Bytes of the line `read` keeps.
   const LINE_CAPACITY: u64 = 256;
 
@@ -105,51 +114,48 @@ namespace Drivers::Tty {
   /// `readLine` for the reader `token`, which `cancel` can stop: the read
   /// then ends at once with 0 bytes, and the keys typed so far stay unread.
   function readLineAs(buffer: *mut u8, capacity: u64, token: u64): u64 {
-    let saved: u64 = Arch::Cpu::saveAndDisableInterrupts();
+    Arch::Spin::lockIrq(ttyLock());
 
     while (TtyState::busy) {
       if (takeCancel(token)) {
-        Arch::Cpu::restoreInterrupts(saved);
+        Arch::Spin::unlockIrq(ttyLock());
         return 0;
       }
 
-      Arch::Cpu::waitForInterrupt();
-      Arch::Cpu::disableInterrupts();
+      Sched::Wait::sleepOn(waitQueue(), ttyLock());
     }
 
     TtyState::busy = true;
 
     let mut length: u64 = 0;
+    let mut finished: boolean = false;
 
-    while (true) {
-      Arch::Cpu::disableInterrupts();
-
+    while (!finished) {
       if (takeCancel(token)) {
         length = 0;
         break;
       }
 
       if (Lib::ScancodeQueue::isEmpty()) {
-        Arch::Cpu::waitForInterrupt();
+        Sched::Wait::sleepOn(waitQueue(), ttyLock());
         continue;
       }
 
-      Arch::Cpu::enableInterrupts();
+      // Only the busy reader pops, so the queue keeps its one consumer.
+      let scancode: u8 = Lib::ScancodeQueue::pop();
 
-      let character: u8 = Drivers::Keyboard::decode(Lib::ScancodeQueue::pop());
+      Arch::Spin::unlockIrq(ttyLock());
+
+      let character: u8 = Drivers::Keyboard::decode(scancode);
 
       if (character == NEWLINE) {
         Drivers::Console::writeChar(NEWLINE);
         *(buffer + length) = NEWLINE;
         length += 1;
-        break;
-      }
-
-      if (character == END_OF_INPUT) {
-        break;
-      }
-
-      if (character == BACKSPACE) {
+        finished = true;
+      } else if (character == END_OF_INPUT) {
+        finished = true;
+      } else if (character == BACKSPACE) {
         if (length > 0) {
           length -= 1;
           Drivers::Console::writeChar(BACKSPACE);
@@ -159,11 +165,13 @@ namespace Drivers::Tty {
         length += 1;
         Drivers::Console::writeChar(character);
       }
+
+      Arch::Spin::lockIrq(ttyLock());
     }
 
-    Arch::Cpu::disableInterrupts();
     TtyState::busy = false;
-    Arch::Cpu::restoreInterrupts(saved);
+    Sched::Wait::wakeAll(waitQueue());
+    Arch::Spin::unlockIrq(ttyLock());
 
     return length;
   }
@@ -183,7 +191,11 @@ namespace Drivers::Tty {
       return;
     }
 
+    Arch::Spin::lockIrq(ttyLock());
+
     if (TtyState::position >= TtyState::length) {
+      Arch::Spin::unlockIrq(ttyLock());
+
       // Edit into a buffer of this reader: another reader may wait in
       // `readLine` meanwhile, and the shared line must not change under it.
       let mut fresh: u8[256];
@@ -194,7 +206,10 @@ namespace Drivers::Tty {
         return;
       }
 
+      Arch::Spin::lockIrq(ttyLock());
+
       if (TtyState::position < TtyState::length) {
+        Arch::Spin::unlockIrq(ttyLock());
         Lib::Mem::copy(buffer, (&mut fresh as *u8), length < count ? length : count);
         *done = length < count ? length : count;
         return;
@@ -211,6 +226,7 @@ namespace Drivers::Tty {
     Lib::Mem::copy(buffer, (&mut TtyState::line as *u8) + TtyState::position, copied);
     TtyState::position += copied;
     *done = copied;
+    Arch::Spin::unlockIrq(ttyLock());
   }
 
   /// Ends the read of `token` at once: the reader's `readAs` returns 0 bytes
@@ -218,7 +234,10 @@ namespace Drivers::Tty {
   /// it waits; `forget` withdraws a cancel nobody collected.
   function cancel(token: u64): void {
     if (token != NO_TOKEN && token < MAX_TOKENS) {
+      Arch::Spin::lockIrq(ttyLock());
       *flagOf(token) = 1;
+      Sched::Wait::wakeAll(waitQueue());
+      Arch::Spin::unlockIrq(ttyLock());
     }
   }
 
@@ -226,13 +245,29 @@ namespace Drivers::Tty {
   /// later reader with the same token is not stopped by it.
   function forget(token: u64): void {
     if (token < MAX_TOKENS) {
+      Arch::Spin::lockIrq(ttyLock());
       *flagOf(token) = 0;
+      Arch::Spin::unlockIrq(ttyLock());
     }
+  }
+
+  /// Wakes the readers after the keyboard interrupt queued scancodes. The
+  /// trap dispatcher calls it after IRQ1, with interrupts off.
+  function keysArrived(): void {
+    Arch::Spin::lockIrq(ttyLock());
+    Sched::Wait::wakeAll(waitQueue());
+    Arch::Spin::unlockIrq(ttyLock());
+  }
+
+  /// Sets up the lock. `Fs::Vfs::initialize` calls it, before any reader or
+  /// keyboard interrupt.
+  function initialize(): void {
+    Arch::Spin::initialize(ttyLock(), Lib::Rank::WAIT_QUEUE);
   }
 
   /// True, and the flag cleared, when the read of `token` was cancelled.
   /// Each token has its own flag, so cancelling one reader never undoes the
-  /// cancel of another.
+  /// cancel of another. The lock is held.
   function takeCancel(token: u64): boolean {
     if (token == NO_TOKEN || token >= MAX_TOKENS || *flagOf(token) == 0) {
       return false;
@@ -241,6 +276,16 @@ namespace Drivers::Tty {
     *flagOf(token) = 0;
 
     return true;
+  }
+
+  /// `TtyState::lock`.
+  function ttyLock(): *mut Arch::SpinLock {
+    return &mut TtyState::lock as *mut Arch::SpinLock;
+  }
+
+  /// `TtyState::waiters`.
+  function waitQueue(): *mut Sched::WaitQueue {
+    return &mut TtyState::waiters as *mut Sched::WaitQueue;
   }
 
   /// The cancel flag of `token`.

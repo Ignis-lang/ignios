@@ -12,7 +12,8 @@
 //!   Trap::dispatch(frame)
 //!   │
 //!   ├─ vector 0xFF  local APIC spurious ......... return, no EOI
-//!   ├─ vector 0x21  keyboard (IOAPIC) ........... Drivers::Ps2::handleInterrupt, Apic EOI
+//!   ├─ vector 0x21  keyboard (IOAPIC) ........... Drivers::Ps2::handleInterrupt, Apic EOI,
+//!   │                                             Fs::Tty::keysArrived (wakes readers)
 //!   ├─ vector 0x30  local APIC timer ............ Time::Timer::handleTick, Apic EOI,
 //!   │                                             Sched::Scheduler::onTick (may switch threads)
 //!   ├─ vectors 0x20-0x2F (the rest)  8259 ....... acknowledge or absorb a spurious one
@@ -43,6 +44,7 @@
 import Apic from "@apic";
 import Arch from "@arch";
 import Drivers from "@drivers";
+import Fs from "@fs";
 import Sched from "@sched";
 import Time from "@time";
 import _ from "./exception";
@@ -109,6 +111,7 @@ namespace Trap {
     if (vector == KEYBOARD_VECTOR) {
       Drivers::Ps2::handleInterrupt();
       Apic::Lapic::endOfInterrupt();
+      Fs::Tty::keysArrived();
       return;
     }
 

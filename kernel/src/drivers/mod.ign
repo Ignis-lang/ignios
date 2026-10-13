@@ -15,7 +15,6 @@
 //! | `Drivers::FontData` | `font_8x16.ign` | the generated glyph table (`make font`)                  |
 //! | `Drivers::Ps2`      | `ps2.ign`       | 8042 controller setup and the IRQ1 handler               |
 //! | `Drivers::Keyboard` | `keyboard.ign`  | scancode set 1 to ASCII decoding                         |
-//! | `Drivers::Tty`      | `tty.ign`       | line editing: echo, Backspace, Enter, Ctrl+D             |
 //!
 //! ## Dependencies
 //!
@@ -33,7 +32,6 @@ import _ from "./font";
 import _ from "./keyboard";
 import _ from "./ps2";
 import _ from "./serial";
-import _ from "./tty";
 
 /// Aggregate namespace of the device drivers. The files above contribute the
 /// sub-namespaces listed in the module header.
