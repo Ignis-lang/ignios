@@ -45,8 +45,32 @@ namespace Tests::Vfs {
     }
 
     checkCopyOnWrite();
+    checkPins();
 
-    Drivers::Console::writeLine("vfs: self-test ok, lookup, create, read, write, truncate, remove and copy on write");
+    Drivers::Console::writeLine("vfs: self-test ok, lookup, create, read, write, truncate, remove, copy on write and pins");
+  }
+
+  /// A pinned file, which a program is being loaded from, refuses removal,
+  /// writes and truncation with `BUSY`, and allows them again once unpinned.
+  function checkPins(): void {
+    let root: *mut Fs::Node = Fs::Vfs::root();
+    let mut file: *mut Fs::Node = null;
+
+    expectStatus(Fs::Vfs::create(root, "p" as *u8, 1, Fs::Vfs::FILE, Fs::Vfs::FILE_MODE, &mut file as *mut *mut Fs::Node), Fs::Vfs::OK, "create /p");
+    expectStatus(Fs::Vfs::write(file, 0, "xy" as *u8, 2), Fs::Vfs::OK, "write /p");
+
+    Fs::Vfs::pin(file);
+    expectStatus(Fs::Files::remove(root, "/p" as *u8, 2, false), Fs::Vfs::BUSY, "remove pinned /p");
+    expectStatus(Fs::Vfs::write(file, 0, "z" as *u8, 1), Fs::Vfs::BUSY, "write pinned /p");
+    expectStatus(Fs::Vfs::truncate(file, 0), Fs::Vfs::BUSY, "truncate pinned /p");
+
+    if ((*file).size != 2 || *(*file).data != 0x78) {
+      @panic("vfs self-test: a pinned file changed");
+    }
+
+    Fs::Vfs::unpin(file);
+    expectStatus(Fs::Vfs::truncate(file, 0), Fs::Vfs::OK, "truncate unpinned /p");
+    expectStatus(Fs::Files::remove(root, "/p" as *u8, 2, false), Fs::Vfs::OK, "remove unpinned /p");
   }
 
   /// Path rules on the seeded tree.

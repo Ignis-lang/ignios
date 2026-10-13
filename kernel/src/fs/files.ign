@@ -171,6 +171,17 @@ namespace Fs::Files {
   /// Points descriptors 0, 1 and 2 of `table` at one console open file,
   /// readable and writable. The table must be empty. Returns `NO_MEMORY`.
   function openStandard(table: u64): u64 {
+    Fs::Vfs::lock();
+
+    let result: u64 = openStandardLocked(table);
+
+    Fs::Vfs::unlock();
+
+    return result;
+  }
+
+  /// The body of `openStandard`, with the VFS lock held.
+  function openStandardLocked(table: u64): u64 {
     if (table >= MAX_TABLES) {
       return Fs::Vfs::INVALID;
     }
@@ -182,7 +193,7 @@ namespace Fs::Files {
     let file: *mut Fs::OpenFile = newOpenFile(CONSOLE, null, READ | WRITE);
 
     if (file == null) {
-      closeAll(table);
+      closeAllLocked(table);
       return Fs::Vfs::NO_MEMORY;
     }
 
@@ -196,6 +207,13 @@ namespace Fs::Files {
 
   /// Closes every descriptor of `table`.
   function closeAll(table: u64): void {
+    Fs::Vfs::lock();
+    closeAllLocked(table);
+    Fs::Vfs::unlock();
+  }
+
+  /// The body of `closeAll`, with the VFS lock held.
+  function closeAllLocked(table: u64): void {
     if (table >= MAX_TABLES) {
       return;
     }
@@ -206,7 +224,7 @@ namespace Fs::Files {
     let mut descriptor: u64 = 0;
 
     while (descriptor < *capacityPointer(table)) {
-      close(table, descriptor);
+      closeLocked(table, descriptor);
       descriptor += 1;
     }
 
@@ -254,6 +272,25 @@ namespace Fs::Files {
   /// with `/`, `NO_MEMORY`, and `BAD_DESCRIPTOR` for a `table` that is not a
   /// process slot.
   function open(
+    table: u64,
+    base: *mut Fs::Node,
+    path: *u8,
+    length: u64,
+    flags: u64,
+    mode: u64,
+    descriptor: *mut u64
+  ): u64 {
+    Fs::Vfs::lock();
+
+    let result: u64 = openLocked(table, base, path, length, flags, mode, descriptor);
+
+    Fs::Vfs::unlock();
+
+    return result;
+  }
+
+  /// The body of `open`, with the VFS lock held.
+  function openLocked(
     table: u64,
     base: *mut Fs::Node,
     path: *u8,
@@ -325,6 +362,17 @@ namespace Fs::Files {
   /// Frees `descriptor`, and its open file when no other descriptor points
   /// to it. Returns `BAD_DESCRIPTOR` when it is not open.
   function close(table: u64, descriptor: u64): u64 {
+    Fs::Vfs::lock();
+
+    let result: u64 = closeLocked(table, descriptor);
+
+    Fs::Vfs::unlock();
+
+    return result;
+  }
+
+  /// The body of `close`, with the VFS lock held.
+  function closeLocked(table: u64, descriptor: u64): u64 {
     let file: *mut Fs::OpenFile = get(table, descriptor);
 
     if (file == null) {
@@ -359,11 +407,15 @@ namespace Fs::Files {
       return Fs::Vfs::OK;
     }
 
+    Fs::Vfs::lock();
+
     let status: u64 = Fs::Vfs::read((*file).node, (*file).offset, buffer, count, done);
 
     if (status == Fs::Vfs::OK) {
       (*file).offset += *done;
     }
+
+    Fs::Vfs::unlock();
 
     return status;
   }
@@ -391,20 +443,22 @@ namespace Fs::Files {
       return Fs::Vfs::OK;
     }
 
+    Fs::Vfs::lock();
+
     if (((*file).flags & APPEND) != 0) {
       (*file).offset = (*(*file).node).size;
     }
 
     let status: u64 = Fs::Vfs::write((*file).node, (*file).offset, source, count);
 
-    if (status != Fs::Vfs::OK) {
-      return status;
+    if (status == Fs::Vfs::OK) {
+      (*file).offset += count;
+      *done = count;
     }
 
-    (*file).offset += count;
-    *done = count;
+    Fs::Vfs::unlock();
 
-    return Fs::Vfs::OK;
+    return status;
   }
 
   /// Moves the offset of `descriptor` to `offset` (a signed value in two's
@@ -429,7 +483,9 @@ namespace Fs::Files {
     if (whence == SEEK_CURRENT) {
       origin = (*file).offset;
     } else if (whence == SEEK_END) {
+      Fs::Vfs::lock();
       origin = (*(*file).node).size;
+      Fs::Vfs::unlock();
     } else if (whence != SEEK_SET) {
       return Fs::Vfs::INVALID;
     }
@@ -454,6 +510,17 @@ namespace Fs::Files {
   /// `/`, `NOT_EMPTY`, and `BUSY` when a descriptor has the node open: an
   /// open file points at its node, which must stay alive.
   function remove(base: *mut Fs::Node, path: *u8, length: u64, directory: boolean): u64 {
+    Fs::Vfs::lock();
+
+    let result: u64 = removeLocked(base, path, length, directory);
+
+    Fs::Vfs::unlock();
+
+    return result;
+  }
+
+  /// The body of `remove`, with the VFS lock held.
+  function removeLocked(base: *mut Fs::Node, path: *u8, length: u64, directory: boolean): u64 {
     let mut parent: *mut Fs::Node = null;
     let mut nameOffset: u64 = 0;
     let mut nameLength: u64 = 0;
@@ -490,9 +557,13 @@ namespace Fs::Files {
     return Fs::Vfs::remove(node);
   }
 
-  /// True when a descriptor of any process points at `node`, or `node` is a
-  /// process's current directory.
+  /// True when a descriptor of any process points at `node`, `node` is a
+  /// process's current directory, or it is pinned. The VFS lock is held.
   function isOpen(node: *mut Fs::Node): boolean {
+    if ((*node).pins > 0) {
+      return true;
+    }
+
     let mut table: u64 = 0;
 
     while (table < MAX_TABLES) {
@@ -645,6 +716,13 @@ namespace Fs::Files {
   /// Makes `directory`, which must be a directory, the current directory of
   /// `table`.
   function setCurrentDirectory(table: u64, directory: *mut Fs::Node): void {
+    Fs::Vfs::lock();
+    setCurrentDirectoryLocked(table, directory);
+    Fs::Vfs::unlock();
+  }
+
+  /// The body of `setCurrentDirectory`, with the VFS lock held.
+  function setCurrentDirectoryLocked(table: u64, directory: *mut Fs::Node): void {
     if (table < MAX_TABLES) {
       *directoryPointer(table) = @integerFromPointer(directory);
     }
@@ -654,6 +732,17 @@ namespace Fs::Files {
   /// of `path` name, relative to `base`. Returns the lookup codes and
   /// `NOT_DIRECTORY` for anything that is not a directory.
   function changeDirectory(table: u64, base: *mut Fs::Node, path: *u8, length: u64): u64 {
+    Fs::Vfs::lock();
+
+    let result: u64 = changeDirectoryLocked(table, base, path, length);
+
+    Fs::Vfs::unlock();
+
+    return result;
+  }
+
+  /// The body of `changeDirectory`, with the VFS lock held.
+  function changeDirectoryLocked(table: u64, base: *mut Fs::Node, path: *u8, length: u64): u64 {
     if (length == 0) {
       return Fs::Vfs::NOT_FOUND;
     }
@@ -669,7 +758,7 @@ namespace Fs::Files {
       return Fs::Vfs::NOT_DIRECTORY;
     }
 
-    setCurrentDirectory(table, node);
+    setCurrentDirectoryLocked(table, node);
 
     return Fs::Vfs::OK;
   }

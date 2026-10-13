@@ -218,6 +218,17 @@ namespace Syscall::Linux {
 
   /// `fstat(fd, statbuf)`.
   function stat(descriptor: u64, buffer: u64): u64 {
+    Fs::Vfs::lock();
+
+    let result: u64 = statLocked(descriptor, buffer);
+
+    Fs::Vfs::unlock();
+
+    return result;
+  }
+
+  /// The body of `stat`, with the VFS lock held.
+  function statLocked(descriptor: u64, buffer: u64): u64 {
     let file: *mut Fs::OpenFile = Fs::Files::get(Proc::Process::currentSlot(), descriptor);
 
     if (file == null) {
@@ -230,6 +241,17 @@ namespace Syscall::Linux {
   /// `newfstatat(dirfd, path, statbuf, flags)`. With `AT_EMPTY_PATH` an empty
   /// path describes `dirfd` itself, which may be any open descriptor.
   function statAt(directory: u64, path: u64, buffer: u64, flags: u64): u64 {
+    Fs::Vfs::lock();
+
+    let result: u64 = statAtLocked(directory, path, buffer, flags);
+
+    Fs::Vfs::unlock();
+
+    return result;
+  }
+
+  /// The body of `statAt`, with the VFS lock held.
+  function statAtLocked(directory: u64, path: u64, buffer: u64, flags: u64): u64 {
     let table: u64 = Proc::Process::currentSlot();
     let root: u64 = Proc::Process::currentRoot();
     let length: u64 = Mm::AddressSpace::copyStringFromUser(root, pathBuffer(), path, Fs::Vfs::PATH_MAX);
@@ -239,7 +261,7 @@ namespace Syscall::Linux {
     }
 
     if (length == 0 && (flags & AT_EMPTY_PATH) != 0) {
-      return stat(directory, buffer);
+      return statLocked(directory, buffer);
     }
 
     let mut base: *mut Fs::Node = null;
@@ -269,6 +291,17 @@ namespace Syscall::Linux {
   /// bytes written: 0 at the end. A buffer too small for the next record is
   /// `-EINVAL`.
   function readDirectory(descriptor: u64, buffer: u64, count: u64): u64 {
+    Fs::Vfs::lock();
+
+    let result: u64 = readDirectoryLocked(descriptor, buffer, count);
+
+    Fs::Vfs::unlock();
+
+    return result;
+  }
+
+  /// The body of `readDirectory`, with the VFS lock held.
+  function readDirectoryLocked(descriptor: u64, buffer: u64, count: u64): u64 {
     let root: u64 = Proc::Process::currentRoot();
     let file: *mut Fs::OpenFile = Fs::Files::get(Proc::Process::currentSlot(), descriptor);
 
@@ -356,6 +389,17 @@ namespace Syscall::Linux {
   /// bytes written, NUL included, as the Linux system call does. A buffer
   /// too small is `-ERANGE`.
   function currentDirectory(buffer: u64, size: u64): u64 {
+    Fs::Vfs::lock();
+
+    let result: u64 = currentDirectoryLocked(buffer, size);
+
+    Fs::Vfs::unlock();
+
+    return result;
+  }
+
+  /// The body of `currentDirectory`, with the VFS lock held.
+  function currentDirectoryLocked(buffer: u64, size: u64): u64 {
     let mut length: u64 = 0;
     let node: *mut Fs::Node = Fs::Files::currentDirectory(Proc::Process::currentSlot());
 
@@ -400,6 +444,17 @@ namespace Syscall::Linux {
 
   /// `mkdirat(dirfd, path, mode)`.
   function makeDirectoryAt(directory: u64, path: u64, mode: u64): u64 {
+    Fs::Vfs::lock();
+
+    let result: u64 = makeDirectoryAtLocked(directory, path, mode);
+
+    Fs::Vfs::unlock();
+
+    return result;
+  }
+
+  /// The body of `makeDirectoryAt`, with the VFS lock held.
+  function makeDirectoryAtLocked(directory: u64, path: u64, mode: u64): u64 {
     let table: u64 = Proc::Process::currentSlot();
     let mut base: *mut Fs::Node = null;
     let mut length: u64 = 0;

@@ -20,6 +20,7 @@
 //! | wait queue         | three threads sleep on a queue; an interrupt (what `kill` does) does not wake them; `wakeAll` wakes all three |
 //! | scratch            | two threads fill their system call scratch areas, yield, and find their own bytes |
 //! | wake tokens        | a wake sent before a park, and an interrupt sent before a 10000 s sleep, end the wait at once |
+//! | VFS lock           | a file operation started while another thread holds the VFS lock waits for it |
 //!
 //! The mutual exclusion check stretches each critical section past a time
 //! slice, so a tick that would switch threads falls inside it: without the
@@ -30,6 +31,7 @@
 
 import Arch from "@arch";
 import Drivers from "@drivers";
+import Fs from "@fs";
 import Lib from "@lib";
 import Sched from "@sched";
 import Time from "@time";
@@ -75,6 +77,9 @@ record LocksTestState {
 
   /// Set by the token worker once its wait returned.
   static mut tokenDone: u64;
+
+  /// Set by the VFS worker once its file operation returned.
+  static mut vfsDone: u64;
 
   /// 1 when the contender was allowed to release the holder's mutex.
   static mut contenderCouldUnlock: u64;
@@ -144,6 +149,7 @@ namespace Tests::Locks {
     checkWaitQueue();
     checkScratch();
     checkTokens();
+    checkVfsLock();
 
     // The checks turned interrupts on. `restoreInterrupts` only turns them
     // back on when they were on, so they go off first.
@@ -156,6 +162,38 @@ namespace Tests::Locks {
     Drivers::Console::writeLine("locks: mutex and wait queue self-test ok, a contender slept until the holder was done, three waiters woke together and a kill did not wake them");
     Drivers::Console::writeLine("locks: scratch self-test ok, two threads kept their own system call scratch across switches");
     Drivers::Console::writeLine("locks: wake token self-test ok, a wake before a park and a kill before a 10000 s sleep were not lost");
+    Drivers::Console::writeLine("locks: vfs self-test ok, a file operation waited while another thread held the VFS lock");
+  }
+
+  /// Holds the VFS lock while a helper thread removes a file: the helper
+  /// must not finish until the lock is let go.
+  function checkVfsLock(): void {
+    LocksTestState::vfsDone = 0;
+    Fs::Vfs::lock();
+
+    let worker: u64 = Sched::Scheduler::spawn(Arch::ContextAsm::ignis_function_address(vfsWorker), 0);
+
+    Sched::Scheduler::sleep(5);
+
+    let doneWhileHeld: u64 = @readVolatile<u64>(&mut LocksTestState::vfsDone as *mut u64);
+
+    Fs::Vfs::unlock();
+    Sched::Scheduler::join(worker);
+
+    if (doneWhileHeld != 0 || LocksTestState::vfsDone != 1) {
+      @panic("locks self-test: a file operation ran while another thread held the VFS lock");
+    }
+  }
+
+  /// Removes a file that does not exist, which takes the VFS lock.
+  function vfsWorker(argument: u64): void {
+    let status: u64 = Fs::Files::remove(Fs::Vfs::root(), "/no-such-file" as *u8, 13, false);
+
+    if (status != Fs::Vfs::NOT_FOUND) {
+      @panic("locks self-test: the VFS worker's remove failed");
+    }
+
+    @writeVolatile<u64>(&mut LocksTestState::vfsDone as *mut u64, 1);
   }
 
   /// A wake that lands before the park, and an interrupt (what `kill` does)

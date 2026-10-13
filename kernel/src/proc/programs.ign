@@ -23,7 +23,6 @@
 //! it. The lookup and the start run with interrupts off, because the file
 //! tree has no locks: no process can change the file while it is being read.
 
-import Arch from "@arch";
 import Drivers from "@drivers";
 import Fs from "@fs";
 import Lib from "@lib";
@@ -141,20 +140,34 @@ namespace Proc::Programs {
       Lib::Mem::copy(path + BIN_PREFIX_LENGTH, strings, nameLength);
     }
 
-    let saved: u64 = Arch::Cpu::saveAndDisableInterrupts();
     let mut node: *mut Fs::Node = null;
-    let status: u64 = Fs::Vfs::lookup(Fs::Vfs::root(), path as *u8, pathLength, &mut node as *mut *mut Fs::Node);
     let mut id: u64 = Proc::Process::NO_PROCESS;
+
+    Fs::Vfs::lock();
+
+    let status: u64 = Fs::Vfs::lookup(Fs::Vfs::root(), path as *u8, pathLength, &mut node as *mut *mut Fs::Node);
+    let isFile: boolean = status == Fs::Vfs::OK && (*node).kind == Fs::Vfs::FILE;
+
+    if (isFile) {
+      Fs::Vfs::pin(node);
+    }
+
+    Fs::Vfs::unlock();
 
     if (status != Fs::Vfs::OK) {
       reportPath(path as *u8, pathLength, Fs::Vfs::describe(status));
-    } else if ((*node).kind != Fs::Vfs::FILE) {
+    } else if (!isFile) {
       reportPath(path as *u8, pathLength, "not a regular file");
     } else {
+      // Loaded with the VFS lock let go, as `spawn` does: starting the
+      // process takes the process table lock, which ranks below it.
       id = Proc::Process::startElf((*node).data as *u8, (*node).size, strings, stringBytes, count, Fs::Vfs::root());
+
+      Fs::Vfs::lock();
+      Fs::Vfs::unpin(node);
+      Fs::Vfs::unlock();
     }
 
-    Arch::Cpu::restoreInterrupts(saved);
     Mm::Heap::free(path);
 
     return id;

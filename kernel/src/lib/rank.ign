@@ -20,7 +20,7 @@
 //!   anything ──► console (90) ──► serial (91)        printing
 //!
 //!   mutexes
-//!   process table (10) ──► descriptor table (20) ──► VFS (30) ──► address space (40)
+//!   process table (10) ──► VFS (30) ──► address space (40)
 //! ```
 //!
 //! Gaps are left so a new lock fits between two existing ones.
@@ -57,10 +57,9 @@ namespace Lib::MutexRank {
   /// The process table.
   const PROCESS_TABLE: u64 = 10;
 
-  /// A process's descriptor table.
-  const DESCRIPTORS: u64 = 20;
-
-  /// The whole VFS tree.
+  /// The whole VFS tree, every descriptor table and every current directory.
+  /// A per-process descriptor lock would rank between the two once processes
+  /// have several threads.
   const VFS: u64 = 30;
 
   /// A process's address space and region table.

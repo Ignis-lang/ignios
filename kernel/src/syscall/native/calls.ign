@@ -232,6 +232,17 @@ namespace Syscall::Native {
 
   /// `INFO(descriptor, record)`.
   function info(descriptor: u64, buffer: u64): u64 {
+    Fs::Vfs::lock();
+
+    let result: u64 = infoLocked(descriptor, buffer);
+
+    Fs::Vfs::unlock();
+
+    return result;
+  }
+
+  /// The body of `info`, with the VFS lock held.
+  function infoLocked(descriptor: u64, buffer: u64): u64 {
     let file: *mut Fs::OpenFile = Fs::Files::get(Proc::Process::currentSlot(), descriptor);
 
     if (file == null) {
@@ -243,6 +254,17 @@ namespace Syscall::Native {
 
   /// `INFO_AT(directory, path, length, record)`.
   function infoAt(directory: u64, path: u64, length: u64, buffer: u64): u64 {
+    Fs::Vfs::lock();
+
+    let result: u64 = infoAtLocked(directory, path, length, buffer);
+
+    Fs::Vfs::unlock();
+
+    return result;
+  }
+
+  /// The body of `infoAt`, with the VFS lock held.
+  function infoAtLocked(directory: u64, path: u64, length: u64, buffer: u64): u64 {
     let mut base: *mut Fs::Node = null;
     let status: u64 = resolve(Proc::Process::currentSlot(), directory, path, length, &mut base as *mut *mut Fs::Node);
 
@@ -262,6 +284,17 @@ namespace Syscall::Native {
 
   /// `READ_ENTRY(descriptor, buffer, capacity)`.
   function readEntry(descriptor: u64, buffer: u64, capacity: u64, written: *mut u64): u64 {
+    Fs::Vfs::lock();
+
+    let result: u64 = readEntryLocked(descriptor, buffer, capacity, written);
+
+    Fs::Vfs::unlock();
+
+    return result;
+  }
+
+  /// The body of `readEntry`, with the VFS lock held.
+  function readEntryLocked(descriptor: u64, buffer: u64, capacity: u64, written: *mut u64): u64 {
     let file: *mut Fs::OpenFile = Fs::Files::get(Proc::Process::currentSlot(), descriptor);
 
     if (file == null) {
@@ -304,6 +337,17 @@ namespace Syscall::Native {
 
   /// `MAKE_DIRECTORY(directory, path, length, mode)`.
   function makeDirectory(directory: u64, path: u64, length: u64, mode: u64): u64 {
+    Fs::Vfs::lock();
+
+    let result: u64 = makeDirectoryLocked(directory, path, length, mode);
+
+    Fs::Vfs::unlock();
+
+    return result;
+  }
+
+  /// The body of `makeDirectory`, with the VFS lock held.
+  function makeDirectoryLocked(directory: u64, path: u64, length: u64, mode: u64): u64 {
     let mut base: *mut Fs::Node = null;
     let status: u64 = resolve(Proc::Process::currentSlot(), directory, path, length, &mut base as *mut *mut Fs::Node);
 
@@ -351,6 +395,37 @@ namespace Syscall::Native {
     }
 
     let table: u64 = Proc::Process::currentSlot();
+    let mut node: *mut Fs::Node = null;
+
+    Fs::Vfs::lock();
+
+    let status: u64 = findProgram(table, path, length, &mut node as *mut *mut Fs::Node);
+
+    if (status == Fs::Vfs::OK) {
+      Fs::Vfs::pin(node);
+    }
+
+    Fs::Vfs::unlock();
+
+    if (status != Fs::Vfs::OK) {
+      return status;
+    }
+
+    // The program is loaded with the VFS lock let go: starting a process
+    // takes the process table lock, which ranks below it. The pin keeps the
+    // file from being removed or written meanwhile.
+    let result: u64 = spawnPinned(node, arguments, argumentBytes, argumentCount, table, id);
+
+    Fs::Vfs::lock();
+    Fs::Vfs::unpin(node);
+    Fs::Vfs::unlock();
+
+    return result;
+  }
+
+  /// Finds the regular file that the user path names for `spawn`. The VFS
+  /// lock is held.
+  function findProgram(table: u64, path: u64, length: u64, node: *mut *mut Fs::Node): u64 {
     let mut base: *mut Fs::Node = null;
     let status: u64 = resolve(table, CURRENT, path, length, &mut base as *mut *mut Fs::Node);
 
@@ -358,17 +433,29 @@ namespace Syscall::Native {
       return status;
     }
 
-    let mut node: *mut Fs::Node = null;
-    let found: u64 = Fs::Vfs::lookup(base, pathBuffer() as *u8, length, &mut node as *mut *mut Fs::Node);
+    let found: u64 = Fs::Vfs::lookup(base, pathBuffer() as *u8, length, node);
 
     if (found != Fs::Vfs::OK) {
       return found;
     }
 
-    if ((*node).kind != Fs::Vfs::FILE) {
-      return (*node).kind == Fs::Vfs::DIRECTORY ? Fs::Vfs::IS_DIRECTORY : Fs::Vfs::INVALID;
+    if ((**node).kind != Fs::Vfs::FILE) {
+      return (**node).kind == Fs::Vfs::DIRECTORY ? Fs::Vfs::IS_DIRECTORY : Fs::Vfs::INVALID;
     }
 
+    return Fs::Vfs::OK;
+  }
+
+  /// The rest of `spawn`, with `node` pinned: copies the arguments and
+  /// starts the program.
+  function spawnPinned(
+    node: *mut Fs::Node,
+    arguments: u64,
+    argumentBytes: u64,
+    argumentCount: u64,
+    table: u64,
+    id: *mut u64
+  ): u64 {
     let strings: *mut u8 = Mm::Heap::allocate(argumentBytes, 16);
 
     if (strings == null) {
@@ -494,6 +581,17 @@ namespace Syscall::Native {
   /// `CURRENT_DIRECTORY(buffer, capacity)`: the absolute path, no NUL. A
   /// buffer too small is `INVALID`.
   function currentDirectory(buffer: u64, capacity: u64, written: *mut u64): u64 {
+    Fs::Vfs::lock();
+
+    let result: u64 = currentDirectoryLocked(buffer, capacity, written);
+
+    Fs::Vfs::unlock();
+
+    return result;
+  }
+
+  /// The body of `currentDirectory`, with the VFS lock held.
+  function currentDirectoryLocked(buffer: u64, capacity: u64, written: *mut u64): u64 {
     let mut length: u64 = 0;
     let node: *mut Fs::Node = Fs::Files::currentDirectory(Proc::Process::currentSlot());
 
