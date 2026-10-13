@@ -28,12 +28,37 @@
 import Fs from "@fs";
 import Mm from "@mm";
 import Proc from "@proc";
+import Sched from "@sched";
 
-/// The staging buffer of the transfers.
-record CoreState {
-  /// User bytes pass through here. The size must equal
-  /// `Syscall::Core::COPY_BUFFER_SIZE`.
-  static mut copyBuffer: u8[512];
+/// Where each kernel copy of a system call lives in the running thread's
+/// scratch area (`Sched::Scheduler::scratch`). A thread runs one system call
+/// at a time, so the Linux and native paths share one place.
+///
+/// ```text
+///   offset  bytes  use
+///        0   4096  PATH: a path copied from the user (Fs::Vfs::PATH_MAX)
+///     4096    144  STAT: one Linux struct stat
+///     4240    280  DIRENT: one Linux directory record
+///     4520    512  COPY: the staging buffer of read and write
+///     5032     32  SMALL: one native info record or entry header
+///     5064         end, within Sched::Thread::SCRATCH_BYTES
+/// ```
+namespace Syscall::Scratch {
+  const PATH: u64 = 0;
+  const STAT: u64 = 4096;
+  const DIRENT: u64 = 4240;
+  const COPY: u64 = 4520;
+  const SMALL: u64 = 5032;
+  const END: u64 = 5064;
+
+  /// The running thread's scratch bytes at `offset`.
+  function at(offset: u64): *mut u8 {
+    if (END > Sched::Thread::SCRATCH_BYTES) {
+      @panic("syscall: the scratch layout does not fit the thread's area");
+    }
+
+    return Sched::Scheduler::scratch() + offset;
+  }
 }
 
 /// The ABI-independent transfers.
@@ -54,7 +79,7 @@ namespace Syscall::Core {
   /// The most one `read` or `write` moves.
   const MAX_TRANSFER: u64 = 65536;
 
-  /// Bytes of `CoreState::copyBuffer`.
+  /// Bytes of the COPY part of the scratch area.
   const COPY_BUFFER_SIZE: u64 = 512;
 
   /// Reads up to `count` bytes from `descriptor` of the running process into
@@ -66,7 +91,7 @@ namespace Syscall::Core {
     let total: u64 = count < MAX_TRANSFER ? count : MAX_TRANSFER;
     let root: u64 = Proc::Process::currentRoot();
     let table: u64 = Proc::Process::currentSlot();
-    let chunk: *mut u8 = &mut CoreState::copyBuffer as *mut u8;
+    let chunk: *mut u8 = Syscall::Scratch::at(Syscall::Scratch::COPY);
 
     *done = 0;
 
@@ -114,7 +139,7 @@ namespace Syscall::Core {
     let total: u64 = count < MAX_TRANSFER ? count : MAX_TRANSFER;
     let root: u64 = Proc::Process::currentRoot();
     let table: u64 = Proc::Process::currentSlot();
-    let chunk: *mut u8 = &mut CoreState::copyBuffer as *mut u8;
+    let chunk: *mut u8 = Syscall::Scratch::at(Syscall::Scratch::COPY);
 
     *done = 0;
 

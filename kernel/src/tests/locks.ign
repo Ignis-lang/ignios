@@ -18,6 +18,7 @@
 //! `unlockAllowed`), so a broken predicate fails the test. The panics
 //! themselves cannot run at boot without stopping it.
 //! | wait queue         | three threads sleep on a queue; an interrupt (what `kill` does) does not wake them; `wakeAll` wakes all three |
+//! | scratch            | two threads fill their system call scratch areas, yield, and find their own bytes |
 //!
 //! The mutual exclusion check stretches each critical section past a time
 //! slice, so a tick that would switch threads falls inside it: without the
@@ -28,6 +29,7 @@
 
 import Arch from "@arch";
 import Drivers from "@drivers";
+import Lib from "@lib";
 import Sched from "@sched";
 import Time from "@time";
 
@@ -59,6 +61,13 @@ record LocksTestState {
 
   /// What the contender saw of `holderDone` once it had the mutex.
   static mut contenderSaw: u64;
+
+  /// Per scratch worker: 1 once its area still held its own pattern after
+  /// every round.
+  static mut scratchIntact: u64[2];
+
+  /// Per scratch worker: the address of its scratch area.
+  static mut scratchAddress: u64[2];
 
   /// 1 when the contender was allowed to release the holder's mutex.
   static mut contenderCouldUnlock: u64;
@@ -126,6 +135,7 @@ namespace Tests::Locks {
     checkMutualExclusion();
     checkMutex();
     checkWaitQueue();
+    checkScratch();
 
     // The checks turned interrupts on. `restoreInterrupts` only turns them
     // back on when they were on, so they go off first.
@@ -136,6 +146,63 @@ namespace Tests::Locks {
     Drivers::Console::writeDecimal(deferred);
     Drivers::Console::writeLine(" switches deferred while a lock was held, no lost update, rank order enforced");
     Drivers::Console::writeLine("locks: mutex and wait queue self-test ok, a contender slept until the holder was done, three waiters woke together and a kill did not wake them");
+    Drivers::Console::writeLine("locks: scratch self-test ok, two threads kept their own system call scratch across switches");
+  }
+
+  /// Two threads fill their scratch areas with different patterns, yield
+  /// between filling and checking, and check every byte: what a system call
+  /// that blocks halfway needs, since another thread runs system calls
+  /// meanwhile.
+  function checkScratch(): void {
+    let mut index: u64 = 0;
+
+    while (index < 2) {
+      *(&mut LocksTestState::scratchIntact as *mut u64 + index) = 0;
+      index += 1;
+    }
+
+    let first: u64 = Sched::Scheduler::spawn(Arch::ContextAsm::ignis_function_address(scratchWorker), 0);
+    let second: u64 = Sched::Scheduler::spawn(Arch::ContextAsm::ignis_function_address(scratchWorker), 1);
+
+    Sched::Scheduler::join(first);
+    Sched::Scheduler::join(second);
+
+    let intact: *mut u64 = &mut LocksTestState::scratchIntact as *mut u64;
+    let address: *mut u64 = &mut LocksTestState::scratchAddress as *mut u64;
+
+    if (*intact != 1 || *(intact + 1) != 1 || *address == *(address + 1)) {
+      @panic("locks self-test: two threads shared a system call scratch area");
+    }
+  }
+
+  /// Fills the running thread's scratch area with `0x40 + index`, yields,
+  /// and checks it, three times.
+  function scratchWorker(index: u64): void {
+    let area: *mut u8 = Sched::Scheduler::scratch();
+    let pattern: u8 = (0x40 + index) as u8;
+    let mut intact: u64 = 1;
+    let mut round: u64 = 0;
+
+    *(&mut LocksTestState::scratchAddress as *mut u64 + index) = @integerFromPointer(area);
+
+    while (round < 3) {
+      Lib::Mem::fill(area, pattern as i32, Sched::Thread::SCRATCH_BYTES);
+      Sched::Scheduler::yield();
+
+      let mut offset: u64 = 0;
+
+      while (offset < Sched::Thread::SCRATCH_BYTES) {
+        if (*(area + offset) != pattern) {
+          intact = 0;
+        }
+
+        offset += 1;
+      }
+
+      round += 1;
+    }
+
+    *(&mut LocksTestState::scratchIntact as *mut u64 + index) = intact;
   }
 
   /// `lockIrq` and `unlockIrq`.

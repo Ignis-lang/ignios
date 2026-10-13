@@ -120,7 +120,16 @@ namespace Sched::Thread {
 
     /// The highest rank of the mutexes this thread holds, 0 for none.
     public mutexTop: u64;
+
+    /// Heap address of the thread's `SCRATCH_BYTES` scratch area, which its
+    /// system calls use for the kernel copies of their arguments. Each
+    /// thread has its own, so a system call may block at any point while
+    /// another thread runs one.
+    public scratch: u64;
   }
+
+  /// Bytes of every thread's scratch area.
+  const SCRATCH_BYTES: u64 = 5120;
 
   /// Size of the thread table, the boot and idle threads included.
   const MAX_THREADS: u64 = 72;
@@ -286,12 +295,19 @@ namespace Sched::Thread {
   /// the slot free, when the stack cannot be mapped.
   function createThread(slot: u64, entry: u64, argument: u64, root: u64): boolean {
     let base: u64 = STACK_REGION + slot * STACK_SPAN;
+    let thread: *mut Control = slotPointer(slot);
+
+    if ((*thread).scratch == 0) {
+      (*thread).scratch = @integerFromPointer(Mm::Heap::allocate(SCRATCH_BYTES, 16));
+
+      if ((*thread).scratch == 0) {
+        return false;
+      }
+    }
 
     if (!mapStack(base)) {
       return false;
     }
-
-    let thread: *mut Control = slotPointer(slot);
 
     (*thread).id = ThreadState::nextId;
     (*thread).state = READY;
@@ -361,6 +377,11 @@ namespace Sched::Thread {
     return NO_THREAD;
   }
 
+  /// The scratch area of the thread in `slot`.
+  function scratchOf(slot: u64): *mut u8 {
+    return @pointerFromInteger<*mut u8>((*slotPointer(slot)).scratch);
+  }
+
   /// A pointer to the table entry of `slot`.
   function slotPointer(slot: u64): *mut Control {
     return tableBase() + slot;
@@ -383,6 +404,11 @@ namespace Sched::Thread {
 
     (*boot).id = 0;
     (*boot).state = RUNNING;
+    (*boot).scratch = @integerFromPointer(Mm::Heap::allocate(SCRATCH_BYTES, 16));
+
+    if ((*boot).scratch == 0) {
+      @panic("thread: no heap for the boot thread's scratch area");
+    }
     resetFpuArea(BOOT_SLOT);
 
     ThreadState::nextId = 1;

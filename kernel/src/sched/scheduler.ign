@@ -415,6 +415,8 @@ namespace Sched::Scheduler {
       (*thread).root = 0;
     }
 
+    // The scratch area stays with the slot and serves the next thread
+    // created in it.
     (*thread).state = Sched::Thread::UNUSED;
 
     wakeJoiners((*thread).id);
@@ -490,6 +492,12 @@ namespace Sched::Scheduler {
     if (Arch::Spin::holdsAny()) {
       @panic("scheduler: a thread tried to sleep or yield while holding a spinlock");
     }
+  }
+
+  /// The running thread's scratch area, `Sched::Thread::SCRATCH_BYTES` bytes
+  /// no other thread touches.
+  function scratch(): *mut u8 {
+    return Sched::Thread::scratchOf(SchedulerState::current);
   }
 
   /// The slot of the running thread.

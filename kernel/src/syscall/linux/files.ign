@@ -80,19 +80,6 @@ import Proc from "@proc";
 import _ from "../core";
 import _ from "./errno";
 
-/// The kernel buffers of the file calls. One is enough: system calls run
-/// with interrupts off on the only processor.
-record LinuxFilesState {
-  /// A path copied from the user. The size must equal `Fs::Vfs::PATH_MAX`.
-  static mut path: u8[4096];
-
-  /// One `struct stat`. The size must equal `STAT_SIZE`.
-  static mut stat: u8[144];
-
-  /// One directory record. The size must equal `DIRENT_CAPACITY`.
-  static mut dirent: u8[280];
-}
-
 /// The file system call handlers.
 namespace Syscall::Linux {
   /// `dirfd` of the `*at` calls meaning the current directory: -100.
@@ -298,7 +285,7 @@ namespace Syscall::Linux {
     }
 
     let directory: *mut Fs::Node = (*file).node;
-    let recordBytes: *mut u8 = &mut LinuxFilesState::dirent as *mut u8;
+    let recordBytes: *mut u8 = Syscall::Scratch::at(Syscall::Scratch::DIRENT);
     let mut written: u64 = 0;
 
     while (true) {
@@ -483,10 +470,10 @@ namespace Syscall::Linux {
     return Fs::Files::directoryOf(table, directory, base);
   }
 
-  /// Fills `LinuxFilesState::stat` for `node`, or for the console when
+  /// Fills the STAT part of the scratch area for `node`, or for the console when
   /// `node` is null, and copies it to the user address `buffer`.
   function writeStat(node: *mut Fs::Node, buffer: u64): u64 {
-    let stat: *mut u8 = &mut LinuxFilesState::stat as *mut u8;
+    let stat: *mut u8 = Syscall::Scratch::at(Syscall::Scratch::STAT);
     let mut kind: u64 = Fs::Vfs::DEVICE;
     let mut id: u64 = 0;
     let mut mode: u64 = Fs::Vfs::CONSOLE_MODE;
@@ -544,9 +531,10 @@ namespace Syscall::Linux {
     return (flags & linux) != 0 ? neutral : 0;
   }
 
-  /// The kernel copy of the current path.
+  /// The kernel copy of the current path, in the running thread's scratch
+  /// area.
   function pathBuffer(): *mut u8 {
-    return &mut LinuxFilesState::path as *mut u8;
+    return Syscall::Scratch::at(Syscall::Scratch::PATH);
   }
 
   /// Stores the 8-byte little-endian `value` at `offset` of `bytes`.

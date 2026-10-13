@@ -88,16 +88,6 @@ import _ from "../core";
 import _ from "../operation";
 import _ from "./status";
 
-/// The kernel buffers of the native calls. System calls run with interrupts
-/// off on the only processor, so one of each is enough.
-record NativeCallState {
-  /// A path copied from the user. The size must equal `Fs::Vfs::PATH_MAX`.
-  static mut path: u8[4096];
-
-  /// One info record or the header of a directory entry.
-  static mut scratch: u8[32];
-}
-
 /// The native handlers.
 namespace Syscall::Native {
   /// The directory argument meaning `/`.
@@ -296,7 +286,7 @@ namespace Syscall::Native {
     }
 
     let root: u64 = Proc::Process::currentRoot();
-    let header: *mut u8 = &mut NativeCallState::scratch as *mut u8;
+    let header: *mut u8 = Syscall::Scratch::at(Syscall::Scratch::SMALL);
 
     putWord(header, 0, (*child).kind);
     putWord(header, 8, (*child).id);
@@ -614,7 +604,7 @@ namespace Syscall::Native {
   /// Writes the info record of `node`, or of the console when `node` is
   /// null, to the user address `buffer`.
   function writeInfo(node: *mut Fs::Node, buffer: u64): u64 {
-    let scratch: *mut u8 = &mut NativeCallState::scratch as *mut u8;
+    let scratch: *mut u8 = Syscall::Scratch::at(Syscall::Scratch::SMALL);
 
     Lib::Mem::fill(scratch, 0, INFO_SIZE);
 
@@ -635,9 +625,10 @@ namespace Syscall::Native {
     return Fs::Vfs::OK;
   }
 
-  /// The kernel copy of the current path.
+  /// The kernel copy of the current path, in the running thread's scratch
+  /// area.
   function pathBuffer(): *mut u8 {
-    return &mut NativeCallState::path as *mut u8;
+    return Syscall::Scratch::at(Syscall::Scratch::PATH);
   }
 
   /// Stores the 8-byte `value` at `offset` of `bytes`.
