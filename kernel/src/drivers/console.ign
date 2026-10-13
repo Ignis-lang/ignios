@@ -68,8 +68,10 @@
 //!
 //! ## Concurrency
 //!
-//! Every public operation runs with interrupts disabled, so the cell copy, the
-//! cursor and the serial mirror are never touched by two threads at once. A
+//! Every public operation holds the console lock and then the serial port lock,
+//! both taken with `lockIrq` (ranks `Lib::Rank::CONSOLE` and `SERIAL`), so the
+//! cell copy, the cursor and the serial mirror are never touched by two
+//! threads or processors at once. The panic report bypasses both locks. A
 //! whole string, number or color change is one critical section, which keeps
 //! the text of one call together on the screen and on COM1.
 //!
@@ -237,6 +239,9 @@ record ConsoleState {
 
   /// The color byte of each cell. See `cellCharacters`.
   static mut cellColors: u8[64800];
+
+  /// Held while the screen changes, rank `Lib::Rank::CONSOLE`.
+  static mut lock: Arch::SpinLock;
 }
 
 /// The console API. Every function is safe to call from any thread.
@@ -336,7 +341,8 @@ namespace Drivers::Console {
   /// Sets the palette colors of the characters written from now on. Cells that
   /// are already drawn keep their colors.
   function setColors(foreground: u8, background: u8): void {
-    let saved: u64 = Arch::Cpu::saveAndDisableInterrupts();
+    acquire();
+
     let cursorWasDrawn: boolean = ConsoleState::cursorDrawn;
 
     hideCursor();
@@ -349,13 +355,13 @@ namespace Drivers::Console {
       showCursor();
     }
 
-    Arch::Cpu::restoreInterrupts(saved);
+    release();
   }
 
   /// Fills the screen with the background color and moves the cursor home.
   /// The serial mirror is not cleared.
   function clear(): void {
-    let saved: u64 = Arch::Cpu::saveAndDisableInterrupts();
+    acquire();
 
     ConsoleState::cursorDrawn = false;
     fillPixels(0, 0, ConsoleState::width, ConsoleState::height, ConsoleState::background);
@@ -364,7 +370,7 @@ namespace Drivers::Console {
     ConsoleState::row = 0;
     showCursor();
 
-    Arch::Cpu::restoreInterrupts(saved);
+    release();
   }
 
   /// Writes one byte: printable ASCII is drawn, `\n` starts a new line, `\r`
@@ -372,8 +378,71 @@ namespace Drivers::Console {
   /// TAB_WIDTH and backspace erases the previous cell. Other bytes draw `?`.
   /// Before `initialize`, the byte only goes to the serial mirror.
   function writeChar(character: u8): void {
-    let saved: u64 = Arch::Cpu::saveAndDisableInterrupts();
+    acquire();
+    put(character);
+    release();
+  }
 
+  /// Writes a NUL-terminated string.
+  function write(text: str): void {
+    acquire();
+    putText(text);
+    release();
+  }
+
+  /// Writes `text` followed by a newline.
+  function writeLine(text: str): void {
+    acquire();
+    putText(text);
+    put(NEWLINE);
+    release();
+  }
+
+  /// Writes `value` in decimal.
+  function writeDecimal(value: u64): void {
+    acquire();
+    Lib::Format::decimal(value, put);
+    release();
+  }
+
+  /// Writes `value` as `0x` and 16 hex digits.
+  function writeHex(value: u64): void {
+    acquire();
+    Lib::Format::hexadecimal(value, put);
+    release();
+  }
+
+  /// Takes the console lock and then the serial port, both with `lockIrq`:
+  /// the screen and its serial mirror change together, and a line is never
+  /// interleaved with another processor's or an interrupt handler's. Nothing
+  /// once the panic report bypassed the locks.
+  function acquire(): void {
+    if (!Drivers::Serial::locksBypassed()) {
+      Arch::Spin::lockIrq(consoleLock());
+      Drivers::Serial::acquire();
+    }
+  }
+
+  /// Releases what `acquire` took, in reverse order.
+  function release(): void {
+    if (!Drivers::Serial::locksBypassed()) {
+      Drivers::Serial::release();
+      Arch::Spin::unlockIrq(consoleLock());
+    }
+  }
+
+  /// `ConsoleState::lock`, set up on first use, which may come before
+  /// `initialize` (the byte then only reaches the mirror).
+  function consoleLock(): *mut Arch::SpinLock {
+    if (ConsoleState::lock.rank == 0) {
+      Arch::Spin::initialize(&mut ConsoleState::lock as *mut Arch::SpinLock, Lib::Rank::CONSOLE);
+    }
+
+    return &mut ConsoleState::lock as *mut Arch::SpinLock;
+  }
+
+  /// The body of `writeChar`, with the console held.
+  function put(character: u8): void {
     mirror(character);
 
     if (ConsoleState::initialized) {
@@ -381,49 +450,16 @@ namespace Drivers::Console {
       render(character);
       showCursor();
     }
-
-    Arch::Cpu::restoreInterrupts(saved);
   }
 
-  /// Writes a NUL-terminated string.
-  function write(text: str): void {
-    let saved: u64 = Arch::Cpu::saveAndDisableInterrupts();
+  /// The body of `write`, with the console held.
+  function putText(text: str): void {
     let mut cursor: *u8 = text as *u8;
 
     while (*cursor != 0) {
-      writeChar(*cursor);
+      put(*cursor);
       cursor = cursor + 1;
     }
-
-    Arch::Cpu::restoreInterrupts(saved);
-  }
-
-  /// Writes `text` followed by a newline.
-  function writeLine(text: str): void {
-    let saved: u64 = Arch::Cpu::saveAndDisableInterrupts();
-
-    write(text);
-    writeChar(NEWLINE);
-
-    Arch::Cpu::restoreInterrupts(saved);
-  }
-
-  /// Writes `value` in decimal.
-  function writeDecimal(value: u64): void {
-    let saved: u64 = Arch::Cpu::saveAndDisableInterrupts();
-
-    Lib::Format::decimal(value, writeChar);
-
-    Arch::Cpu::restoreInterrupts(saved);
-  }
-
-  /// Writes `value` as `0x` and 16 hex digits.
-  function writeHex(value: u64): void {
-    let saved: u64 = Arch::Cpu::saveAndDisableInterrupts();
-
-    Lib::Format::hexadecimal(value, writeChar);
-
-    Arch::Cpu::restoreInterrupts(saved);
   }
 
   /// Sends `character` to COM1 with the same editing a terminal would do:

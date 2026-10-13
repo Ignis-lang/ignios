@@ -15,6 +15,11 @@
 //! reporting another one only reaches COM1, so a fault in the console cannot
 //! recurse.
 //!
+//! The report turns interrupts off and makes the console and serial writes
+//! skip their locks (`Drivers::Serial::bypassLocks`): the panic may come from
+//! code that holds one of them, a rank violation included, and waiting for it
+//! would hang the machine instead of reporting.
+//!
 //! This file is not a subsystem. `main.ign` imports it so the handler is
 //! compiled in.
 
@@ -39,6 +44,9 @@ record PanicState {
 /// text with `\r\n` line endings (added by `Drivers::Serial::write`).
 @panicHandler
 function onPanic(message: str, file: str, line: u32): never {
+  Arch::Cpu::disableInterrupts();
+  Drivers::Serial::bypassLocks();
+
   if (PanicState::active || !Drivers::Console::isInitialized()) {
     Drivers::Serial::write("\npanic: ");
     Drivers::Serial::write(message);

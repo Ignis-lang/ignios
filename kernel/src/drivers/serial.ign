@@ -11,9 +11,10 @@
 //! `make run-headless`). The driver never enables UART interrupts: every
 //! byte is sent by waiting for the transmitter to be empty.
 //!
-//! `write`, `writeLine`, `writeDecimal` and `writeHex` run with interrupts
-//! disabled, so the text of one call is never split by another thread's
-//! output. `writeByte` alone is not guarded.
+//! `write`, `writeLine`, `writeDecimal` and `writeHex` hold the port lock,
+//! taken with `lockIrq` (rank `Lib::Rank::SERIAL`), so the text of one call is
+//! never split by another thread's, processor's or interrupt handler's output.
+//! `writeByte` alone is not guarded. The panic report bypasses the lock.
 //!
 //! ## Register Map
 //!
@@ -115,7 +116,8 @@ namespace Drivers::Serial {
   }
 
   /// Sends one raw byte, busy-waiting until the transmitter is ready. Does not
-  /// translate line endings and does not disable interrupts.
+  /// translate line endings and takes no lock: the caller holds the port
+  /// (`acquire`), or is the panic report.
   function writeByte(value: u8): void {
     while ((Arch::Port::readByte(COM1 + LINE_STATUS) & TRANSMIT_HOLDING_EMPTY) == 0) {
     }
@@ -125,7 +127,74 @@ namespace Drivers::Serial {
 
   /// Writes a NUL-terminated string, sending `\r\n` for each `\n`.
   function write(text: str): void {
-    let saved: u64 = Arch::Cpu::saveAndDisableInterrupts();
+    acquire();
+    send(text);
+    release();
+  }
+
+  /// Writes `text` followed by a newline, in one uninterrupted piece.
+  function writeLine(text: str): void {
+    acquire();
+    send(text);
+    send("\n");
+    release();
+  }
+
+  /// Writes `value` in decimal (see `Lib::Format::decimal`).
+  function writeDecimal(value: u64): void {
+    acquire();
+    Lib::Format::decimal(value, writeByte);
+    release();
+  }
+
+  /// Writes `value` as `0x` and 16 hex digits (see `Lib::Format::hexadecimal`).
+  function writeHex(value: u64): void {
+    acquire();
+    Lib::Format::hexadecimal(value, writeByte);
+    release();
+  }
+
+  /// Takes the port lock with `lockIrq`, so a line is never interleaved with
+  /// another processor's or an interrupt handler's. Nothing once `bypassLocks`
+  /// was called.
+  function acquire(): void {
+    if (!SerialState::bypass) {
+      Arch::Spin::lockIrq(portLock());
+    }
+  }
+
+  /// Releases what `acquire` took.
+  function release(): void {
+    if (!SerialState::bypass) {
+      Arch::Spin::unlockIrq(portLock());
+    }
+  }
+
+  /// Makes every console and serial write skip its lock from now on. The panic
+  /// report calls it with interrupts off: the panic may have been raised with
+  /// one of those locks held, and waiting for it would hang the machine
+  /// instead of reporting.
+  function bypassLocks(): void {
+    SerialState::bypass = true;
+  }
+
+  /// True once `bypassLocks` was called.
+  function locksBypassed(): boolean {
+    return SerialState::bypass;
+  }
+
+  /// `SerialState::lock`, set up on first use: the console mirrors to the port
+  /// before anything else runs, so there is no earlier point to do it.
+  function portLock(): *mut Arch::SpinLock {
+    if (SerialState::lock.rank == 0) {
+      Arch::Spin::initialize(&mut SerialState::lock as *mut Arch::SpinLock, Lib::Rank::SERIAL);
+    }
+
+    return &mut SerialState::lock as *mut Arch::SpinLock;
+  }
+
+  /// The body of `write`, with the port held.
+  function send(text: str): void {
     let mut cursor: *u8 = text as *u8;
 
     while (*cursor != 0) {
@@ -136,35 +205,14 @@ namespace Drivers::Serial {
       writeByte(*cursor);
       cursor = cursor + 1;
     }
-
-    Arch::Cpu::restoreInterrupts(saved);
   }
+}
 
-  /// Writes `text` followed by a newline, in one uninterrupted piece.
-  function writeLine(text: str): void {
-    let saved: u64 = Arch::Cpu::saveAndDisableInterrupts();
+/// The port lock and the panic bypass.
+record SerialState {
+  /// Held while a piece of text goes out, rank `Lib::Rank::SERIAL`.
+  static mut lock: Arch::SpinLock;
 
-    write(text);
-    write("\n");
-
-    Arch::Cpu::restoreInterrupts(saved);
-  }
-
-  /// Writes `value` in decimal (see `Lib::Format::decimal`).
-  function writeDecimal(value: u64): void {
-    let saved: u64 = Arch::Cpu::saveAndDisableInterrupts();
-
-    Lib::Format::decimal(value, writeByte);
-
-    Arch::Cpu::restoreInterrupts(saved);
-  }
-
-  /// Writes `value` as `0x` and 16 hex digits (see `Lib::Format::hexadecimal`).
-  function writeHex(value: u64): void {
-    let saved: u64 = Arch::Cpu::saveAndDisableInterrupts();
-
-    Lib::Format::hexadecimal(value, writeByte);
-
-    Arch::Cpu::restoreInterrupts(saved);
-  }
+  /// True once the panic report took over the output.
+  static mut bypass: boolean = false;
 }
