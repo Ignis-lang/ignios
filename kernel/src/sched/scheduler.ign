@@ -435,6 +435,11 @@ namespace Sched::Scheduler {
     }
   }
 
+  /// The slot of the running thread.
+  function currentSlot(): u64 {
+    return SchedulerState::current;
+  }
+
   /// Ticks whose switch was put off because a spinlock was held.
   function deferredCount(): u64 {
     return SchedulerState::deferred;

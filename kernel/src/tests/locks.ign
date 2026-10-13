@@ -11,6 +11,8 @@
 //! | no preemption      | with a spinlock held across more than a time slice, no thread switch happens, and one happens soon after the release |
 //! | mutual exclusion   | three threads add 1 to a counter three times each, waiting more than a time slice between the read and the write: the total is 9 |
 //! | ranks              | while a lock of rank 20 is held, ranks 10 and 20 are refused and 30 is allowed; after the release everything is allowed again |
+//! | mutex              | a contender sleeps on a mutex its holder keeps while sleeping, and gets it only after the holder is done; mutex ranks; no mutex under a spinlock |
+//! | wait queue         | three threads sleep on a queue; an interrupt (what `kill` does) does not wake them; `wakeAll` wakes all three |
 //!
 //! The mutual exclusion check stretches each critical section past a time
 //! slice, so a tick that would switch threads falls inside it: without the
@@ -37,6 +39,36 @@ record LocksTestState {
 
   /// Set to 1 to stop the helper thread.
   static mut stop: u64;
+
+  /// The mutex of the blocking check, rank 50.
+  static mut mutex: Sched::Mutex;
+
+  /// 1 while the holder thread holds the mutex.
+  static mut holding: u64;
+
+  /// 1 once the holder saw a waiter queued on the mutex.
+  static mut queuedSeen: u64;
+
+  /// 1 once the holder finished its section.
+  static mut holderDone: u64;
+
+  /// What the contender saw of `holderDone` once it had the mutex.
+  static mut contenderSaw: u64;
+
+  /// The spinlock of the wait queue check, rank 40.
+  static mut queueLock: Arch::SpinLock;
+
+  /// The queue of the wait queue check.
+  static mut queue: Sched::WaitQueue;
+
+  /// The condition the queued threads wait for.
+  static mut released: u64;
+
+  /// How many times a queued thread came back from `sleepOn`.
+  static mut wakeUps: u64;
+
+  /// How many queued threads got past the wait.
+  static mut passed: u64;
 }
 
 namespace Tests::Locks {
@@ -45,6 +77,12 @@ namespace Tests::Locks {
 
   /// Rank of `innerLock`.
   const INNER_RANK: u64 = 30;
+
+  /// Rank of the test mutex.
+  const MUTEX_RANK: u64 = 50;
+
+  /// Rank of the wait queue's spinlock.
+  const QUEUE_RANK: u64 = 40;
 
   /// Workers of the mutual exclusion check.
   const WORKERS: u64 = 3;
@@ -70,6 +108,8 @@ namespace Tests::Locks {
     let deferred: u64 = checkNoPreemption();
 
     checkMutualExclusion();
+    checkMutex();
+    checkWaitQueue();
 
     // The checks turned interrupts on. `restoreInterrupts` only turns them
     // back on when they were on, so they go off first.
@@ -79,6 +119,7 @@ namespace Tests::Locks {
     Drivers::Console::write("locks: spinlock self-test ok, interrupts restored, ");
     Drivers::Console::writeDecimal(deferred);
     Drivers::Console::writeLine(" switches deferred while a lock was held, no lost update, rank order enforced");
+    Drivers::Console::writeLine("locks: mutex and wait queue self-test ok, a contender slept until the holder was done, three waiters woke together and a kill did not wake them");
   }
 
   /// `lockIrq` and `unlockIrq`.
@@ -180,6 +221,138 @@ namespace Tests::Locks {
       Drivers::Console::writeLine("");
       @panic("locks self-test: an update was lost under the spinlock");
     }
+  }
+
+  /// A holder takes the mutex and sleeps with it; a contender must sleep on
+  /// the mutex until the holder is done. Then the rank rules of mutexes.
+  function checkMutex(): void {
+    Sched::Mutex::initialize(mutex(), MUTEX_RANK);
+    LocksTestState::holding = 0;
+    LocksTestState::queuedSeen = 0;
+    LocksTestState::holderDone = 0;
+    LocksTestState::contenderSaw = 0;
+
+    let holder: u64 = Sched::Scheduler::spawn(Arch::ContextAsm::ignis_function_address(mutexHolder), 0);
+    let contender: u64 = Sched::Scheduler::spawn(Arch::ContextAsm::ignis_function_address(mutexContender), 0);
+
+    Sched::Scheduler::join(holder);
+    Sched::Scheduler::join(contender);
+
+    if (LocksTestState::queuedSeen != 1) {
+      @panic("locks self-test: the contender did not sleep on the mutex");
+    }
+
+    if (LocksTestState::contenderSaw != 1) {
+      @panic("locks self-test: the contender got the mutex while the holder held it");
+    }
+
+    Sched::Mutex::lock(mutex());
+
+    if (Sched::Mutex::canLock(MUTEX_RANK - 10) || Sched::Mutex::canLock(MUTEX_RANK) || !Sched::Mutex::canLock(MUTEX_RANK + 10) || !Sched::Mutex::isHeldByCaller(mutex())) {
+      @panic("locks self-test: the mutex rank rule is wrong");
+    }
+
+    Sched::Mutex::unlock(mutex());
+    Arch::Spin::lock(counterLock());
+
+    if (Sched::Mutex::canLock(MUTEX_RANK)) {
+      @panic("locks self-test: a mutex could be taken while a spinlock is held");
+    }
+
+    Arch::Spin::unlock(counterLock());
+  }
+
+  /// Takes the mutex, sleeps 3 ticks holding it, checks that the contender
+  /// queued meanwhile, and releases it.
+  function mutexHolder(argument: u64): void {
+    Sched::Mutex::lock(mutex());
+    @writeVolatile<u64>(&mut LocksTestState::holding as *mut u64, 1);
+    Sched::Scheduler::sleep(3);
+
+    if (!Sched::Wait::isEmpty(&mut (*mutex()).waiters as *mut Sched::WaitQueue)) {
+      LocksTestState::queuedSeen = 1;
+    }
+
+    LocksTestState::holderDone = 1;
+    Sched::Mutex::unlock(mutex());
+  }
+
+  /// Waits until the holder has the mutex, then takes it.
+  function mutexContender(argument: u64): void {
+    while (@readVolatile<u64>(&mut LocksTestState::holding as *mut u64) == 0) {
+      Sched::Scheduler::yield();
+    }
+
+    Sched::Mutex::lock(mutex());
+    LocksTestState::contenderSaw = LocksTestState::holderDone;
+    Sched::Mutex::unlock(mutex());
+  }
+
+  /// Three threads sleep on a queue. A kill-style interrupt must not wake
+  /// them; `wakeAll` wakes all three.
+  function checkWaitQueue(): void {
+    Arch::Spin::initialize(queueLock(), QUEUE_RANK);
+    LocksTestState::queue.head = 0;
+    LocksTestState::queue.tail = 0;
+    LocksTestState::released = 0;
+    LocksTestState::wakeUps = 0;
+    LocksTestState::passed = 0;
+
+    let first: u64 = Sched::Scheduler::spawn(Arch::ContextAsm::ignis_function_address(queueWaiter), 0);
+
+    Sched::Scheduler::spawn(Arch::ContextAsm::ignis_function_address(queueWaiter), 1);
+    Sched::Scheduler::spawn(Arch::ContextAsm::ignis_function_address(queueWaiter), 2);
+    Sched::Scheduler::sleep(3);
+
+    Sched::Scheduler::interrupt(first);
+    Sched::Scheduler::sleep(3);
+
+    if (LocksTestState::wakeUps != 0 || LocksTestState::passed != 0) {
+      @panic("locks self-test: an interrupt woke a thread queued on a wait queue");
+    }
+
+    Arch::Spin::lockIrq(queueLock());
+    LocksTestState::released = 1;
+
+    let woken: u64 = Sched::Wait::wakeAll(queue());
+
+    Arch::Spin::unlockIrq(queueLock());
+
+    Sched::Scheduler::join(first);
+    Sched::Scheduler::join(first + 1);
+    Sched::Scheduler::join(first + 2);
+
+    if (woken != 3 || LocksTestState::passed != 3) {
+      @panic("locks self-test: wakeAll did not wake every queued thread");
+    }
+  }
+
+  /// Sleeps on the queue until `released`.
+  function queueWaiter(argument: u64): void {
+    Arch::Spin::lockIrq(queueLock());
+
+    while (LocksTestState::released == 0) {
+      Sched::Wait::sleepOn(queue(), queueLock());
+      LocksTestState::wakeUps += 1;
+    }
+
+    LocksTestState::passed += 1;
+    Arch::Spin::unlockIrq(queueLock());
+  }
+
+  /// `LocksTestState::mutex`.
+  function mutex(): *mut Sched::Mutex {
+    return &mut LocksTestState::mutex as *mut Sched::Mutex;
+  }
+
+  /// `LocksTestState::queueLock`.
+  function queueLock(): *mut Arch::SpinLock {
+    return &mut LocksTestState::queueLock as *mut Arch::SpinLock;
+  }
+
+  /// `LocksTestState::queue`.
+  function queue(): *mut Sched::WaitQueue {
+    return &mut LocksTestState::queue as *mut Sched::WaitQueue;
   }
 
   /// A worker: read, wait past a time slice, write, `ROUNDS` times.

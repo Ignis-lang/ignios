@@ -113,6 +113,13 @@ namespace Sched::Thread {
 
     /// Id of the thread a `WAITING` thread waits for.
     public joinTarget: u64;
+
+    /// The next thread in the wait queue this one sleeps on, as its slot
+    /// plus 1; 0 at the end of the queue.
+    public waitNext: u64;
+
+    /// The highest rank of the mutexes this thread holds, 0 for none.
+    public mutexTop: u64;
   }
 
   /// Size of the thread table, the boot and idle threads included.
@@ -151,6 +158,10 @@ namespace Sched::Thread {
 
   /// Parked until another thread calls `Sched::Scheduler::wake` on it.
   const PARKED: u64 = 6;
+
+  /// Asleep on a `Sched::WaitQueue` until `Sched::Wait::wakeOne` or
+  /// `wakeAll`. A kill does not wake it.
+  const QUEUED: u64 = 7;
 
   /// 4 KiB.
   const PAGE_SIZE: u64 = 4096;
@@ -206,6 +217,10 @@ namespace Sched::Thread {
 
     if (state == WAITING) {
       return "waiting";
+    }
+
+    if (state == PARKED || state == QUEUED) {
+      return "blocked";
     }
 
     if (state == DEAD) {
@@ -285,6 +300,8 @@ namespace Sched::Thread {
     (*thread).stackBase = base;
     (*thread).wakeTick = 0;
     (*thread).runTicks = 0;
+    (*thread).waitNext = 0;
+    (*thread).mutexTop = 0;
     (*thread).root = root;
     (*thread).savedRsp = Arch::Context::prepareStack(base + STACK_SPAN, entry, argument);
     resetFpuArea(slot);

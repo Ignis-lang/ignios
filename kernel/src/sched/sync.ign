@@ -1,0 +1,262 @@
+//!
+//! # Wait Queues and Mutexes
+//!
+//! The sleeping side of the lock primitives: a queue of threads waiting for
+//! a condition, and a lock whose waiters sleep instead of spinning.
+//!
+//! ## Wait queues
+//!
+//! A thread that waits for a condition checks it under a spinlock and, while
+//! it does not hold, sleeps on a queue:
+//!
+//! ```text
+//!   Arch::Spin::lockIrq(&lock)
+//!   while (!condition) {
+//!     Sched::Wait::sleepOn(&queue, &lock)   enqueue, release, sleep; relock on wake
+//!   }
+//!   ... use the protected data ...
+//!   Arch::Spin::unlockIrq(&lock)
+//!
+//!   the waker:  lockIrq(&lock); condition := true; Sched::Wait::wakeAll(&queue); unlockIrq(&lock)
+//! ```
+//!
+//! The check, the enqueue and the release happen under the same lock the
+//! waker takes, so a wake-up cannot fall between the check and the sleep.
+//! That is what makes this safe on several processors, where the `cli`,
+//! check, `sti; hlt` pattern is not. The queue is a list through the thread
+//! table (`waitNext`), so it needs no memory of its own.
+//!
+//! A queued thread is in state `QUEUED`. A kill does not wake it: the loop
+//! above would only go back to sleep, and a mutex waiter woken early would
+//! return without the lock. Interruptible waits come with their users.
+//!
+//! ## Mutexes
+//!
+//! A mutex has an owner and a queue of waiters. Its holder may sleep, wait
+//! for the keyboard, take other mutexes. It is meant for long sections: the
+//! file tree, a process's tables. It may not be taken while a spinlock is
+//! held, since that would sleep with the spinlock held.
+//!
+//! Mutex ranks are checked per thread, with the same rule as spinlock ranks:
+//! a thread takes mutexes in rising rank order and releases them in reverse
+//! order. A mutex holder can sleep and, on several processors, wake up on
+//! another CPU, so its ranks follow the thread, not the CPU.
+
+import Arch from "@arch";
+import _ from "./scheduler";
+import _ from "./thread";
+
+namespace Sched {
+  /// Threads waiting for a condition. Zeroed means empty; protect it with
+  /// the spinlock that guards the condition.
+  @cLayout
+  record WaitQueue {
+    /// The first waiter, its slot plus 1; 0 when empty.
+    public head: u64;
+
+    /// The last waiter, its slot plus 1.
+    public tail: u64;
+  }
+
+  /// A sleeping lock. Set it up with `Sched::Mutex::initialize`.
+  @cLayout
+  record Mutex {
+    /// 1 while held.
+    public locked: u64;
+
+    /// The id of the holding thread.
+    public owner: u64;
+
+    /// The rank, above 0.
+    public rank: u64;
+
+    /// The holder's highest mutex rank before it took this one.
+    public previousRank: u64;
+
+    /// Guards the fields above and the queue.
+    public guard: Arch::SpinLock;
+
+    /// Threads waiting for the mutex.
+    public waiters: Sched::WaitQueue;
+  }
+}
+
+/// The wait queue API.
+namespace Sched::Wait {
+  /// Sleeps the running thread on `queue`. The caller holds `spin` taken
+  /// with `Arch::Spin::lockIrq` and no other spinlock. The thread is queued
+  /// and `spin` released with interrupts still off, so no wake-up is lost;
+  /// on return `spin` is held again. The caller checks its condition again,
+  /// in a loop.
+  function sleepOn(queue: *mut Sched::WaitQueue, spin: *mut Arch::SpinLock): void {
+    let slot: u64 = Sched::Scheduler::currentSlot();
+
+    if (slot == Sched::Thread::IDLE_SLOT) {
+      @panic("wait queue: the idle thread cannot sleep");
+    }
+
+    let saved: u64 = (*spin).savedFlags;
+
+    (*Sched::Thread::slotPointer(slot)).state = Sched::Thread::QUEUED;
+    append(queue, slot);
+    Arch::Spin::unlock(spin);
+
+    if (Arch::Spin::holdsAny()) {
+      @panic("wait queue: a thread tried to sleep while holding another spinlock");
+    }
+
+    Sched::Scheduler::switchToNext();
+
+    Arch::Spin::lock(spin);
+    (*spin).savedFlags = saved;
+  }
+
+  /// Wakes the first thread of `queue`. The caller holds the queue's
+  /// spinlock. Returns false when nobody was waiting.
+  function wakeOne(queue: *mut Sched::WaitQueue): boolean {
+    while ((*queue).head != 0) {
+      let slot: u64 = pop(queue);
+      let thread: *mut Sched::Thread::Control = Sched::Thread::slotPointer(slot);
+
+      if ((*thread).state == Sched::Thread::QUEUED) {
+        Sched::Scheduler::makeReady(slot);
+        return true;
+      }
+    }
+
+    return false;
+  }
+
+  /// Wakes every thread of `queue` and returns how many. The caller holds
+  /// the queue's spinlock.
+  function wakeAll(queue: *mut Sched::WaitQueue): u64 {
+    let mut woken: u64 = 0;
+
+    while (wakeOne(queue)) {
+      woken += 1;
+    }
+
+    return woken;
+  }
+
+  /// True when nobody waits on `queue`.
+  function isEmpty(queue: *mut Sched::WaitQueue): boolean {
+    return (*queue).head == 0;
+  }
+
+  /// Adds `slot` at the end of `queue`.
+  function append(queue: *mut Sched::WaitQueue, slot: u64): void {
+    (*Sched::Thread::slotPointer(slot)).waitNext = 0;
+
+    if ((*queue).tail == 0) {
+      (*queue).head = slot + 1;
+    } else {
+      (*Sched::Thread::slotPointer((*queue).tail - 1)).waitNext = slot + 1;
+    }
+
+    (*queue).tail = slot + 1;
+  }
+
+  /// Removes and returns the first slot of a queue that is not empty.
+  function pop(queue: *mut Sched::WaitQueue): u64 {
+    let slot: u64 = (*queue).head - 1;
+    let thread: *mut Sched::Thread::Control = Sched::Thread::slotPointer(slot);
+
+    (*queue).head = (*thread).waitNext;
+
+    if ((*queue).head == 0) {
+      (*queue).tail = 0;
+    }
+
+    (*thread).waitNext = 0;
+
+    return slot;
+  }
+}
+
+/// The mutex API.
+namespace Sched::Mutex {
+  /// The rank of every mutex's guard spinlock: above the ranks subsystems
+  /// use, since a guard is held only for a few instructions and never while
+  /// another spinlock is taken.
+  const GUARD_RANK: u64 = 1000;
+
+  /// Makes `mutex` free with `rank`. Panics for rank 0.
+  function initialize(mutex: *mut Sched::Mutex, rank: u64): void {
+    if (rank == 0) {
+      @panic("mutex: a mutex needs a rank above 0");
+    }
+
+    (*mutex).locked = 0;
+    (*mutex).owner = 0;
+    (*mutex).rank = rank;
+    (*mutex).previousRank = 0;
+    (*mutex).waiters.head = 0;
+    (*mutex).waiters.tail = 0;
+    Arch::Spin::initialize(&mut (*mutex).guard as *mut Arch::SpinLock, GUARD_RANK);
+  }
+
+  /// Takes `mutex`, sleeping while another thread holds it. Panics when a
+  /// spinlock is held or the rank is not above every mutex rank the thread
+  /// holds.
+  function lock(mutex: *mut Sched::Mutex): void {
+    if (!canLock((*mutex).rank)) {
+      @panic("mutex: taken while holding a spinlock, or rank order violated");
+    }
+
+    let guard: *mut Arch::SpinLock = &mut (*mutex).guard as *mut Arch::SpinLock;
+
+    Arch::Spin::lockIrq(guard);
+
+    while ((*mutex).locked != 0) {
+      Sched::Wait::sleepOn(&mut (*mutex).waiters as *mut Sched::WaitQueue, guard);
+    }
+
+    (*mutex).locked = 1;
+    (*mutex).owner = Sched::Scheduler::currentId();
+    Arch::Spin::unlockIrq(guard);
+
+    let thread: *mut Sched::Thread::Control = Sched::Thread::slotPointer(Sched::Scheduler::currentSlot());
+
+    (*mutex).previousRank = (*thread).mutexTop;
+    (*thread).mutexTop = (*mutex).rank;
+  }
+
+  /// Releases `mutex` and wakes one waiter. Panics when the caller does not
+  /// hold it or it is not the last mutex the caller took.
+  function unlock(mutex: *mut Sched::Mutex): void {
+    let thread: *mut Sched::Thread::Control = Sched::Thread::slotPointer(Sched::Scheduler::currentSlot());
+
+    if ((*mutex).locked == 0 || (*mutex).owner != Sched::Scheduler::currentId()) {
+      @panic("mutex: released by a thread that does not hold it");
+    }
+
+    if ((*thread).mutexTop != (*mutex).rank) {
+      @panic("mutex: released out of order, the last mutex taken must be released first");
+    }
+
+    (*thread).mutexTop = (*mutex).previousRank;
+
+    let guard: *mut Arch::SpinLock = &mut (*mutex).guard as *mut Arch::SpinLock;
+
+    Arch::Spin::lockIrq(guard);
+    (*mutex).locked = 0;
+    (*mutex).owner = 0;
+    Sched::Wait::wakeOne(&mut (*mutex).waiters as *mut Sched::WaitQueue);
+    Arch::Spin::unlockIrq(guard);
+  }
+
+  /// True when the running thread may take a mutex of `rank` now: it holds
+  /// no spinlock, and the rank is above 0 and above every mutex rank it
+  /// holds.
+  function canLock(rank: u64): boolean {
+    let thread: *mut Sched::Thread::Control = Sched::Thread::slotPointer(Sched::Scheduler::currentSlot());
+
+    return !Arch::Spin::holdsAny() && rank > 0 && rank > (*thread).mutexTop;
+  }
+
+  /// True when the running thread holds `mutex`.
+  function isHeldByCaller(mutex: *mut Sched::Mutex): boolean {
+    return (*mutex).locked != 0 && (*mutex).owner == Sched::Scheduler::currentId();
+  }
+}
