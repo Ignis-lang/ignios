@@ -43,10 +43,10 @@
 //! in RAX and the value in RDX; an unknown number is `NOT_SUPPORTED`.
 //! ABI-independent work, such as moving bytes, is in `Syscall::Core`.
 //!
-//! The handlers run with interrupts off, which is how `SYSCALL` leaves them:
-//! the kernel has one CPU, so nothing else can touch the state in the
-//! meantime, and a handler that waits (`nanosleep`) does it through the
-//! scheduler, which switches threads with interrupts off as well.
+//! The entry stub turns interrupts on around the handlers: another thread
+//! may run in the middle of a call, on this processor or another, so what a
+//! handler shares is behind the locks of `Lib::Rank`, and a handler that
+//! waits (`nanosleep`) does it through the scheduler.
 //!
 //! See concept doc 15.
 

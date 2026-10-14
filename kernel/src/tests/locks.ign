@@ -21,6 +21,7 @@
 //! | scratch            | two threads fill their system call scratch areas, yield, and find their own bytes |
 //! | wake tokens        | a wake sent before a park, and an interrupt sent before a 10000 s sleep, end the wait at once |
 //! | VFS lock           | a file operation started while another thread holds the VFS lock waits for it |
+//! | stale cancel       | a read cancel left in a slot is cleared when a new process opens its standard descriptors |
 //!
 //! The mutual exclusion check stretches each critical section past a time
 //! slice, so a tick that would switch threads falls inside it: without the
@@ -150,6 +151,7 @@ namespace Tests::Locks {
     checkScratch();
     checkTokens();
     checkVfsLock();
+    checkStaleCancel();
 
     // The checks turned interrupts on. `restoreInterrupts` only turns them
     // back on when they were on, so they go off first.
@@ -162,7 +164,7 @@ namespace Tests::Locks {
     Drivers::Console::writeLine("locks: mutex and wait queue self-test ok, a contender slept until the holder was done, three waiters woke together and a kill did not wake them");
     Drivers::Console::writeLine("locks: scratch self-test ok, two threads kept their own system call scratch across switches");
     Drivers::Console::writeLine("locks: wake token self-test ok, a wake before a park and a kill before a 10000 s sleep were not lost");
-    Drivers::Console::writeLine("locks: vfs self-test ok, a file operation waited while another thread held the VFS lock");
+    Drivers::Console::writeLine("locks: vfs self-test ok, a file operation waited while another thread held the VFS lock, and a stale read cancel did not reach a new process");
   }
 
   /// Holds the VFS lock while a helper thread removes a file: the helper
@@ -182,6 +184,27 @@ namespace Tests::Locks {
 
     if (doneWhileHeld != 0 || LocksTestState::vfsDone != 1) {
       @panic("locks self-test: a file operation ran while another thread held the VFS lock");
+    }
+  }
+
+  /// A read cancel that a kill left after a process closed its descriptors
+  /// must not reach the next process launched into that slot. Uses slot 63,
+  /// free while the boot self-tests run.
+  function checkStaleCancel(): void {
+    const TOKEN: u64 = 64;
+
+    Fs::Tty::cancel(TOKEN);
+
+    if (!Fs::Tty::cancelPending(TOKEN) || Fs::Files::openStandard(TOKEN - 1) != Fs::Vfs::OK) {
+      @panic("locks self-test: the stale cancel check could not set up");
+    }
+
+    let stale: boolean = Fs::Tty::cancelPending(TOKEN);
+
+    Fs::Files::closeAll(TOKEN - 1);
+
+    if (stale) {
+      @panic("locks self-test: a cancel left for an ended process reached the next one in its slot");
     }
   }
 

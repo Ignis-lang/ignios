@@ -187,6 +187,11 @@ namespace Fs::Files {
       return Fs::Vfs::INVALID;
     }
 
+    // A kill that reached the slot's previous process after it closed its
+    // descriptors may have left a read cancel; it must not end the new
+    // process's first read.
+    Fs::Tty::forget(table + 1);
+
     if (*capacityPointer(table) == 0 && !grow(table, INITIAL_DESCRIPTORS)) {
       return Fs::Vfs::NO_MEMORY;
     }
@@ -351,7 +356,13 @@ namespace Fs::Files {
     }
 
     if ((flags & TRUNCATE) != 0 && (flags & WRITE) != 0 && (*node).kind == Fs::Vfs::FILE) {
-      Fs::Vfs::truncate(node, 0);
+      let truncated: u64 = Fs::Vfs::truncate(node, 0);
+
+      // A pinned file, being loaded as a program, refuses it.
+      if (truncated != Fs::Vfs::OK) {
+        Mm::Heap::free(file as *mut u8);
+        return truncated;
+      }
     }
 
     setEntry(table, free, file);
@@ -433,13 +444,7 @@ namespace Fs::Files {
     }
 
     if ((*file).kind == CONSOLE) {
-      let mut index: u64 = 0;
-
-      while (index < count) {
-        Drivers::Console::writeChar(*(source + index));
-        index += 1;
-      }
-
+      Drivers::Console::writeBytes(source, count);
       *done = count;
       return Fs::Vfs::OK;
     }

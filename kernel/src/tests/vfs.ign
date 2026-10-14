@@ -64,6 +64,18 @@ namespace Tests::Vfs {
     expectStatus(Fs::Vfs::write(file, 0, "z" as *u8, 1), Fs::Vfs::BUSY, "write pinned /p");
     expectStatus(Fs::Vfs::truncate(file, 0), Fs::Vfs::BUSY, "truncate pinned /p");
 
+    // Opening it with O_TRUNC fails too, and leaves no descriptor. Slot 63
+    // is free while the boot self-tests run.
+    let mut descriptor: u64 = 0;
+
+    expectStatus(Fs::Files::open(63, root, "/p" as *u8, 2, Fs::Files::WRITE | Fs::Files::TRUNCATE, 0, &mut descriptor as *mut u64), Fs::Vfs::BUSY, "open pinned /p with O_TRUNC");
+
+    if (Fs::Files::get(63, 0) != null) {
+      @panic("vfs self-test: a refused open left a descriptor");
+    }
+
+    Fs::Files::closeAll(63);
+
     if ((*file).size != 2 || *(*file).data != 0x78) {
       @panic("vfs self-test: a pinned file changed");
     }

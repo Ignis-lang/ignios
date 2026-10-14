@@ -226,6 +226,8 @@ namespace Syscall::Core {
     let mut sourceLength: u64 = 0;
 
     if (!anonymous) {
+      Fs::Vfs::requireLock();
+
       let file: *mut Fs::OpenFile = Fs::Files::get(slot, descriptor);
 
       if (file == null) {

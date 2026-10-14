@@ -20,8 +20,10 @@
 //! ```
 //!
 //! Argument 0 is the program word as typed (`cat`), as a Unix shell passes
-//! it. The lookup and the start run with interrupts off, because the file
-//! tree has no locks: no process can change the file while it is being read.
+//! it. The lookup runs under the VFS lock and pins the file; the start runs
+//! with the lock let go (starting a process takes the process table lock,
+//! which ranks below it), and the pin keeps the file from being removed or
+//! written while it is loaded.
 
 import Drivers from "@drivers";
 import Fs from "@fs";

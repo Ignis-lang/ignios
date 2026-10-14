@@ -61,8 +61,13 @@
 //! | `TOO_LARGE`     | a file would grow past `MAX_FILE_SIZE` (64 MiB) | `EFBIG` |
 //! | `BUSY`          | removing a node that is open or in use     | `EBUSY`   |
 //!
-//! The VFS has no locks. Every caller runs with interrupts off on the only
-//! processor (the system call handlers do), so no two operations overlap.
+//! One mutex, the VFS lock (`lock`, rank `Lib::MutexRank::VFS`), guards the
+//! whole tree, the node data, every descriptor table and every current
+//! directory. `Fs::Files` takes it inside each operation; a caller that uses
+//! `Fs::Vfs` directly holds it across its whole sequence. Every function
+//! that reads or changes the tree checks that the caller holds it
+//! (`requireLock`), once the scheduler runs. A program being loaded pins its
+//! file (`pin`), which then refuses removal, writes and truncation.
 
 import Drivers from "@drivers";
 import Lib from "@lib";

@@ -390,6 +390,21 @@ namespace Drivers::Console {
     release();
   }
 
+  /// Writes the `count` bytes at `bytes` in one piece: no other writer's
+  /// text lands in the middle.
+  function writeBytes(bytes: *u8, count: u64): void {
+    acquire();
+
+    let mut index: u64 = 0;
+
+    while (index < count) {
+      put(*(bytes + index));
+      index += 1;
+    }
+
+    release();
+  }
+
   /// Writes `text` followed by a newline.
   function writeLine(text: str): void {
     acquire();

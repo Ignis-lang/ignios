@@ -251,6 +251,21 @@ namespace Fs::Tty {
     }
   }
 
+  /// True while a cancel for `token` waits for its reader.
+  function cancelPending(token: u64): boolean {
+    if (token >= MAX_TOKENS) {
+      return false;
+    }
+
+    Arch::Spin::lockIrq(ttyLock());
+
+    let pending: boolean = *flagOf(token) != 0;
+
+    Arch::Spin::unlockIrq(ttyLock());
+
+    return pending;
+  }
+
   /// Wakes the readers after the keyboard interrupt queued scancodes. The
   /// trap dispatcher calls it after IRQ1, with interrupts off.
   function keysArrived(): void {
