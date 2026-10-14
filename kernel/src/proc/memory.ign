@@ -215,9 +215,15 @@ namespace Proc::Memory {
     let lazy: boolean = protection != 0 && sourceLength == 0;
 
     if (lazy) {
-      // Tables first: they take frames from what is available, and the
-      // reservation then promises one frame per page on top of them.
-      if (!Mm::AddressSpace::prepareRange(root, start, rounded) || !Mm::Pmm::reserve(rounded / PAGE_SIZE)) {
+      // The reservation first: it bounds the request by the free memory
+      // before any table is built, so a refused map takes nothing. The
+      // tables then come from what is still available.
+      if (!Mm::Pmm::reserve(rounded / PAGE_SIZE)) {
+        return NO_MEMORY;
+      }
+
+      if (!Mm::AddressSpace::prepareRange(root, start, rounded)) {
+        Mm::Pmm::unreserve(rounded / PAGE_SIZE);
         return NO_MEMORY;
       }
     } else if (protection != 0) {
@@ -328,7 +334,10 @@ namespace Proc::Memory {
 
     let region: *mut Proc::Region = regionContaining(slot, address);
 
-    if (region == null || (*region).protection == 0 || ((*region).protection & access) != access) {
+    // A read needs any access at all; a write or a fetch needs its own bit.
+    let needed: u64 = access & (WRITE | EXECUTE);
+
+    if (region == null || (*region).protection == 0 || ((*region).protection & needed) != needed) {
       return false;
     }
 

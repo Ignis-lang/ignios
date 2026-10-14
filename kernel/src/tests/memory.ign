@@ -9,8 +9,8 @@
 //! |----------------|-------------------------------------------------------------------------|
 //! | lazy map       | mapping 64 MiB takes no page frame, only its page tables, and reserves 16384 frames |
 //! | touch          | resolving 3 pages takes exactly 3 frames, from the reservation; a second resolve of a page changes nothing |
-//! | refusals       | no region, an instruction fetch in a non-executable region, a write to a read-only region or page, and `PROT_NONE` are refused |
-//! | accounting     | a map larger than the available frames is `NO_MEMORY` and reserves nothing |
+//! | refusals       | no region, an instruction fetch in a non-executable region, a write to a read-only region or page, and `PROT_NONE` are refused; a read in a write-only or exec-only region is allowed |
+//! | accounting     | a map larger than the available frames, up to 1 TiB, is `NO_MEMORY` and takes neither reservations nor frames; a middle split keeps the tail lazy and returns exactly the untouched pages |
 //! | release        | `unmap` frees the touched pages and returns the rest of the reservation; so does the end of a process |
 
 import Boot from "@boot";
@@ -58,6 +58,9 @@ namespace Tests::Memory {
     checkTouch(root, large);
     checkRefusals(root, large);
     checkAccounting(root);
+    checkReadNeedsAnyAccess(root);
+    checkRefusedMapTakesNothing(root);
+    checkSplitAccounting(root);
 
     if (Proc::Memory::unmap(SLOT, root, large, LARGE) != Proc::Memory::OK || Mm::Pmm::reservedFrameCount() != 0) {
       @panic("memory self-test: unmap did not return the reservation");
@@ -132,8 +135,58 @@ namespace Tests::Memory {
     let tooLarge: u64 = (Mm::Pmm::availableFrameCount() + 1) * PAGE;
     let mut address: u64 = 0;
 
-    if (Proc::Memory::map(SLOT, root, tooLarge, Proc::Memory::READ | Proc::Memory::WRITE, null, 0, &mut address as *mut u64) != Proc::Memory::NO_MEMORY || Mm::Pmm::reservedFrameCount() != reserved) {
+    let available: u64 = Mm::Pmm::availableFrameCount();
+
+    if (Proc::Memory::map(SLOT, root, tooLarge, Proc::Memory::READ | Proc::Memory::WRITE, null, 0, &mut address as *mut u64) != Proc::Memory::NO_MEMORY || Mm::Pmm::reservedFrameCount() != reserved || available - Mm::Pmm::availableFrameCount() > TABLE_SLACK) {
       @panic("memory self-test: a mapping larger than the free memory was granted");
+    }
+  }
+
+  /// A read needs any access at all: write-only and exec-only lazy regions
+  /// resolve a read, as x86 can only map a page ring 3 can read.
+  function checkReadNeedsAnyAccess(root: u64): void {
+    let writeOnly: u64 = mapOrPanic(root, PAGE, Proc::Memory::WRITE);
+    let execOnly: u64 = mapOrPanic(root, PAGE, Proc::Memory::EXECUTE);
+
+    if (!Proc::Memory::resolve(SLOT, root, writeOnly, Proc::Memory::READ) || !Proc::Memory::resolve(SLOT, root, execOnly, Proc::Memory::READ)) {
+      @panic("memory self-test: a read in a write-only or exec-only region was refused");
+    }
+
+    Proc::Memory::unmap(SLOT, root, writeOnly, PAGE);
+    Proc::Memory::unmap(SLOT, root, execOnly, PAGE);
+  }
+
+  /// A refused lazy map takes no frames, not even for page tables: a 1 TiB
+  /// request must not leave the kernel without memory.
+  function checkRefusedMapTakesNothing(root: u64): void {
+    let available: u64 = Mm::Pmm::availableFrameCount();
+    let mut address: u64 = 0;
+    let status: u64 = Proc::Memory::map(SLOT, root, 1099511627776, Proc::Memory::READ | Proc::Memory::WRITE, null, 0, &mut address as *mut u64);
+
+    if (status != Proc::Memory::NO_MEMORY || available - Mm::Pmm::availableFrameCount() > TABLE_SLACK) {
+      @panic("memory self-test: a refused lazy map kept frames");
+    }
+  }
+
+  /// Unmapping the middle of a partly touched lazy region keeps the tail
+  /// lazy, refuses the hole, and returns exactly the untouched reservation.
+  function checkSplitAccounting(root: u64): void {
+    let region: u64 = mapOrPanic(root, 10 * PAGE, Proc::Memory::READ | Proc::Memory::WRITE);
+    let reserved: u64 = Mm::Pmm::reservedFrameCount();
+
+    Proc::Memory::resolve(SLOT, root, region, Proc::Memory::WRITE);
+    Proc::Memory::resolve(SLOT, root, region + 4 * PAGE, Proc::Memory::WRITE);
+    Proc::Memory::resolve(SLOT, root, region + 9 * PAGE, Proc::Memory::WRITE);
+    Proc::Memory::unmap(SLOT, root, region + 3 * PAGE, 3 * PAGE);
+
+    let afterSplit: u64 = Mm::Pmm::reservedFrameCount();
+    let tail: boolean = Proc::Memory::resolve(SLOT, root, region + 7 * PAGE, Proc::Memory::WRITE);
+    let hole: boolean = Proc::Memory::resolve(SLOT, root, region + 4 * PAGE, Proc::Memory::WRITE);
+
+    Proc::Memory::unmap(SLOT, root, region, 10 * PAGE);
+
+    if (afterSplit != reserved - 5 || !tail || hole || Mm::Pmm::reservedFrameCount() != reserved - 10) {
+      @panic("memory self-test: a split lazy region miscounted its reservation");
     }
   }
 

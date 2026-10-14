@@ -38,7 +38,7 @@
 //! | 80-84  | `std::alloc`: 200 blocks aligned and apart, reuse after `free`, freed space merges back into one free block, a large block gets its own pages |
 //! | 85     | a closure that captures a value allocates through `@allocHandler` and frees through `@freeHandler` |
 //! | 86     | a `PROT_READ \| PROT_EXEC` private mapping of a file runs: `/mmexec` holds a `ret`, the mapping is called and returns (the kernel test removes `/mmexec`) |
-//! | 92-93  | the stack grows: a recursion with a page of locals per call reaches 1 MiB below its start and comes back intact |
+//! | 92-93  | the stack grows: a recursion with a page of locals per call reaches 7 MiB below its start, near the 8 MiB limit, and comes back intact |
 //! | 90-91  | `read` into two pages of a new mapping that were never touched, across the page boundary, works and gives the file's bytes |
 
 import Alloc from "std::alloc";
@@ -354,14 +354,15 @@ function checkLazy(): void {
 }
 
 /// The stack grows on demand: a recursion with 4 KiB of locals per call
-/// reaches 1 MiB below the start and comes back with every frame intact.
+/// reaches 7 MiB below the start, close to the 8 MiB limit, and comes back
+/// with every frame intact.
 function checkStack(): void {
   let mut here: u8 = 0;
   let top: u64 = @integerFromPointer(&mut here as *mut u8);
 
   @writeVolatile<u64>(&mut State::lowest as *mut u64, top);
-  require(descend(256) == 256 * 257 / 2, 92);
-  require(top - @readVolatile<u64>(&mut State::lowest as *mut u64) >= 1048576, 93);
+  require(descend(1792) == 1792 * 1793 / 2, 92);
+  require(top - @readVolatile<u64>(&mut State::lowest as *mut u64) >= 7340032, 93);
 }
 
 /// Recurses `depth` times with a page of locals per call, marking both ends
