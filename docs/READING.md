@@ -31,6 +31,7 @@ The concept documents explain the x86_64 and kernel background, and this guide r
 | 20 | Memory mappings: `mmap` and a user heap | 21 | The native IgniOS ABI |
 | 22 | Processes from user space and the shell | 23 | The process lifecycle: parents, waiting and killing |
 | 24 | Locks: spinlocks, ranks, wait queues and mutexes | 25 | Locking the kernel: from interrupts off to explicit locks |
+| 26 | Demand paging: frame references, reservations and a growing stack | | |
 
 ## The subsystems
 
