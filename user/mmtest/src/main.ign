@@ -37,6 +37,7 @@
 //! | 80-84  | `std::alloc`: 200 blocks aligned and apart, reuse after `free`, freed space merges back into one free block, a large block gets its own pages |
 //! | 85     | a closure that captures a value allocates through `@allocHandler` and frees through `@freeHandler` |
 //! | 86     | a `PROT_READ \| PROT_EXEC` private mapping of a file runs: `/mmexec` holds a `ret`, the mapping is called and returns (the kernel test removes `/mmexec`) |
+//! | 90-91  | `read` into two pages of a new mapping that were never touched, across the page boundary, works and gives the file's bytes |
 
 import Alloc from "std::alloc";
 import Args from "std::args";
@@ -319,6 +320,32 @@ function blockSize(index: u64): u64 {
 }
 
 /// `std::alloc` on top of `mmap`.
+/// An anonymous mapping gets its pages on first access. A system call that
+/// writes into pages the program never touched must work as if they were
+/// there: `read` of `/etc/motd` across the boundary of two untouched pages.
+function checkLazy(): void {
+  let mapped: i64 = Sys::mapAnonymous(2 * PAGE);
+
+  require(mapped > 0, 90);
+
+  let target: u64 = mapped as u64 + PAGE - 5;
+  let motd: i64 = Sys::open("/etc/motd" as *u8, Sys::O_RDONLY, 0);
+
+  require(motd >= 0, 90);
+  expect(Sys::read(motd as u64, @pointerFromInteger<*mut u8>(target), MOTD_LENGTH), MOTD_LENGTH as i64, 90);
+
+  let mut index: u64 = 0;
+
+  while (index < MOTD_LENGTH) {
+    require(peek(target + index) == *(MOTD as *u8 + index), 91);
+    index += 1;
+  }
+
+  require(isZero(mapped as u64, PAGE - 5), 91);
+  expect(Sys::close(motd as u64), 0, 90);
+  expect(Sys::munmap(mapped as u64, 2 * PAGE), 0, 90);
+}
+
 function checkAllocator(): void {
   let before: u64 = Alloc::bytesInUse();
   let mut index: u64 = 0;
@@ -515,6 +542,7 @@ function main(count: u64, values: *u64): u64 {
   checkProtection();
   checkLimit();
   checkFiles();
+  checkLazy();
   checkAllocator();
   checkClosure();
   checkExecutable();

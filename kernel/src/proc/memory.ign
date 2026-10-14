@@ -9,9 +9,13 @@
 //! Each process slot has a table of regions on the heap: a start, a length
 //! and a protection each. It starts at 32 entries on the first `map` and
 //! doubles when full, up to `MAX_REGIONS` (1024); `reset` frees it when the
-//! process ends. A region is a run of pages that `map` allocated
-//! and zeroed at once (no demand paging), and that `unmap` frees. The ELF
-//! image and the stack are not regions: `unmap` never touches them.
+//! process ends. An anonymous region is lazy: `map` builds its page tables
+//! and reserves one frame per page (`Mm::Pmm::reserve`), and a page gets its
+//! zeroed frame on first access, from a page fault or a system call copy
+//! (`resolve`). A file mapping is still filled at once, as a private copy of
+//! the file. `unmap` frees the touched pages and gives back the reservation
+//! of the others. The ELF image and the stack are not regions: `unmap`
+//! never touches them.
 //!
 //! ```text
 //!   0x00007FFFFFFFF000  STACK_TOP
@@ -47,6 +51,7 @@
 //! The functions take the process slot, the address space and ABI-neutral
 //! arguments; `Syscall::Linux::mmap` translates the Linux flags.
 
+import Boot from "@boot";
 import Lib from "@lib";
 import Mm from "@mm";
 
@@ -62,6 +67,11 @@ namespace Proc {
 
     /// `Proc::Memory::READ`, `WRITE` and `EXECUTE` bits.
     public protection: u64;
+
+    /// 1 for a lazy region: its pages get frames on first access, from a
+    /// reservation of one frame per page made at `map`. 0 for a region whose
+    /// pages were all mapped at once.
+    public lazy: u64;
   }
 }
 
@@ -148,10 +158,13 @@ namespace Proc::Memory {
 
   /// Maps a new region of `length` bytes, rounded up to whole pages, with
   /// `protection` into `root`, the space of the process in `slot`, and
-  /// writes its start to `address`. The pages are zeroed, then the first
-  /// `sourceLength` bytes get a copy of the kernel bytes at `source` (a file
-  /// mapping; nothing is copied into a region without access). Returns `INVALID`, `NO_MEMORY` (nothing stays allocated) or
-  /// `TOO_MANY`.
+  /// writes its start to `address`. With `sourceLength` 0 the region is lazy:
+  /// its pages are reserved and get zeroed frames on first access. Otherwise
+  /// every page is mapped and zeroed now and the first `sourceLength` bytes
+  /// get a copy of the kernel bytes at `source` (a file mapping; nothing is
+  /// copied into a region without access). Returns `INVALID`, `NO_MEMORY` (no
+  /// page stays mapped and nothing stays reserved; page tables built for a
+  /// lazy region stay until the space is destroyed) or `TOO_MANY`.
   function map(
     slot: u64,
     root: u64,
@@ -183,8 +196,15 @@ namespace Proc::Memory {
     }
 
     let start: u64 = end - rounded;
+    let lazy: boolean = protection != 0 && sourceLength == 0;
 
-    if (protection != 0) {
+    if (lazy) {
+      // Tables first: they take frames from what is available, and the
+      // reservation then promises one frame per page on top of them.
+      if (!Mm::AddressSpace::prepareRange(root, start, rounded) || !Mm::Pmm::reserve(rounded / PAGE_SIZE)) {
+        return NO_MEMORY;
+      }
+    } else if (protection != 0) {
       let populated: u64 = populate(root, start, rounded, pageFlags(protection));
 
       if (populated != rounded) {
@@ -203,6 +223,7 @@ namespace Proc::Memory {
     (*region).start = start;
     (*region).length = rounded;
     (*region).protection = protection;
+    (*region).lazy = lazy ? 1 : 0;
     *nextEndOf(slot) = start;
     *address = start;
 
@@ -245,7 +266,12 @@ namespace Proc::Memory {
         // A PROT_NONE region maps no page, so there is nothing to free, and
         // walking a huge one page by page would stall the processor.
         if ((*region).protection != 0) {
-          release(root, cutStart, cutEnd - cutStart);
+          let freed: u64 = release(root, cutStart, cutEnd - cutStart);
+
+          // The pages never touched still hold their promised frame.
+          if ((*region).lazy != 0) {
+            Mm::Pmm::unreserve((cutEnd - cutStart) / PAGE_SIZE - freed);
+          }
         }
 
         if (cutStart == regionStart && cutEnd == regionEnd) {
@@ -261,6 +287,7 @@ namespace Proc::Memory {
           (*tail).start = cutEnd;
           (*tail).length = regionEnd - cutEnd;
           (*tail).protection = (*region).protection;
+          (*tail).lazy = (*region).lazy;
           (*region).length = cutStart - regionStart;
         }
       }
@@ -292,7 +319,18 @@ namespace Proc::Memory {
       return (access & WRITE) == 0 || (entry & Mm::Vmm::WRITABLE) != 0;
     }
 
-    return Mm::AddressSpace::allocatePage(root, page, pageFlags((*region).protection)) != Mm::Pmm::NO_FRAME;
+    if ((*region).lazy == 0) {
+      return false;
+    }
+
+    // The reservation made at `map` holds this page's frame, and the tables
+    // were built then: neither step can fail.
+    let frame: u64 = Mm::Pmm::allocateReserved();
+
+    Lib::Mem::fill(Boot::Hhdm::toVirtual(frame), 0, PAGE_SIZE);
+    Mm::AddressSpace::mapPrepared(root, page, frame, pageFlags((*region).protection));
+
+    return true;
   }
 
   /// The region of `slot` that holds `address`, or null.
@@ -368,13 +406,52 @@ namespace Proc::Memory {
     return length;
   }
 
-  /// Frees every mapped page of `[start, start + length)`.
-  function release(root: u64, start: u64, length: u64): void {
+  /// Frees every mapped page of `[start, start + length)` and returns how
+  /// many there were.
+  function release(root: u64, start: u64, length: u64): u64 {
     let mut offset: u64 = 0;
+    let mut freed: u64 = 0;
 
     while (offset < length) {
-      Mm::AddressSpace::freePage(root, start + offset);
+      if (Mm::AddressSpace::freePage(root, start + offset)) {
+        freed += 1;
+      }
+
       offset += PAGE_SIZE;
+    }
+
+    return freed;
+  }
+
+  /// Gives back the reservation of every page of a lazy region of `slot`
+  /// that was never touched. Called when the process ends, before its
+  /// address space `root` is destroyed with the frames of the touched ones.
+  function releaseReservations(slot: u64, root: u64): void {
+    if (slot >= MAX_SLOTS) {
+      return;
+    }
+
+    let mut index: u64 = 0;
+
+    while (index < *capacityOf(slot)) {
+      let region: *mut Proc::Region = regionAt(slot, index);
+
+      if ((*region).start != 0 && (*region).lazy != 0) {
+        let mut untouched: u64 = 0;
+        let mut offset: u64 = 0;
+
+        while (offset < (*region).length) {
+          if ((Mm::Vmm::leafEntryIn(root, (*region).start + offset) & Mm::Vmm::PRESENT) == 0) {
+            untouched += 1;
+          }
+
+          offset += PAGE_SIZE;
+        }
+
+        Mm::Pmm::unreserve(untouched);
+      }
+
+      index += 1;
     }
   }
 

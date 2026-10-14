@@ -151,6 +151,23 @@ namespace Mm::AddressSpace {
     return Mm::Vmm::mapLargeIn(root, virtualAddress, frame, flags | Mm::Vmm::USER);
   }
 
+  /// Builds the page tables for the user range `[start, start + length)`
+  /// without mapping any page, so faults in it later need only their own
+  /// frame. Returns false when the range leaves the user half or no frame
+  /// is available for a table.
+  function prepareRange(root: u64, start: u64, length: u64): boolean {
+    return isUserRange(start, length) && Mm::Vmm::prepareIn(root, start, length, Mm::Vmm::USER);
+  }
+
+  /// Maps the frame `frame`, which the caller zeroed and owns, at
+  /// `virtualAddress`; panics when it cannot, because the caller prepared
+  /// the tables (`prepareRange`) and checked the page was not mapped.
+  function mapPrepared(root: u64, virtualAddress: u64, frame: u64, flags: u64): void {
+    if (!mapPage(root, virtualAddress, frame, flags)) {
+      @panic("address space: a page in a prepared range could not be mapped");
+    }
+  }
+
   /// Maps a new zeroed frame at `virtualAddress` and returns it, or
   /// `Mm::Pmm::NO_FRAME` when no frame is left or the address cannot be mapped.
   /// The space owns the frame from then on.

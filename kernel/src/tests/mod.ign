@@ -16,6 +16,7 @@
 //! | `Tests::Locks`        | `locks.ign`         | spinlocks: interrupts, no preemption while held, mutual exclusion, ranks |
 //! | `Tests::Vfs`          | `vfs.ign`           | path rules, create, read, write, remove, copy on write     |
 //! | `Tests::AddressSpace` | `address_space.ign` | private user half, shared kernel half, no leaked frames    |
+//! | `Tests::Memory`       | `memory.ign`        | lazy regions: reservations, touches, refusals, release     |
 //! | `Tests::Protection`   | `protection.ign`    | SMAP and SMEP stop ring 0 at user pages                    |
 //! | `Tests::Timer`        | `timer.ign`         | ticks arrive                                               |
 //! | `Tests::Context`      | `context.ign`       | the stack switch, the argument, alignment, registers       |
@@ -40,6 +41,7 @@ import _ from "./cpu_local";
 import _ from "./heap";
 import _ from "./initramfs";
 import _ from "./locks";
+import _ from "./memory";
 import _ from "./pmm";
 import _ from "./protection";
 import _ from "./scheduler";

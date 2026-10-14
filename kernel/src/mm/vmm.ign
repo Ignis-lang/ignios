@@ -757,6 +757,59 @@ namespace Mm::Vmm {
     return tableAt(*entry & ADDRESS_MASK);
   }
 
+  /// Builds every page table needed to map 4 KiB pages in
+  /// `[start, start + length)` of the space `root`, mapping no page. With
+  /// `USER` in `flags` the entries allow user access. Returns false when a
+  /// frame for a table is not available or a 2 MiB page is in the way; the
+  /// tables made so far stay, empty but valid, as with `mapIn`. A later
+  /// `mapIn` in the range then never needs a frame for a table.
+  function prepareIn(root: u64, start: u64, length: u64, flags: u64): boolean {
+    Arch::Spin::lockIrq(tableLock());
+
+    let mut address: u64 = start / LARGE_PAGE_SIZE * LARGE_PAGE_SIZE;
+    let mut ready: boolean = true;
+
+    while (ready && address < start + length) {
+      let pdpt: *mut u64 = descendOrNull(tableAt(root), level4Index(address), flags & USER);
+      let directory: *mut u64 = pdpt == null ? null : descendOrNull(pdpt, level3Index(address), flags & USER);
+
+      if (directory == null || (*(directory + level2Index(address)) & HUGE) != 0) {
+        ready = false;
+      } else {
+        ready = descendOrNull(directory, level2Index(address), flags & USER) != null;
+      }
+
+      address += LARGE_PAGE_SIZE;
+    }
+
+    Arch::Spin::unlockIrq(tableLock());
+
+    return ready;
+  }
+
+  /// `descend`, returning null instead of panicking when no frame is left
+  /// for a new table.
+  function descendOrNull(table: *mut u64, index: u64, userBit: u64): *mut u64 {
+    let entry: *mut u64 = table + index;
+
+    if ((*entry & PRESENT) == 0) {
+      let frame: u64 = Mm::Pmm::allocateFrame();
+
+      if (frame == Mm::Pmm::NO_FRAME) {
+        return null;
+      }
+
+      Lib::Mem::fill(Boot::Hhdm::toVirtual(frame), 0, PAGE_SIZE);
+      *entry = frame | WRITABLE | PRESENT;
+    }
+
+    if (userBit != 0) {
+      *entry = *entry | userBit;
+    }
+
+    return tableAt(*entry & ADDRESS_MASK);
+  }
+
   /// A zeroed frame for a page table.
   function allocateTable(): u64 {
     let frame: u64 = Mm::Pmm::allocateFrame();
