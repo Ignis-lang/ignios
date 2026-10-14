@@ -48,7 +48,7 @@ Each subsystem is a directory under `kernel/src/` with a `mod.ign` facade. The f
 | `apic/` | `Apic` | `@apic` | Acpi, Arch, Drivers, Mm | `Lapic`, `Ioapic` |
 | `time/` | `Time` | `@time` | Apic, Arch, Drivers | `Timer` |
 | `sched/` | `Sched` | `@sched` | Arch, Mm, Time | `Thread`, `Scheduler`, `Wait`, `Mutex` |
-| `proc/` | `Proc` | `@proc` | Arch, Boot, Drivers, Fs, Lib, Mm, Sched | `Process`, `Elf`, `Programs`, `Memory` |
+| `proc/` | `Proc` | `@proc` | Arch, Boot, Drivers, Fs, Lib, Mm, Sched | `Process`, `Elf`, `Programs`, `Memory`, `User` |
 | `power/` | `Power` | `@power` | Acpi, Arch, Drivers | power off and reset |
 | `syscall/` | `Syscall` | `@syscall` | Arch, Drivers, Fs, Lib, Mm, Power, Proc, Sched, Time | `Operation`, `Core`, `Linux`, `Native` |
 | `trap/` | `Trap` | `@trap` | Apic, Arch, Drivers, Proc, Sched, Time | `Exception`, `Setup`, the dispatcher |
@@ -145,13 +145,13 @@ Read in this order: `hhdm`, `pmm`, `vmm`, `heap`, `address_space`. Each uses the
 
 **`boot/hhdm.ign`.** Physical address `p` is at `offset + p` in the higher half direct map. Two functions. Doc 09.
 
-**`mm/pmm.ign`.** The frame allocator, a bitmap with one bit per 4 KiB frame. The header shows how a bit maps to a frame number and an address, and where the bitmap itself is placed. A second bitmap marks the frames the allocator manages, so freeing a frame that was never usable panics instead of adding firmware or kernel memory to the free list. `allocateLargeFrame` hands out 2 MiB aligned runs of 512 frames. Frame 0 is never handed out so address 0 can mean "no frame". Doc 08.
+**`mm/pmm.ign`.** The frame allocator, a bitmap with one bit per 4 KiB frame. The header shows how a bit maps to a frame number and an address, and where the bitmap itself is placed. A second bitmap marks the frames the allocator manages, so freeing a frame that was never usable panics instead of adding firmware or kernel memory to the free list. `allocateLargeFrame` hands out 2 MiB aligned runs of 512 frames. Frame 0 is never handed out so address 0 can mean "no frame". A third array holds a reference count per frame: `freeFrame` drops one and returns the frame only at zero, so a frame two spaces map survives the first teardown. `reserve` promises free frames to a lazy mapping; `allocateFrame` leaves them alone and `allocateReserved` takes them, which is the commit accounting of demand paging. Doc 08, 26.
 
 **`mm/vmm.ign`.** The page tables. This is the longest explanation in the tree. The header shows the address split (9+9+9+9+12 bits), the page table entry bits, the PAT memory types and the virtual address space map. `initialize` has the numbered order of operations. The `*In` functions work on any PML4, which is what lets the same code build a process address space. Doc 09.
 
 **`mm/heap.ign`.** A first-fit allocator over a region that grows on demand. The header draws the 16-byte block header, the address-ordered free list, how an aligned request splits a block and how a free merges neighbours. The compiler's allocation handlers (`onAllocate` and `onFree`) at the end of the namespace are what escaping closures use. Doc 10.
 
-**`mm/address_space.ign`.** One PML4 per process. The lower half is private and the upper half is a copy of the kernel's 256 entries, so kernel mappings made later still show up in every process. The user-pointer functions (`copyFromUser` and the others) translate through the process page tables instead of dereferencing a user address, which is why SMAP costs the kernel nothing. A process may also hold 2 MiB pages (`mapLargePage`), and `destroy` frees them as their 512 frames. Doc 14.
+**`mm/address_space.ign`.** One PML4 per process. The lower half is private and the upper half is a copy of the kernel's 256 entries, so kernel mappings made later still show up in every process. The user-pointer functions (`copyFromUser` and the others) translate through the process page tables instead of dereferencing a user address, which is why SMAP costs the kernel nothing. A process may also hold 2 MiB pages (`mapLargePage`), and `destroy` frees them as their 512 frames. `prepareRange` builds the page tables of a range without mapping anything, so a later page fault there needs only its own frame. Doc 14, 26.
 
 ## Part 6. ACPI, APIC and the timer
 
@@ -215,7 +215,9 @@ Docs 14 and 15.
 
 **`mm/modules.ign` and `proc/programs.ign`.** `Mm::Modules` maps the Limine modules and finds one by its configuration string; the only one is the initramfs. `Proc::Programs::run` splits a command line into arguments, looks the program up in the file tree (`/bin/NAME` for a name without a slash) and starts it. `Proc::Process::buildStack` writes the Linux initial stack: argc, argv, an empty envp, the auxiliary vector and the strings, with the diagram in its comment.
 
-**`proc/memory.ign` and `syscall/linux/memory.ign`.** `mmap` and `munmap`. `Proc::Memory` keeps a heap table of regions per process that grows from 32 to 1024 entries, hands out addresses downwards from `0x7F0000000000`, allocates and zeroes every page at `mmap` time, and turns the protection into page table bits (W for write, NX unless execute, nothing mapped for `PROT_NONE`). `unmap` trims or splits regions and frees their pages; it never touches the ELF image or the stack. The Linux side checks the arguments (the header has the table), copies a file for a private file mapping, and refuses `MAP_SHARED`, `MAP_FIXED` and write with execute. `user/mmtest` checks all of it from ring 3. Doc 20.
+**`proc/memory.ign` and `syscall/linux/memory.ign`.** `mmap` and `munmap`. `Proc::Memory` keeps a heap table of regions per process that grows from 32 to 1024 entries, hands out addresses downwards from `0x7F0000000000`, and turns the protection into page table bits (W for write, NX unless execute, nothing mapped for `PROT_NONE`). An anonymous region is lazy: `map` builds its page tables and reserves one frame per page, and `resolve` gives a page its zeroed frame on first access, from a page fault or a system call copy. A file mapping is still a private copy filled at once. `unmap` trims or splits regions, frees the touched pages and returns the rest of the reservation; it never touches the ELF image. The stack grows the same way, on demand, down to 8 MiB below its top (`growStack`). The Linux side checks the arguments (the header has the table), copies a file for a private file mapping, and refuses `MAP_SHARED`, `MAP_FIXED` and write with execute. `user/mmtest` checks all of it from ring 3. Doc 20, 26.
+
+**`proc/user.ign`.** The copies between the kernel and the running process's memory that every system call uses. Each one first resolves the pages of its range through the regions (`Proc::Memory::resolve`), exactly as a page fault from ring 3 would, so a `read` into a buffer the program never touched works; then it copies through `Mm::AddressSpace`. `resolveFault` is the same decision for the page fault handler, which the trap dispatcher asks before it kills a process. Doc 26.
 
 **`user/lib/common/alloc.ign`.** `std::alloc`, the heap of user programs: first-fit over 64 KiB arenas from `mmap`, an address-ordered free list that merges neighbours, and a mapping of its own for a block over 16 KiB, given back with `munmap`. It also defines the compiler's `@allocHandler` and `@freeHandler`, so closures that capture values work in a program that imports it. The header draws both block layouts.
 
@@ -269,7 +271,7 @@ Paging is set up in `mm/vmm.ign`. The kernel uses one PML4 entry per region so t
                     │ mmap regions, handed out downwards from  │
                     │ 0x00007F0000000000 (Proc::Memory)        │
 0x00007FFFFFFF7000  ├──────────────────────────────────────────┤
-                    │ user stack: 8 pages, grows down          │
+                    │ user stack: grows on demand, up to 8 MiB │
 0x00007FFFFFFFF000  ├──────────────────────────────────────────┤
                     │ USER_LIMIT: this page is never mapped    │
 0x0000800000000000  ├─ - - - - non-canonical hole - - - - - - -┤
@@ -365,9 +367,9 @@ pmm: 53469 usable frames, 53465 free (208 MiB)
 `Mm::Pmm::initialize` counted 53469 usable 4 KiB frames, and `Mm::Pmm::report` printed the line. Four are already taken: they hold the two bitmaps, used and managed (2 x 1024 words of 8 bytes = 16 KiB = 4 frames). The size in MiB is `free * 4 / 1024` with integer division. Doc 08.
 
 ```text
-pmm: self-test ok
+pmm: self-test ok, reservations included
 ```
-`Tests::Pmm::run` allocated and freed 8 frames and checked alignment, uniqueness, the free count and reuse, and that `isAllocated` is false for the kernel image's first physical frame (from Limine, since the VMM is not up yet), which was never usable.
+`Tests::Pmm::run` allocated and freed 8 frames and checked alignment, uniqueness, the free count and reuse, and that `isAllocated` is false for the kernel image's first physical frame (from Limine, since the VMM is not up yet), which was never usable. Then it reserved every available frame: `allocateFrame` and a second reservation were refused while `allocateReserved` still got a frame, and giving the reservation back restored both.
 
 ```text
 vmm: cr3 switched, cr3 0x0000000000001000, pml4 0x0000000000001000
@@ -402,9 +404,12 @@ vfs: self-test ok, lookup, create, read, write, truncate, remove, copy on write 
 `Fs::Vfs::initialize` built the tree: the root, `bin` with its fourteen programs, `etc` and `etc/motd` from the archive, then `dev` and the device node `dev/console`. The file bytes are the same 191563 as in the archive, because nothing was copied. `Tests::Vfs::run` checked every path rule, created, wrote, read, truncated and removed a test directory `/t` and checked that the heap returned to where it was, then wrote to `/etc/motd` to check that the write copied the file and left the archive alone.
 
 ```text
-address space: self-test ok, private user half, shared kernel half, frames returned
+address space: self-test ok, private user half, shared kernel half, a frame shared by two spaces outlived the first, frames returned
+memory: demand paging self-test ok, 64 MiB took 34 frames of page tables and 3 touched pages took 3 frames
 ```
-`Tests::AddressSpace::run` created two spaces, checked that the lower half is private and the upper half shared (including a mapping made after the spaces existed), switched CR3 between them, mapped a 2 MiB user page in a third space, and destroyed them all without leaking frames. Doc 14.
+`Tests::AddressSpace::run` created two spaces, checked that the lower half is private and the upper half shared (including a mapping made after the spaces existed), switched CR3 between them, mapped a 2 MiB user page in a third space, and destroyed them all without leaking frames. It also mapped one frame in two spaces with a reference for each: destroying the first left the frame and its contents, destroying the second freed it. Doc 14.
+
+`Tests::Memory::run` then checked demand paging in a space of its own: a lazy 64 MiB mapping took only its page tables and reserved 16384 frames; touching 3 pages took exactly 3 frames from the reservation; no region, a fetch from a non-executable region, a write to a read-only page and `PROT_NONE` were refused; a mapping larger than the free memory was refused; and `munmap` and the end of a process gave every reservation back. Doc 26.
 
 ```text
 protection: smep on, smap on
@@ -653,7 +658,7 @@ elf: PT_LOAD 0x0000000000403000 file 403 mem 403 r--
 elf: PT_LOAD 0x0000000000404000 file 0 mem 4753 rw-
 elf: 3 segments, 6 pages, entry 0x0000000000400000, stack pointer 0x00007fffffffefa0, argc 1, abi linux
 fstest: openat, read, write, lseek, close, fstat, newfstatat, getdents64 and mkdirat behave as on Linux
-process 20 exited with status 0
+process 21 exited with status 0
 user: fstest passed, and removing /fstest gave back every byte it used
 ```
 `Tests::User::runFiles` ran `/bin/fstest` (`user/fstest/src/main.ign`). Its data segment has no file bytes and 4753 bytes of memory: it is all `.bss`, the buffers of the checks. The program went through every file system call from ring 3: `openat` of `/etc/motd` gave descriptor 3, the first one after the console's 0, 1 and 2; reads, seeks, `fstat`; every `openat` error; `mkdirat` of `/fstest`; creating, appending and truncating `/fstest/a`; a path relative to a directory descriptor; `getdents64` (`.`, `..`, `a`, `b`); the limit of 256 descriptors (the table grows from 16); and the console as a character device. Its exit status would have named the first check that failed. The test then removed `/fstest` with `Fs::Vfs::remove` and checked that the heap and the PMM were back where they were before the program started. Doc 15.
@@ -661,40 +666,42 @@ user: fstest passed, and removing /fstest gave back every byte it used
 ```text
 Welcome to IgniOS.
 mmtest: anonymous and file mappings, protection, munmap, their errors and std::alloc behave as expected
-process 21 exited with status 0
-process 22 faulted: #PF Page Fault at rip 0x0000000000400325, error 0x0000000000000007, address 0x00007efffffff000
-process 22 killed, status 139
-process 23 faulted: #PF Page Fault at rip 0x00000000004004cf, error 0x0000000000000004, address 0x00007efffffff000
+process 22 exited with status 0
+process 23 faulted: #PF Page Fault at rip 0x0000000000400375, error 0x0000000000000006, address 0x00007efffffff000
 process 23 killed, status 139
-process 24 faulted: #PF Page Fault at rip 0x00007efffffff000, error 0x0000000000000015, address 0x00007efffffff000
+process 24 faulted: #PF Page Fault at rip 0x000000000040051f, error 0x0000000000000004, address 0x00007efffffff000
 process 24 killed, status 139
-process 25 faulted: #PF Page Fault at rip 0x0000000000400542, error 0x0000000000000004, address 0x00007efffffff000
+process 25 faulted: #PF Page Fault at rip 0x00007efffffff000, error 0x0000000000000015, address 0x00007efffffff000
 process 25 killed, status 139
+process 26 faulted: #PF Page Fault at rip 0x00000000004005ac, error 0x0000000000000004, address 0x00007efffffff000
+process 26 killed, status 139
+process 27 faulted: #PF Page Fault at rip 0x00000000004025ff, error 0x0000000000000006, address 0x00007fffff7fe110
+process 27 killed, status 139
 panic: alloc: free of a pointer that is not a live block at alloc.ign:112
-process 26 exited with status 101
-user: mmtest passed, writing read-only, using unmapped, executing non-exec and touching PROT_NONE memory were killed, a double free was caught, no frame leaked
+process 28 exited with status 101
+user: mmtest passed, writing read-only, using unmapped, executing non-exec, touching PROT_NONE memory and overflowing the 8 MiB stack were killed, a double free was caught, no frame leaked
 ```
-`Tests::User::runMemory` ran `/bin/mmtest` (the loader's `elf:` lines left out). The first line is `/etc/motd`, which the program read into a mapping and wrote from it, to show that system calls take mapped memory as a buffer. The checks also mapped `/etc/motd` and a page of `/bin/hello` privately, and ran `std::alloc` through 200 blocks, a large block and a closure. Then the program ran four more times with an argument, each one doing something the page tables must stop, and each one was killed. Every first mapping of a process is the page below `0x7F0000000000`, `0x7EFFFFFFF000`. The error codes say why: `0x7` is a write to a present read-only user page, `0x4` a user read of a page that is not present (unmapped, or `PROT_NONE`, which maps nothing), `0x15` an instruction fetch from a no-execute page; `rip` equal to the address is the jump into the mapping. The last run freed a `std::alloc` block twice; the allocator panicked, and the shared handler of `std::panic` printed the message with its file and line on standard error and exited with 101. The PMM free count was the same afterwards. Doc 20.
+`Tests::User::runMemory` ran `/bin/mmtest` (the loader's `elf:` lines left out). The first line is `/etc/motd`, which the program read into a mapping and wrote from it, to show that system calls take mapped memory as a buffer. The checks also mapped `/etc/motd` and a page of `/bin/hello` privately, and ran `std::alloc` through 200 blocks, a large block and a closure. Then the program ran four more times with an argument, each one doing something the page tables must stop, and each one was killed. Every first mapping of a process is the page below `0x7F0000000000`, `0x7EFFFFFFF000`. The error codes say why: `0x7` is a write to a present read-only user page, `0x4` a user read of a page that is not present (unmapped, or `PROT_NONE`, which maps nothing), `0x15` an instruction fetch from a no-execute page; `rip` equal to the address is the jump into the mapping. The last run freed a `std::alloc` block twice; the allocator panicked, and the shared handler of `std::panic` printed the message with its file and line on standard error and exited with 101. The PMM free count was the same afterwards. Doc 20. The program also read a file into two pages of a fresh mapping it never touched, and recursed 1 MiB deep with a page of locals per call; a fifth kill line is the `overflow` mode, whose recursion ran off the bottom of the 8 MiB stack (address `0x7fffff7fe...`, just below `STACK_BOTTOM`). The write to a read-only mapping now faults with error 6 (page not present) instead of 7: the page was never touched, so the resolver is asked first and refuses the write.
 
 ```text
 elf: 3 segments, 6 pages, entry 0x0000000000400000, stack pointer 0x00007fffffffefa0, argc 1, abi native
 nativetest: hello through the native ABI
 /
-process 28 exited with status 0
+process 30 exited with status 0
 ...
-process 102 killed, status 137
-process 103 killed, status 137
 process 104 killed, status 137
 process 105 killed, status 137
+process 106 killed, status 137
 process 107 killed, status 137
+process 108 killed, status 137
 nativetest: every native call, its arguments and its status codes behave as specified
-process 27 exited with status 0
+process 29 exited with status 0
 elf: the IgniOS ABI note names an unknown version
 elf: a note runs past the end of the file
 user: nativetest passed, a note of version 2 and a note past the end of the file were refused
 ...
 stress: 4 workers, 25 rounds each, every file read back and every shared record whole
-process 112 exited with status 0
+process 114 exited with status 0
 user: stress passed, 4 processes at once, 5 timer ticks landed inside system calls
 ```
 `Tests::User::runNative` ran `/bin/nativetest`. Its ELF carries the IgniOS note, so the loader printed `abi native` (every other program says `abi linux`) and the process used the native call table. The program checked that a call returns its status in RAX and its value in RDX, that an error leaves RDX at 0 even when RDX went in with another value, and that call 9999 and Linux's `getpid` number 39 are both `NOT_SUPPORTED`; then every native call with its errors, in a directory `/nt` that the test removed afterwards (the table in `user/nativetest/src/main.ign` lists the checks). The lines left out (`...`) are its own children: `/bin/pwd` and `/bin/rmdir` runs for the spawn checks, 63 `pwd` children that fill the 64-slot process table, and helpers for the parent checks (an orphan and a child that ends before its parent are both freed). The five `killed, status 137` lines are the kill checks: a child sleeping 10 s, one spinning in ring 3, one waiting for the keyboard, one waiting for its own child, and one that killed itself. Each ended right away with 128 + 9. Then the test handed the loader two copies of the same file with the note broken, one claiming version 2 and one with a description larger than the file; both were refused before anything was mapped, and no memory leaked. Doc 21.
