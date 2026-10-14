@@ -325,7 +325,7 @@ namespace Syscall::Native {
     putWord(header, 8, (*child).id);
     putWord(header, 16, (*child).nameLength);
 
-    if (!Mm::AddressSpace::isAccessible(root, buffer, total, true) || !Mm::AddressSpace::copyToUser(root, buffer, header as *u8, ENTRY_HEADER) || !Mm::AddressSpace::copyToUser(root, buffer + ENTRY_HEADER, (*child).name as *u8, (*child).nameLength)) {
+    if (!Proc::User::isAccessible(root, buffer, total, true) || !Proc::User::copyToUser(root, buffer, header as *u8, ENTRY_HEADER) || !Proc::User::copyToUser(root, buffer + ENTRY_HEADER, (*child).name as *u8, (*child).nameLength)) {
       return Syscall::Core::BAD_ADDRESS;
     }
 
@@ -462,7 +462,7 @@ namespace Syscall::Native {
       return Fs::Vfs::NO_MEMORY;
     }
 
-    if (!Mm::AddressSpace::copyFromUser(Proc::Process::currentRoot(), strings, arguments, argumentBytes)) {
+    if (!Proc::User::copyFromUser(Proc::Process::currentRoot(), strings, arguments, argumentBytes)) {
       Mm::Heap::free(strings);
       return Syscall::Core::BAD_ADDRESS;
     }
@@ -545,7 +545,7 @@ namespace Syscall::Native {
   function waitAny(statusPointer: u64, id: *mut u64): u64 {
     let root: u64 = Proc::Process::currentRoot();
 
-    if (!Mm::AddressSpace::isAccessible(root, statusPointer, 8, true)) {
+    if (!Proc::User::isAccessible(root, statusPointer, 8, true)) {
       return Syscall::Core::BAD_ADDRESS;
     }
 
@@ -556,7 +556,7 @@ namespace Syscall::Native {
       return Syscall::Core::NO_CHILD;
     }
 
-    if (!Mm::AddressSpace::copyToUser(root, statusPointer, &status as *u8, 8)) {
+    if (!Proc::User::copyToUser(root, statusPointer, &status as *u8, 8)) {
       return Syscall::Core::BAD_ADDRESS;
     }
 
@@ -599,7 +599,7 @@ namespace Syscall::Native {
       return Fs::Vfs::INVALID;
     }
 
-    if (!Mm::AddressSpace::copyToUser(Proc::Process::currentRoot(), buffer, pathBuffer() as *u8, length)) {
+    if (!Proc::User::copyToUser(Proc::Process::currentRoot(), buffer, pathBuffer() as *u8, length)) {
       return Syscall::Core::BAD_ADDRESS;
     }
 
@@ -670,7 +670,7 @@ namespace Syscall::Native {
       return Fs::Vfs::NAME_TOO_LONG;
     }
 
-    if (!Mm::AddressSpace::copyFromUser(Proc::Process::currentRoot(), pathBuffer(), path, length)) {
+    if (!Proc::User::copyFromUser(Proc::Process::currentRoot(), pathBuffer(), path, length)) {
       return Syscall::Core::BAD_ADDRESS;
     }
 
@@ -716,7 +716,7 @@ namespace Syscall::Native {
       putWord(scratch, 24, (*node).mode);
     }
 
-    if (!Mm::AddressSpace::copyToUser(Proc::Process::currentRoot(), buffer, scratch as *u8, INFO_SIZE)) {
+    if (!Proc::User::copyToUser(Proc::Process::currentRoot(), buffer, scratch as *u8, INFO_SIZE)) {
       return Syscall::Core::BAD_ADDRESS;
     }
 

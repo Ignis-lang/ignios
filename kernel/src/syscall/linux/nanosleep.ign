@@ -43,7 +43,7 @@ namespace Syscall::Linux {
     let root: u64 = Proc::Process::currentRoot();
     let mut time: Timespec = Timespec { seconds: 0, nanoseconds: 0 };
 
-    if (!Mm::AddressSpace::copyFromUser(root, &mut time as *mut u8, request, 16)) {
+    if (!Proc::User::copyFromUser(root, &mut time as *mut u8, request, 16)) {
       return Linux::failure(Linux::EFAULT);
     }
 
@@ -64,7 +64,7 @@ namespace Syscall::Linux {
     if (remaining != 0) {
       let zero: Timespec = Timespec { seconds: 0, nanoseconds: 0 };
 
-      if (!Mm::AddressSpace::copyToUser(root, remaining, &zero as *u8, 16)) {
+      if (!Proc::User::copyToUser(root, remaining, &zero as *u8, 16)) {
         return Linux::failure(Linux::EFAULT);
       }
     }

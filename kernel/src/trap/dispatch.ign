@@ -45,6 +45,7 @@ import Apic from "@apic";
 import Arch from "@arch";
 import Drivers from "@drivers";
 import Fs from "@fs";
+import Proc from "@proc";
 import Sched from "@sched";
 import Time from "@time";
 import _ from "./exception";
@@ -141,6 +142,12 @@ namespace Trap {
     }
 
     if (Exception::isUserFault(frame)) {
+      // A page of a region the process never touched yet gets its frame
+      // here, and the instruction runs again.
+      if (vector == Exception::PAGE_FAULT && Proc::User::resolveFault(Exception::readCr2(), (*frame).errorCode)) {
+        return;
+      }
+
       Exception::killUserProcess(frame);
     }
 

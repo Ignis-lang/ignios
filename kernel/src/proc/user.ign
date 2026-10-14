@@ -1,0 +1,148 @@
+//!
+//! # User Memory Access
+//!
+//! The copies between the kernel and the running process's memory that
+//! system calls use, and the page fault resolution behind them.
+//!
+//! ## Overview
+//!
+//! The kernel never dereferences a user pointer: `Mm::AddressSpace` walks
+//! the page tables and copies through the direct map. A page of a region
+//! that was never touched is not in the page tables yet, so a walk alone
+//! would call a valid buffer bad. Every function here first resolves each
+//! page of the range through the regions of the running process
+//! (`Proc::Memory::resolve`), exactly as a page fault from ring 3 would, and
+//! only then copies:
+//!
+//! ```text
+//!   copyToUser(root, address, source, length)
+//!     for each page of [address, address + length):
+//!       translateUser(page, write) ok ............ present, allowed
+//!       otherwise Proc::Memory::resolve(page, WRITE)
+//!           ├─ no region, or it forbids writing ... fail (EFAULT)
+//!           └─ frame mapped ......................... continue
+//!     Mm::AddressSpace::copyToUser(...)
+//! ```
+//!
+//! `resolveFault` is the same decision for the page fault handler. The
+//! functions take `root` like their `Mm::AddressSpace` counterparts; it must
+//! be the running process's space.
+//!
+//! See concept doc 26.
+
+import Mm from "@mm";
+import _ from "./memory";
+import _ from "./process";
+
+/// The user memory API of system calls.
+namespace Proc::User {
+  /// 4 KiB.
+  const PAGE_SIZE: u64 = 4096;
+
+  /// Page fault error code bit 0: the page was present (a protection
+  /// violation, not a missing page).
+  const FAULT_PRESENT: u64 = 1;
+
+  /// Page fault error code bit 1: the access was a write.
+  const FAULT_WRITE: u64 = 2;
+
+  /// Page fault error code bit 4: the access was an instruction fetch.
+  const FAULT_FETCH: u64 = 16;
+
+  /// Resolves a page fault the running process took at `address` with the
+  /// error code `code`. Returns true when the page is now mapped and the
+  /// instruction can run again, false when the access is not allowed and
+  /// the process must be killed. A fault on a present page is a protection
+  /// violation and is never resolved.
+  function resolveFault(address: u64, code: u64): boolean {
+    let slot: u64 = Proc::Process::currentSlot();
+
+    if (slot == Proc::Process::NO_PROCESS || (code & FAULT_PRESENT) != 0) {
+      return false;
+    }
+
+    let mut access: u64 = Proc::Memory::READ;
+
+    if ((code & FAULT_WRITE) != 0) {
+      access = Proc::Memory::WRITE;
+    } else if ((code & FAULT_FETCH) != 0) {
+      access = Proc::Memory::EXECUTE;
+    }
+
+    return Proc::Memory::resolve(slot, Proc::Process::currentRoot(), address, access);
+  }
+
+  /// True when every page of the byte range is, or can now be made,
+  /// accessible to the process, writable when `forWrite`.
+  function isAccessible(root: u64, address: u64, length: u64, forWrite: boolean): boolean {
+    return prepare(root, address, length, forWrite) && Mm::AddressSpace::isAccessible(root, address, length, forWrite);
+  }
+
+  /// `Mm::AddressSpace::copyFromUser` after resolving the range.
+  function copyFromUser(root: u64, destination: *mut u8, source: u64, length: u64): boolean {
+    return prepare(root, source, length, false) && Mm::AddressSpace::copyFromUser(root, destination, source, length);
+  }
+
+  /// `Mm::AddressSpace::copyToUser` after resolving the range.
+  function copyToUser(root: u64, destination: u64, source: *u8, length: u64): boolean {
+    return prepare(root, destination, length, true) && Mm::AddressSpace::copyToUser(root, destination, source, length);
+  }
+
+  /// `Mm::AddressSpace::copyStringFromUser`, resolving one page at a time:
+  /// the string's length is not known in advance, so only the pages the
+  /// copy reaches are resolved, and a string that ends before a page no
+  /// region covers is fine.
+  function copyStringFromUser(root: u64, destination: *mut u8, source: u64, capacity: u64): u64 {
+    let mut done: u64 = 0;
+
+    while (done < capacity) {
+      let address: u64 = source + done;
+      let chunk: u64 = Mm::AddressSpace::bytesToPageEnd(address, capacity - done);
+
+      if (!prepare(root, address, 1, false)) {
+        return Mm::AddressSpace::NOT_MAPPED;
+      }
+
+      let copied: u64 = Mm::AddressSpace::copyStringFromUser(root, destination + done, address, chunk);
+
+      if (copied == Mm::AddressSpace::NOT_MAPPED) {
+        return Mm::AddressSpace::NOT_MAPPED;
+      }
+
+      if (copied < chunk) {
+        return done + copied;
+      }
+
+      done += chunk;
+    }
+
+    return capacity;
+  }
+
+  /// Resolves every page of the range that is not yet accessible. Returns
+  /// false when the range leaves the user half or a page cannot be made
+  /// accessible; pages resolved before that stay mapped, as after a fault.
+  function prepare(root: u64, address: u64, length: u64, forWrite: boolean): boolean {
+    if (!Mm::AddressSpace::isUserRange(address, length)) {
+      return false;
+    }
+
+    let slot: u64 = Proc::Process::currentSlot();
+    let access: u64 = forWrite ? Proc::Memory::WRITE : Proc::Memory::READ;
+    let mut done: u64 = 0;
+
+    while (done < length) {
+      let page: u64 = address + done;
+
+      if (Mm::AddressSpace::translateUser(root, page, forWrite) == Mm::AddressSpace::NOT_MAPPED) {
+        if (slot == Proc::Process::NO_PROCESS || !Proc::Memory::resolve(slot, root, page, access)) {
+          return false;
+        }
+      }
+
+      done += Mm::AddressSpace::bytesToPageEnd(page, length - done);
+    }
+
+    return true;
+  }
+}

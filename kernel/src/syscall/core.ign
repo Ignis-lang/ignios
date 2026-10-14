@@ -100,7 +100,7 @@ namespace Syscall::Core {
       return Fs::Files::BAD_DESCRIPTOR;
     }
 
-    if (!Mm::AddressSpace::isAccessible(root, buffer, total, true)) {
+    if (!Proc::User::isAccessible(root, buffer, total, true)) {
       return BAD_ADDRESS;
     }
 
@@ -116,7 +116,7 @@ namespace Syscall::Core {
         return moved > 0 ? Fs::Vfs::OK : status;
       }
 
-      if (got > 0 && !Mm::AddressSpace::copyToUser(root, buffer + moved, chunk as *u8, got)) {
+      if (got > 0 && !Proc::User::copyToUser(root, buffer + moved, chunk as *u8, got)) {
         return BAD_ADDRESS;
       }
 
@@ -148,7 +148,7 @@ namespace Syscall::Core {
       return Fs::Files::BAD_DESCRIPTOR;
     }
 
-    if (!Mm::AddressSpace::isAccessible(root, buffer, total, false)) {
+    if (!Proc::User::isAccessible(root, buffer, total, false)) {
       return BAD_ADDRESS;
     }
 
@@ -158,7 +158,7 @@ namespace Syscall::Core {
       let piece: u64 = total - moved < COPY_BUFFER_SIZE ? total - moved : COPY_BUFFER_SIZE;
       let mut written: u64 = 0;
 
-      if (!Mm::AddressSpace::copyFromUser(root, chunk, buffer + moved, piece)) {
+      if (!Proc::User::copyFromUser(root, chunk, buffer + moved, piece)) {
         return BAD_ADDRESS;
       }
 

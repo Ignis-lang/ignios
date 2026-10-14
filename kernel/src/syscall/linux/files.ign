@@ -11,7 +11,7 @@
 //! Linux arguments into the ABI-neutral ones of `Fs`, and turns the status
 //! it gets back into a negated errno with `errorFor`. User memory is never
 //! dereferenced: bytes go through a kernel buffer and
-//! `Mm::AddressSpace::copyFromUser` or `copyToUser`, and paths through
+//! `Proc::User::copyFromUser` or `copyToUser`, and paths through
 //! `copyStringFromUser`.
 //!
 //! ```text
@@ -254,7 +254,7 @@ namespace Syscall::Linux {
   function statAtLocked(directory: u64, path: u64, buffer: u64, flags: u64): u64 {
     let table: u64 = Proc::Process::currentSlot();
     let root: u64 = Proc::Process::currentRoot();
-    let length: u64 = Mm::AddressSpace::copyStringFromUser(root, pathBuffer(), path, Fs::Vfs::PATH_MAX);
+    let length: u64 = Proc::User::copyStringFromUser(root, pathBuffer(), path, Fs::Vfs::PATH_MAX);
 
     if (length == Mm::AddressSpace::NOT_MAPPED) {
       return Linux::failure(Linux::EFAULT);
@@ -313,7 +313,7 @@ namespace Syscall::Linux {
       return Linux::failure(Linux::ENOTDIR);
     }
 
-    if (!Mm::AddressSpace::isAccessible(root, buffer, count, true)) {
+    if (!Proc::User::isAccessible(root, buffer, count, true)) {
       return Linux::failure(Linux::EFAULT);
     }
 
@@ -358,7 +358,7 @@ namespace Syscall::Linux {
 
       fillDirent(recordBytes, entry, index + 1, length, name, nameLength);
 
-      if (!Mm::AddressSpace::copyToUser(root, buffer + written, recordBytes as *u8, length)) {
+      if (!Proc::User::copyToUser(root, buffer + written, recordBytes as *u8, length)) {
         return Linux::failure(Linux::EFAULT);
       }
 
@@ -409,7 +409,7 @@ namespace Syscall::Linux {
 
     *(pathBuffer() + length) = 0;
 
-    if (!Mm::AddressSpace::copyToUser(Proc::Process::currentRoot(), buffer, pathBuffer() as *u8, length + 1)) {
+    if (!Proc::User::copyToUser(Proc::Process::currentRoot(), buffer, pathBuffer() as *u8, length + 1)) {
       return Linux::failure(Linux::EFAULT);
     }
 
@@ -500,7 +500,7 @@ namespace Syscall::Linux {
     base: *mut *mut Fs::Node,
     length: *mut u64
   ): u64 {
-    let copied: u64 = Mm::AddressSpace::copyStringFromUser(Proc::Process::currentRoot(), pathBuffer(), path, Fs::Vfs::PATH_MAX);
+    let copied: u64 = Proc::User::copyStringFromUser(Proc::Process::currentRoot(), pathBuffer(), path, Fs::Vfs::PATH_MAX);
 
     if (copied == Mm::AddressSpace::NOT_MAPPED) {
       return Syscall::Core::BAD_ADDRESS;
@@ -553,7 +553,7 @@ namespace Syscall::Linux {
     putWord(stat, 56, 4096);
     putWord(stat, 64, (size + 511) / 512);
 
-    if (!Mm::AddressSpace::copyToUser(Proc::Process::currentRoot(), buffer, stat as *u8, STAT_SIZE)) {
+    if (!Proc::User::copyToUser(Proc::Process::currentRoot(), buffer, stat as *u8, STAT_SIZE)) {
       return Linux::failure(Linux::EFAULT);
     }
 

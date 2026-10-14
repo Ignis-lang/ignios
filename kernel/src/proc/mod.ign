@@ -12,6 +12,7 @@
 //! | `Proc::Elf`         | `elf.ign`      | map the `PT_LOAD` segments of a static ELF64 into a space |
 //! | `Proc::Programs`    | `programs.ign` | run a program from the file tree with its arguments       |
 //! | `Proc::Memory`      | `memory.ign`   | the regions `mmap` adds and `munmap` removes             |
+//! | `Proc::User`        | `user.ign`     | copies to and from user memory that resolve its pages     |
 //! | `Proc::LoadedImage` | `elf.ign`      | what the loader reports: entry point, segments, pages     |
 //!
 //! ## Dependencies
@@ -32,6 +33,7 @@ import _ from "./elf";
 import _ from "./memory";
 import _ from "./process";
 import _ from "./programs";
+import _ from "./user";
 
 /// Aggregate namespace of the process code. The files above contribute the
 /// sub-namespaces listed in the module header.

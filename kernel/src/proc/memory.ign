@@ -271,6 +271,51 @@ namespace Proc::Memory {
     return OK;
   }
 
+  /// Gives the page holding `address` its frame when a region of `slot`
+  /// allows `access` there (`READ`, `WRITE` or `EXECUTE`). Returns true when
+  /// the page is present afterwards with the access allowed, false when no
+  /// region covers it, the region forbids the access, or the page is present
+  /// without it (a write to a read-only page). Reading needs any access at
+  /// all, since x86 cannot map a page ring 3 cannot read; `PROT_NONE`
+  /// allows nothing. Runs in the thread of the process that owns `slot`.
+  function resolve(slot: u64, root: u64, address: u64, access: u64): boolean {
+    let region: *mut Proc::Region = regionContaining(slot, address);
+
+    if (region == null || (*region).protection == 0 || ((*region).protection & access) != access) {
+      return false;
+    }
+
+    let page: u64 = address / PAGE_SIZE * PAGE_SIZE;
+    let entry: u64 = Mm::Vmm::leafEntryIn(root, page);
+
+    if ((entry & Mm::Vmm::PRESENT) != 0) {
+      return (access & WRITE) == 0 || (entry & Mm::Vmm::WRITABLE) != 0;
+    }
+
+    return Mm::AddressSpace::allocatePage(root, page, pageFlags((*region).protection)) != Mm::Pmm::NO_FRAME;
+  }
+
+  /// The region of `slot` that holds `address`, or null.
+  function regionContaining(slot: u64, address: u64): *mut Proc::Region {
+    if (slot >= MAX_SLOTS) {
+      return null;
+    }
+
+    let mut index: u64 = 0;
+
+    while (index < *capacityOf(slot)) {
+      let region: *mut Proc::Region = regionAt(slot, index);
+
+      if ((*region).start != 0 && (*region).start <= address && address - (*region).start < (*region).length) {
+        return region;
+      }
+
+      index += 1;
+    }
+
+    return null;
+  }
+
   /// The number of regions `slot` has.
   function regionCount(slot: u64): u64 {
     let mut count: u64 = 0;
