@@ -66,6 +66,7 @@ namespace Tests::AddressSpace {
     testPrivateHalf(first, second, kernelRoot);
     testSwitching(first, second, kernelRoot);
     testLargePage(kernelRoot);
+    testSharedFrame();
 
     Mm::AddressSpace::destroy(first);
     Mm::AddressSpace::destroy(second);
@@ -76,7 +77,40 @@ namespace Tests::AddressSpace {
 
     Arch::Cpu::restoreInterrupts(saved);
 
-    Drivers::Console::writeLine("address space: self-test ok, private user half, shared kernel half, frames returned");
+    Drivers::Console::writeLine("address space: self-test ok, private user half, shared kernel half, a frame shared by two spaces outlived the first, frames returned");
+  }
+
+  /// A frame mapped in two spaces, with a reference for each, survives the
+  /// teardown of the first with its contents, and goes back to the PMM with
+  /// the second.
+  function testSharedFrame(): void {
+    let freeBefore: u64 = Mm::Pmm::freeFrameCount();
+    let owner: u64 = Mm::AddressSpace::create();
+    let sharer: u64 = Mm::AddressSpace::create();
+    let frame: u64 = Mm::AddressSpace::allocatePage(owner, SELF_TEST_ADDRESS, Mm::Vmm::WRITABLE);
+
+    if (owner == Mm::Pmm::NO_FRAME || sharer == Mm::Pmm::NO_FRAME || frame == Mm::Pmm::NO_FRAME) {
+      @panic("address space self-test: no memory for the shared frame check");
+    }
+
+    *(Boot::Hhdm::toVirtual(frame) as *mut u64) = SELF_TEST_MARKER_A;
+    Mm::Pmm::reference(frame);
+
+    if (!Mm::AddressSpace::mapPage(sharer, SELF_TEST_SECOND_ADDRESS, frame, 0) || Mm::Pmm::referenceCount(frame) != 2) {
+      @panic("address space self-test: the shared frame did not get its second reference");
+    }
+
+    Mm::AddressSpace::destroy(owner);
+
+    if (Mm::Pmm::referenceCount(frame) != 1 || *(Boot::Hhdm::toVirtual(frame) as *mut u64) != SELF_TEST_MARKER_A) {
+      @panic("address space self-test: tearing down one space freed a frame another still maps");
+    }
+
+    Mm::AddressSpace::destroy(sharer);
+
+    if (Mm::Pmm::isAllocated(frame) || Mm::Pmm::freeFrameCount() != freeBefore) {
+      @panic("address space self-test: the last reference did not free the shared frame");
+    }
   }
 
   /// The two spaces start with the kernel's upper-half entries and nothing

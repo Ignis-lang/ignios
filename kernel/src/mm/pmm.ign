@@ -36,7 +36,9 @@
 //! ```
 //!
 //! The bitmap needs `ceil(highest usable end / 4096 / 64)` words. For the
-//! 256 MiB guest used in development that is 1024 words, 8 KiB, 2 frames.
+//! 256 MiB guest used in development that is 1024 words, 8 KiB, 2 frames;
+//! with the managed bitmap and the reference counts (4 bytes a frame) the
+//! three take 272 KiB.
 //!
 //! ## Managed Frames
 //!
@@ -57,6 +59,15 @@
 //! Freeing a frame that is not "managed and used" is a kernel bug and
 //! panics, so a wrong address can never put firmware or kernel memory on the
 //! free list.
+//!
+//! ## Reference Counts
+//!
+//! A third array, right after the managed bitmap, holds one 32-bit reference
+//! count per frame. An allocation sets it to 1, `reference` adds one when a
+//! second address space maps the same frame, and `freeFrame` drops one; only
+//! the last drop puts the frame back on the free list. Code that frees a
+//! space (`Mm::AddressSpace::destroy`) therefore needs no idea of who else
+//! maps a frame.
 //!
 //! ## Allocation
 //!
@@ -93,6 +104,10 @@ record PmmState {
 
   /// Index of the word where the next scan starts.
   static mut searchWord: u64 = 0;
+
+  /// One reference count per frame, `wordCount * 64` of them right after the
+  /// managed bitmap. Meaningful only for allocated frames.
+  static mut references: *mut u32 = null;
 
   /// Taken with `lockIrq` around every bitmap change, rank
   /// `Lib::Rank::FRAMES`.
@@ -145,10 +160,12 @@ namespace Mm::Pmm {
 
     let words: u64 = (highest / FRAME_SIZE + BITS_PER_WORD - 1) / BITS_PER_WORD;
     let bytes: u64 = words * 8;
-    let bitmapBase: u64 = findBitmapRegion(memmap, bytes * 2);
+    let countBytes: u64 = words * BITS_PER_WORD * 4;
+    let bitmapBase: u64 = findBitmapRegion(memmap, bytes * 2 + countBytes);
 
     PmmState::bitmap = Boot::Hhdm::toVirtual(bitmapBase) as *mut u64;
     PmmState::managed = PmmState::bitmap + words;
+    PmmState::references = (PmmState::managed + words) as *mut u32;
     PmmState::wordCount = words;
     PmmState::usableFrames = 0;
     PmmState::freeFrames = 0;
@@ -169,7 +186,7 @@ namespace Mm::Pmm {
       index += 1;
     }
 
-    reserveRange(bitmapBase, bytes * 2);
+    reserveRange(bitmapBase, bytes * 2 + countBytes);
   }
 
   /// The physical address of a free frame, or `NO_FRAME`. The frame is not
@@ -203,6 +220,13 @@ namespace Mm::Pmm {
         while (index < WORDS_PER_LARGE_FRAME) {
           *(PmmState::bitmap + word + index) = ALL_USED;
           index += 1;
+        }
+
+        let mut frame: u64 = 0;
+
+        while (frame < WORDS_PER_LARGE_FRAME * BITS_PER_WORD) {
+          *(PmmState::references + word * BITS_PER_WORD + frame) = 1;
+          frame += 1;
         }
 
         PmmState::freeFrames -= WORDS_PER_LARGE_FRAME * BITS_PER_WORD;
@@ -248,6 +272,7 @@ namespace Mm::Pmm {
         let frame: u64 = word * BITS_PER_WORD + firstClearBit(value);
 
         setUsed(frame);
+        *(PmmState::references + frame) = 1;
         PmmState::searchWord = word;
         PmmState::freeFrames -= 1;
 
@@ -265,10 +290,35 @@ namespace Mm::Pmm {
     return NO_FRAME;
   }
 
-  /// Returns a frame to the allocator. Panics unless `address` is an
-  /// allocated frame: a misaligned address, one beyond the bitmap, a frame
-  /// that is already free, and a frame that was never usable are all kernel
-  /// bugs.
+  /// Adds a reference to the allocated frame at `address`: one more
+  /// `freeFrame` is then needed before it goes back. Panics unless it is
+  /// allocated.
+  function reference(address: u64): void {
+    Arch::Spin::lockIrq(frameLock());
+
+    if (!isAllocated(address)) {
+      @panic("pmm: reference to a frame that is not allocated");
+    }
+
+    *(PmmState::references + address / FRAME_SIZE) += 1;
+    Arch::Spin::unlockIrq(frameLock());
+  }
+
+  /// The references of the frame at `address`, 0 when it is not allocated.
+  function referenceCount(address: u64): u64 {
+    Arch::Spin::lockIrq(frameLock());
+
+    let count: u64 = isAllocated(address) ? *(PmmState::references + address / FRAME_SIZE) as u64 : 0;
+
+    Arch::Spin::unlockIrq(frameLock());
+
+    return count;
+  }
+
+  /// Drops a reference to the frame at `address`; the last one returns the
+  /// frame to the allocator. Panics unless `address` is an allocated frame:
+  /// a misaligned address, one beyond the bitmap, a frame that is already
+  /// free, and a frame that was never usable are all kernel bugs.
   function freeFrame(address: u64): void {
     Arch::Spin::lockIrq(frameLock());
 
@@ -277,6 +327,14 @@ namespace Mm::Pmm {
     }
 
     let frame: u64 = address / FRAME_SIZE;
+    let count: *mut u32 = PmmState::references + frame;
+
+    *count -= 1;
+
+    if (*count > 0) {
+      Arch::Spin::unlockIrq(frameLock());
+      return;
+    }
 
     setFree(frame);
     PmmState::freeFrames += 1;
