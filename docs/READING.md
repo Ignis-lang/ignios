@@ -38,13 +38,13 @@ Each subsystem is a directory under `kernel/src/` with a `mod.ign` facade. The f
 
 | Directory | Namespace | Alias | Imports | Owns |
 |---|---|---|---|---|
-| `lib/` | `Lib` | `@lib` | nothing | `Mem`, `Format`, `ScancodeQueue` |
+| `lib/` | `Lib` | `@lib` | nothing | `Mem`, `Format`, `ScancodeQueue`, `Rank`, `MutexRank` |
 | `arch/` | `Arch` | `@arch` | nothing | `Cpu`, `Port`, `Gdt`, `Idt`, `Pic`, `Pit`, `Context`, `UserMode`, `InterruptFrame`, `Spin`, all `.S` files |
 | `boot/` | `Boot` | `@boot` | nothing | `Limine`, `Hhdm` |
 | `drivers/` | `Drivers` | `@drivers` | Arch, Boot, Lib | `Serial`, `Console`, `Color`, `Font`, `Ps2`, `Keyboard` |
 | `acpi/` | `Acpi` | `@acpi` | Boot, Drivers | `Rsdp`, `Xsdt`, `Madt`, `Fadt`, `Table` |
 | `mm/` | `Mm` | `@mm` | Arch, Boot, Drivers, Lib | `Pmm`, `Vmm`, `AddressSpace`, `Heap`, `Modules` |
-| `fs/` | `Fs` | `@fs` | Drivers, Lib, Mm | `Tar`, `Initramfs`, `Vfs`, `Files` |
+| `fs/` | `Fs` | `@fs` | Drivers, Lib, Mm, Sched | `Tar`, `Initramfs`, `Vfs`, `Files`, `Tty` |
 | `apic/` | `Apic` | `@apic` | Acpi, Arch, Drivers, Mm | `Lapic`, `Ioapic` |
 | `time/` | `Time` | `@time` | Apic, Arch, Drivers | `Timer` |
 | `sched/` | `Sched` | `@sched` | Arch, Mm, Time | `Thread`, `Scheduler`, `Wait`, `Mutex` |
@@ -72,8 +72,8 @@ Each subsystem is a directory under `kernel/src/` with a `mod.ign` facade. The f
 | 4 | CPU tables and interrupts | `arch/x86_64/cpu.ign`, `gdt.ign`, `gdt_asm.S`, `idt.ign`, `interrupt_frame.ign`, `interrupt_asm.S`, `trap/dispatch.ign`, `trap/exception.ign`, `trap/setup.ign` |
 | 5 | Memory | `boot/hhdm.ign`, `mm/pmm.ign`, `mm/vmm.ign`, `mm/heap.ign`, `mm/address_space.ign` |
 | 6 | ACPI, APIC, the timer and power | `acpi/*.ign`, `power/mod.ign`, `arch/x86_64/pic.ign`, `apic/lapic.ign`, `apic/ioapic.ign`, `arch/x86_64/pit.ign`, `time/timer.ign` |
-| 7 | Keyboard | `drivers/ps2.ign`, `lib/scancode_queue.ign`, `drivers/keyboard.ign`, `drivers/tty.ign` |
-| 8 | Threads, scheduling, locks and the shell | `arch/x86_64/context.ign`, `context_asm.S`, `sched/thread.ign`, `sched/scheduler.ign`, `arch/x86_64/spinlock.ign`, `sched/sync.ign`, `shell/*.ign` |
+| 7 | Keyboard | `drivers/ps2.ign`, `lib/scancode_queue.ign`, `drivers/keyboard.ign`, `fs/tty.ign` |
+| 8 | Threads, scheduling, locks and the shell | `arch/x86_64/context.ign`, `context_asm.S`, `sched/thread.ign`, `sched/scheduler.ign`, `arch/x86_64/spinlock.ign`, `sched/sync.ign`, `lib/rank.ign`, `shell/*.ign` |
 | 9 | User mode | `arch/x86_64/usermode.ign`, `usermode_asm.S`, `proc/process.ign`, `syscall/*.ign`, `proc/elf.ign`, `mm/modules.ign`, `proc/programs.ign`, `user/` |
 | 10 | Files | `initramfs/`, `fs/tar.ign`, `fs/initramfs.ign`, `fs/vfs.ign`, `fs/files.ign`, `syscall/linux/files.ign`, `user/fstest/`, `user/cat/`, `user/ls/`, `user/touch/`, `user/mkdir/` |
 | 11 | Boot self-tests | `tests/*.ign`, `arch/x86_64/user_test_asm.S` |
@@ -125,7 +125,7 @@ Read these first. They define what the kernel is made of and how it gets the mac
 
 Read `gdt.ign` before `idt.ign`, because the IDT gates name a GDT selector and the double fault gate names a TSS stack. Docs 03 and 04.
 
-**`arch/x86_64/cpu.ign`.** Short wrappers for `cli`, `sti`, `hlt`, `rdmsr`, `wrmsr`, `cpuid` and control registers. `saveAndDisableInterrupts` and `restoreInterrupts` are the kernel's only mutual exclusion: with one processor, interrupts off means nothing else runs. Doc 02.
+**`arch/x86_64/cpu.ign`.** Short wrappers for `cli`, `sti`, `hlt`, `rdmsr`, `wrmsr`, `cpuid` and control registers. `saveAndDisableInterrupts` and `restoreInterrupts` turn interrupts off on this processor only; shared data is guarded by the locks of `spinlock.ign` and `sched/sync.ign`, ranked in `lib/rank.ign`. Doc 02.
 
 **`arch/x86_64/gdt.ign` and `gdt_asm.S`.** The GDT has five entries and the TSS descriptor. The header decodes every descriptor value bit by bit and draws the TSS. The selector order (kernel code, kernel data, user data, user code) is the order `SYSCALL` and `SYSRET` need. `gdt_asm.S` reloads `CS` with a far return, because `CS` cannot be loaded with `mov`. Doc 03.
 
@@ -181,7 +181,7 @@ Doc 06. `kmain` enables the keyboard last, but the path it uses runs through the
 
 **`drivers/keyboard.ign`.** The scancode set 1 decoder with a US layout. The header lists the make codes and draws the state machine. It handles Shift, Caps Lock, Ctrl (a letter with Ctrl decodes to its control code, Ctrl+D to 4), the `0xE0` prefix and the six-byte Pause sequence. `Drivers::Keyboard::initialize` brings the controller up and prints the keyboard line.
 
-**`drivers/tty.ign`.** Line input, like a Unix terminal in canonical mode: echo, Backspace, Enter, and Ctrl+D for the end of input. It is the clearest example of the `cli`, check, `sti; hlt` pattern that avoids a lost wakeup: the queue is tested with interrupts off so a key cannot arrive between the test and the sleep. `readLine` serves the kernel terminal; `read` serves descriptor 0 of a program and keeps the rest of a line for the next read. Both return with the interrupt flag as they found it, because a system call must not let another process's call reuse the kernel's staging buffers halfway through.
+**`fs/tty.ign`.** Line input, like a Unix terminal in canonical mode: echo, Backspace, Enter, and Ctrl+D for the end of input. It is the clearest example of a wait queue that loses no wake-up: a reader checks the scancode queue and goes to sleep in one step under the tty spinlock, and the keyboard interrupt wakes the queue (`keysArrived`) after it pushed the byte, so a key that arrives in between still wakes the reader, on any processor. `readLine` serves the kernel terminal; `read` serves descriptor 0 of a program and keeps the rest of a line for the next read. It lives in `Fs` rather than `Drivers` because waiting needs the scheduler, which sits above the drivers.
 
 ## Part 8. Threads, scheduling and the shell
 
@@ -193,7 +193,7 @@ Doc 13.
 
 **`sched/scheduler.ign`.** The run queue, sleeping and the timer-driven preemption. The header has the call chain from the timer interrupt to a switch. Look at how a dead thread's stack is freed by the next thread (`reapZombie`), because a thread cannot free the stack it is running on. Sleeping and waking are here and not in a file of their own, because `sleep` calls `switchToNext` and `switchToNext` calls the wake-up scan. `join` blocks a thread until another one is gone: the thread that frees the dead one (`reapZombie`) makes its waiters ready, so a waiter runs once, not once per tick. `switchToNext` also swaps the x87 and SSE state.
 
-**`arch/x86_64/spinlock.ign` and `sched/sync.ign`.** The lock primitives, phase C1 of the concurrency proposal; no subsystem uses them yet. A spinlock takes its word with `xchg` and, while held, raises the per-CPU preemption counter (`gs:[24]`) so the timer tick defers any thread switch; `lockIrq` also turns interrupts off for data a handler touches. Every lock has a rank: a CPU takes spinlocks in rising rank order and releases them in reverse, and a violation panics, which turns a lock-order deadlock into a boot failure. `sync.ign` adds wait queues, where a thread queues itself and releases the spinlock with interrupts off so no wake-up is lost, and a mutex whose waiters sleep. Mutex ranks follow the thread, and a mutex cannot be taken while a spinlock is held. The scheduler panics when a thread yields or sleeps with a spinlock held. Doc 24.
+**`arch/x86_64/spinlock.ign` and `sched/sync.ign`.** The lock primitives, phase C1 of the concurrency proposal; no subsystem uses them yet. A spinlock takes its word with `xchg` and, while held, raises the per-CPU preemption counter (`gs:[24]`) so the timer tick defers any thread switch; `lockIrq` also turns interrupts off for data a handler touches. Every lock has a rank: a CPU takes spinlocks in rising rank order and releases them in reverse, and a violation panics, which turns a lock-order deadlock into a boot failure. `sync.ign` adds wait queues, where a thread queues itself and releases the spinlock with interrupts off so no wake-up is lost, and a mutex whose waiters sleep. Mutex ranks follow the thread, and a mutex cannot be taken while a spinlock is held. The scheduler panics when a thread yields or sleeps with a spinlock held. Phase C2 put every subsystem behind these locks: `lib/rank.ign` gives every lock its rank in one table, with the chains that decide the order. The run queue lock is held across a context switch and released by the thread switched in. Doc 24.
 
 **`shell/terminal.ign`.** Where the boot thread ends up: it runs `/bin/sh` and waits for it, and when the shell ends it becomes the kernel terminal, a prompt, a line from `Drivers::Tty::readLine`, a command.
 
@@ -219,7 +219,7 @@ Docs 14 and 15.
 
 **`user/lib/common/alloc.ign`.** `std::alloc`, the heap of user programs: first-fit over 64 KiB arenas from `mmap`, an address-ordered free list that merges neighbours, and a mapping of its own for a block over 16 KiB, given back with `munmap`. It also defines the compiler's `@allocHandler` and `@freeHandler`, so closures that capture values work in a program that imports it. The header draws both block layouts.
 
-**`user/lib/native/` and `user/nativetest/`.** The native flavour of the library, which `hello`, `cat`, `ls`, `touch` and `mkdir` use; `fstest` and `mmtest` stay on the Linux flavour so both ABIs keep a ring 3 test. `start.S` carries the IgniOS note (a section that `user/user.ld` places at the start of rodata and in a `PT_NOTE` segment) and ends the program with the native `EXIT`. `sys.ign` returns a `Sys::Result` (status, value) from the raw calls and the same portable `i64` functions as the Linux flavour, so `io` and `args` build against both. `nativetest` checks the convention from ring 3.
+**`user/lib/native/` and `user/nativetest/`.** The native flavour of the library, which `hello`, `cat`, `ls`, `touch` and `mkdir` use; `fstest` and `mmtest` stay on the Linux flavour so both ABIs keep a ring 3 test. `start.S` carries the IgniOS note (a section that `user/user.ld` places at the start of rodata and in a `PT_NOTE` segment) and ends the program with the native `EXIT`. `sys.ign` returns a `Sys::Result` (status, value) from the raw calls and the same portable `i64` functions as the Linux flavour, so `io` and `args` build against both. `nativetest` checks the convention from ring 3, and `stress` runs four processes on the file tree and memory at once to exercise the locks.
 
 **`user/`.** The user side. `lib/linux/start.S` is `_start`, the entry point of every program: it reads argc and argv from the initial stack and calls the program's `main`, because a compiled function cannot start on a stack that holds no return address. `lib/linux/sys.ign` wraps the `syscall` instruction and offers a portable layer (`Sys::FileInfo`, `info`, `infoAt`, `readEntry`) over the Linux structures, `lib/common/io.ign` prints, `lib/common/args.ign` reads argv, `lib/common/panic.ign` is the `@panicHandler` every program imports with `import _ from "std::panic"` (a freestanding program without one does not compile), and `hello/src/main.ign` is the first program. `user/user.ld` places programs at `0x400000`.
 
@@ -233,7 +233,7 @@ Doc 19.
 
 **`fs/initramfs.ign`.** Finds the module, walks every member once and refuses to boot if one is malformed. Later readers can then trust the archive. The data is never copied: it stays where Limine loaded it.
 
-**`fs/vfs.ign`.** The file tree. Every file and directory is a `Fs::Node` on the heap, and a directory keeps its children in a linked list in creation order. The header has the path rules (`.`, `..`, repeated and trailing slashes, the `NAME_MAX` and `PATH_MAX` limits) and the table of status codes with the Linux error each one becomes. Files are limited to 64 MiB (`MAX_FILE_SIZE`, `-EFBIG` past it), checked before anything is allocated. Look at `seedEntry`, which builds the tree from the archive without copying file data, and at `reserve`, which copies a seeded file to the heap the first time it is written (copy on write), so the read-only archive is never touched. The VFS has no locks: its callers run with interrupts off on the only processor.
+**`fs/vfs.ign`.** The file tree. Every file and directory is a `Fs::Node` on the heap, and a directory keeps its children in a linked list in creation order. The header has the path rules (`.`, `..`, repeated and trailing slashes, the `NAME_MAX` and `PATH_MAX` limits) and the table of status codes with the Linux error each one becomes. Files are limited to 64 MiB (`MAX_FILE_SIZE`, `-EFBIG` past it), checked before anything is allocated. Look at `seedEntry`, which builds the tree from the archive without copying file data, and at `reserve`, which copies a seeded file to the heap the first time it is written (copy on write), so the read-only archive is never touched. One mutex, the VFS lock, guards the whole tree, the node data, every descriptor table and every current directory; `Fs::Files` takes it inside each operation, and every function of the tree checks that the caller holds it (`requireLock`), so a forgotten lock fails the boot instead of racing. A program being loaded pins its file, which may then be neither removed nor written.
 
 **`fs/files.ign`.** Descriptors and open files. The header draws a descriptor table: descriptors 0, 1 and 2 of a new process share one console open file, and an open file is freed with its last descriptor. The flags and status codes are this module's own, not Linux's, so another ABI can use the same functions. `Proc::Process::launch` calls `openStandard` and `finishCurrent` calls `closeAll`. `remove` deletes a file or an empty directory by path, and refuses one that a descriptor has open (`BUSY`): an open file holds a pointer to its node, so the node must outlive it. Each table also keeps the process's current directory, where relative paths start; a current directory counts as open too. `Fs::Vfs::pathOf` turns a node back into its absolute path for `getcwd`.
 
@@ -308,7 +308,7 @@ Follow each one with the code open. They connect the parts above.
 
 | Path | Steps |
 |---|---|
-| A key press | keyboard, 8042, IRQ1, IOAPIC pin 1, vector `0x21`, `interrupt_asm.S` thunk 33, `Trap::dispatch`, `Drivers::Ps2::handleInterrupt`, `Lib::ScancodeQueue::push`, `Apic::Lapic::endOfInterrupt`. Later `Shell::Terminal::run` pops the byte and `Drivers::Keyboard::decode` turns it into a character. |
+| A key press | keyboard, 8042, IRQ1, IOAPIC pin 1, vector `0x21`, `interrupt_asm.S` thunk 33, `Trap::dispatch`, `Drivers::Ps2::handleInterrupt`, `Lib::ScancodeQueue::push`, `Apic::Lapic::endOfInterrupt`, `Fs::Tty::keysArrived` wakes the readers. The reader editing a line pops the byte and `Drivers::Keyboard::decode` turns it into a character. |
 | A preemption | LAPIC timer, vector `0x30`, `Trap::dispatch`, `Time::Timer::handleTick`, `Apic::Lapic::endOfInterrupt`, `Sched::Scheduler::onTick`, `switchToNext`, `Arch::Context::switchTo`, `ignis_switch_context`. The other thread returns from its own `switchTo` and finishes its own interrupt. |
 | A system call | `syscall` in ring 3, `ignis_syscall_entry` (`swapgs`, the kernel stack from `gs:[8]`), `Syscall::dispatch`, `Syscall::Linux::write`, `Mm::AddressSpace::copyFromUser`, `Drivers::Console::writeChar`, `swapgs`, `sysretq`. |
 
@@ -397,7 +397,7 @@ initramfs: self-test ok, 6 malformed headers refused, 2 valid ones read, etc/mot
 
 ```text
 vfs: 20 nodes, 191563 bytes in files, seeded from the initramfs
-vfs: self-test ok, lookup, create, read, write, truncate, remove and copy on write
+vfs: self-test ok, lookup, create, read, write, truncate, remove, copy on write and pins
 ```
 `Fs::Vfs::initialize` built the tree: the root, `bin` with its fourteen programs, `etc` and `etc/motd` from the archive, then `dev` and the device node `dev/console`. The file bytes are the same 191563 as in the archive, because nothing was copied. `Tests::Vfs::run` checked every path rule, created, wrote, read, truncated and removed a test directory `/t` and checked that the heap returned to where it was, then wrote to `/etc/motd` to check that the write copied the file and left the archive alone.
 
@@ -499,9 +499,12 @@ scheduler: address-space self-test ok, each thread ran in its own CR3 and every 
 scheduler: preemption self-test ok, two threads that never yield shared the processor, 6 preemptions
 locks: spinlock self-test ok, interrupts restored, 3 switches deferred while a lock was held, no lost update, rank order enforced
 locks: mutex and wait queue self-test ok, a contender slept until the holder was done, three waiters woke together and a kill did not wake them
+locks: scratch self-test ok, two threads kept their own system call scratch across switches
+locks: wake token self-test ok, a wake before a park and a kill before a 10000 s sleep were not lost
+locks: vfs self-test ok, a file operation waited while another thread held the VFS lock
 ```
 `Sched::Scheduler::enablePreemption` was called, then `Tests::Scheduler::runPreemptive`. The timer took the processor away from spinning threads at least twice (the number varies).
-`Tests::Locks::run` then checked the lock primitives. It held a spinlock across more than a time slice while a helper thread wanted the processor: no switch happened, three ticks deferred theirs, and a switch followed the release. Three workers incremented a counter under a spinlock, each read-to-write section longer than a time slice, and the total came out right. A mutex contender slept until its holder, sleeping with the mutex, was done; three threads queued on a wait queue ignored a kill-style interrupt and all woke on `wakeAll`. Doc 24.
+`Tests::Locks::run` then checked the lock primitives. It held a spinlock across more than a time slice while a helper thread wanted the processor: no switch happened, three ticks deferred theirs, and a switch followed the release. Three workers incremented a counter under a spinlock, each read-to-write section longer than a time slice, and the total came out right. A mutex contender slept until its holder, sleeping with the mutex, was done; three threads queued on a wait queue ignored a kill-style interrupt and all woke on `wakeAll`. Then the checks of phase C2: two threads filled their system call scratch areas, yielded and found their own bytes; a wake sent before a park and a kill sent before a 10 000 s sleep each ended the wait at once; and a file operation started while another thread held the VFS lock waited for it. Doc 24.
 
 ### User mode self-tests
 
@@ -689,8 +692,14 @@ process 27 exited with status 0
 elf: the IgniOS ABI note names an unknown version
 elf: a note runs past the end of the file
 user: nativetest passed, a note of version 2 and a note past the end of the file were refused
+...
+stress: 4 workers, 25 rounds each, every file read back and every shared record whole
+process 112 exited with status 0
+user: stress passed, 4 processes at once, 5 timer ticks landed inside system calls
 ```
 `Tests::User::runNative` ran `/bin/nativetest`. Its ELF carries the IgniOS note, so the loader printed `abi native` (every other program says `abi linux`) and the process used the native call table. The program checked that a call returns its status in RAX and its value in RDX, that an error leaves RDX at 0 even when RDX went in with another value, and that call 9999 and Linux's `getpid` number 39 are both `NOT_SUPPORTED`; then every native call with its errors, in a directory `/nt` that the test removed afterwards (the table in `user/nativetest/src/main.ign` lists the checks). The lines left out (`...`) are its own children: `/bin/pwd` and `/bin/rmdir` runs for the spawn checks, 63 `pwd` children that fill the 64-slot process table, and helpers for the parent checks (an orphan and a child that ends before its parent are both freed). The five `killed, status 137` lines are the kill checks: a child sleeping 10 s, one spinning in ring 3, one waiting for the keyboard, one waiting for its own child, and one that killed itself. Each ended right away with 128 + 9. Then the test handed the loader two copies of the same file with the note broken, one claiming version 2 and one with a description larger than the file; both were refused before anything was mapped, and no memory leaked. Doc 21.
+
+`Tests::User::runStress` then ran `/bin/stress` (its loader lines and its four workers' `exited` lines left out). Four processes at once wrote, read back and removed their own files, made and removed directories, mapped memory, and appended 512-byte records to one shared file, whose exact size and whole records the coordinator checked. System calls run with interrupts on, so the timer preempted some of them halfway; the test counts the ticks that landed inside a system call (the number varies) and runs the program again until there is at least one. Nothing leaked. Doc 24.
 
 ```text
 cpu local: self-test ok, after ring 3 the kernel GS base is the per-CPU block and the user one is 0
@@ -708,7 +717,7 @@ keyboard: PS/2, scancode set 1, US layout, IRQ1 through the IOAPIC
 elf: 3 segments, 3 pages, entry 0x0000000000400000, stack pointer 0x00007fffffffefa0, argc 1, abi native
 > 
 ```
-`Shell::Terminal::run` started `/bin/sh` (the loader's line, the PT_LOAD lines left out), and the shell printed its prompt. It now waits in `Drivers::Tty`, with `sti; hlt`, until a key arrives. Everything after this line in a real run is what you type. `make keytest` types a fixed sequence here and checks the echo, and `make shelltest` types a session. A session looks like this (the loader's `elf:` lines left out):
+`Shell::Terminal::run` started `/bin/sh` (the loader's line, the PT_LOAD lines left out), and the shell printed its prompt. It now sleeps on the wait queue of `Fs::Tty` until a key arrives. Everything after this line in a real run is what you type. `make keytest` types a fixed sequence here and checks the echo, and `make shelltest` types a session. A session looks like this (the loader's `elf:` lines left out):
 
 ```text
 > mkdir /tmp

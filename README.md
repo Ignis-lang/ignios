@@ -17,7 +17,7 @@ Early, and only tested in QEMU with OVMF.
 | CPU | Own GDT and TSS (IST stack for double faults), IDT with exception reports; x87 and SSE enabled with per-thread FXSAVE state; SMEP and SMAP on when the CPU has them; per-CPU data behind the GS base with `swapgs` |
 | Interrupts | ACPI MADT parsed; keyboard routed through the IOAPIC to vector 0x21 with local APIC end of interrupt; 8259 remapped to 0x20-0x2F and fully masked; idle loop sleeps with `sti; hlt` |
 | Timer | Local APIC timer calibrated against PIT channel 2, periodic 100 Hz tick on vector 0x30; `uptime` at the prompt prints the time since boot |
-| Locks | Spinlocks with a per-CPU preemption counter and lock ranks, wait queues and a sleeping mutex (phase C1 of the concurrency proposal; the subsystems still rely on interrupts off on one CPU) |
+| Locks | Spinlocks with a per-CPU preemption counter and lock ranks, wait queues and a sleeping mutex; every subsystem behind them (frames, page tables, heap, console, run queue handed over across switches, process table, one VFS lock checked on every tree access, the keyboard line), per-thread system call buffers, and system calls that run with interrupts on and can be preempted halfway |
 | Threads | Kernel threads with their own stacks and a guard page, a round-robin run queue, `yield`, `sleep`, `exit` and `join`, an idle thread, and preemption by the timer tick with 100 ms time slices; `ps` lists the threads and `threads` starts a demo; the boot thread runs the terminal |
 | Input | PS/2 keyboard, scancode set 1, US layout, Shift and Caps Lock, line editing at a `>` prompt |
 | Memory | Bitmap frame allocator over the Limine memory map (4 KiB frames and 2 MiB runs, frees of unmanaged frames rejected); own 4-level page tables (kernel image per segment with W^X, direct map with 2 MiB pages, write-combining framebuffer, NX and write protection on); kernel heap in the higher half behind the compiler's allocation handlers |
@@ -112,6 +112,7 @@ user/reboot, shutdown/         reset and power off
 user/fstest/                   ring 3 checks of the file system calls
 user/mmtest/                   ring 3 checks of mmap, munmap and std::alloc
 user/nativetest/               ring 3 checks of the native ABI
+user/stress/                   four processes on the file tree and memory at once
 user/user.ld                   user program layout
 initramfs/                     files packed into the initramfs next to the programs in /bin
 boot/limine.conf               boot entry and the initramfs module
