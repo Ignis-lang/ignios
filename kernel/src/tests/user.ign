@@ -21,6 +21,7 @@
 //! | files             | `/bin/fstest` checks every file system call and error from ring 3; nothing leaks |
 //! | memory            | `/bin/mmtest` checks `mmap`, `munmap` and `std::alloc`; four forbidden accesses to mappings are killed; a double free panics; nothing leaks |
 //! | native            | `/bin/nativetest` checks every native call and status code; the loader refuses an IgniOS note of another version and one that runs past the file |
+//! | stress            | `/bin/stress` runs four processes on the file tree and memory at once; a timer tick lands inside a system call; nothing leaks |
 //! | refused           | a missing program, a directory, a file that is not ELF, an empty line and 33 arguments start nothing and leak nothing |
 //!
 //! `main.ign` calls `Tests::User::run` once, after the scheduler tests and before
@@ -164,6 +165,7 @@ namespace Tests::User {
     runFiles();
     runMemory();
     runNative();
+    runStress();
   }
 
   /// Runs `ALIGNMENT_SPIN` and checks, through the counters of
@@ -228,19 +230,7 @@ namespace Tests::User {
       @panic("user test: a file system call misbehaved");
     }
 
-    let saved: u64 = Arch::Cpu::saveAndDisableInterrupts();
-    let mut directory: *mut Fs::Node = null;
-
-    if (Fs::Vfs::lookup(Fs::Vfs::root(), "/fstest" as *u8, 7, &mut directory as *mut *mut Fs::Node) != Fs::Vfs::OK) {
-      @panic("user test: fstest left no /fstest");
-    }
-
-    while ((*directory).firstChild != null) {
-      Fs::Vfs::remove((*directory).firstChild);
-    }
-
-    Fs::Vfs::remove(directory);
-    Arch::Cpu::restoreInterrupts(saved);
+    removeDirectory("/fstest");
 
     if (Mm::Pmm::freeFrameCount() != freeBefore || Mm::Heap::allocatedBytes() != heapBefore) {
       @panic("user test: fstest leaked frames or heap memory");
@@ -286,6 +276,53 @@ namespace Tests::User {
     Drivers::Console::writeLine("user: mmtest passed, writing read-only, using unmapped, executing non-exec and touching PROT_NONE memory were killed, a double free was caught, no frame leaked");
   }
 
+  /// Runs `/bin/stress`: four processes work on the file tree and on memory
+  /// at once while system calls are preempted. Runs it again, up to
+  /// `STRESS_RUNS` times, until a timer tick has landed inside a system call,
+  /// which proves the calls ran with interrupts on and could be preempted
+  /// halfway. Every run must pass, and no frame, heap byte or process slot
+  /// may stay taken.
+  function runStress(): void {
+    const STRESS_RUNS: u64 = 5;
+
+    let slotsAtStart: u64 = Proc::Process::usedSlots();
+    let freeAtStart: u64 = Mm::Pmm::freeFrameCount();
+    let heapAtStart: u64 = Mm::Heap::allocatedBytes();
+    let ticksAtStart: u64 = Trap::processKernelTicks();
+    let mut runs: u64 = 0;
+
+    while (runs < STRESS_RUNS && Trap::processKernelTicks() == ticksAtStart) {
+      let status: u64 = Proc::Programs::runNamed("stress");
+
+      if (status != 0) {
+        Drivers::Console::write("user test: stress failed check ");
+        Drivers::Console::writeDecimal(status);
+        Drivers::Console::writeLine("");
+        @panic("user test: concurrent processes corrupted the file tree or failed a call");
+      }
+
+      runs += 1;
+    }
+
+    let ticks: u64 = Trap::processKernelTicks() - ticksAtStart;
+
+    if (ticks == 0) {
+      @panic("user test: no timer tick landed inside a system call, so none could be preempted");
+    }
+
+    if (Mm::Pmm::freeFrameCount() != freeAtStart || Mm::Heap::allocatedBytes() != heapAtStart) {
+      @panic("user test: stress leaked frames or heap memory");
+    }
+
+    if (Proc::Process::usedSlots() != slotsAtStart) {
+      @panic("user test: stress left process slots taken");
+    }
+
+    Drivers::Console::write("user: stress passed, 4 processes at once, ");
+    Drivers::Console::writeDecimal(ticks);
+    Drivers::Console::writeLine(" timer ticks landed inside system calls");
+  }
+
   /// Runs `/bin/nativetest`, which carries the IgniOS note and checks every
   /// native call from ring 3, then removes the directory `/nt` it made and
   /// checks that the heap and the PMM are back where they were. Then gives `Proc::Process::startElf` two broken
@@ -317,31 +354,44 @@ namespace Tests::User {
 
     let freeBefore: u64 = Mm::Pmm::freeFrameCount();
     let heapBefore: u64 = Mm::Heap::allocatedBytes();
-    let saved: u64 = Arch::Cpu::saveAndDisableInterrupts();
     let mut node: *mut Fs::Node = null;
+
+    // The file is copied under the VFS lock; the loader runs without it,
+    // since starting a process takes the process table lock, which ranks
+    // below the VFS.
+    Fs::Vfs::lock();
 
     if (Fs::Vfs::lookup(Fs::Vfs::root(), "/bin/nativetest" as *u8, 15, &mut node as *mut *mut Fs::Node) != Fs::Vfs::OK) {
       @panic("user test: no /bin/nativetest");
     }
 
     let size: u64 = (*node).size;
+    let original: *mut u8 = Mm::Heap::allocate(size, 16);
     let copy: *mut u8 = Mm::Heap::allocate(size, 16);
-    let name: u64 = findNoteName((*node).data as *u8, size);
 
-    if (copy == null || name == 0) {
+    if (original == null || copy == null) {
+      @panic("user test: no heap for copies of /bin/nativetest");
+    }
+
+    Lib::Mem::copy(original, (*node).data as *u8, size);
+    Fs::Vfs::unlock();
+
+    let name: u64 = findNoteName(original as *u8, size);
+
+    if (name == 0) {
       @panic("user test: /bin/nativetest has no IgniOS note");
     }
 
-    Lib::Mem::copy(copy, (*node).data as *u8, size);
+    Lib::Mem::copy(copy, original as *u8, size);
     *(copy + name + 8) = 2;
     expectElfRefused(copy, size);
 
-    Lib::Mem::copy(copy, (*node).data as *u8, size);
+    Lib::Mem::copy(copy, original as *u8, size);
     *(copy + name - 5) = 0x7F;
     expectElfRefused(copy, size);
 
     Mm::Heap::free(copy);
-    Arch::Cpu::restoreInterrupts(saved);
+    Mm::Heap::free(original);
 
     if (Mm::Pmm::freeFrameCount() != freeBefore || Mm::Heap::allocatedBytes() != heapBefore) {
       @panic("user test: a refused native program leaked memory");
@@ -379,13 +429,14 @@ namespace Tests::User {
   /// Removes the directory at the absolute `path` that a test program left,
   /// with the files in it. Panics when it is not there.
   function removeDirectory(path: str): void {
-    let saved: u64 = Arch::Cpu::saveAndDisableInterrupts();
     let mut length: u64 = 0;
     let mut node: *mut Fs::Node = null;
 
     while (*(path as *u8 + length) != 0) {
       length += 1;
     }
+
+    Fs::Vfs::lock();
 
     if (Fs::Vfs::lookup(Fs::Vfs::root(), path as *u8, length, &mut node as *mut *mut Fs::Node) != Fs::Vfs::OK) {
       @panic("user test: a directory a test program made is missing");
@@ -396,13 +447,12 @@ namespace Tests::User {
     }
 
     Fs::Vfs::remove(node);
-    Arch::Cpu::restoreInterrupts(saved);
+    Fs::Vfs::unlock();
   }
 
   /// Removes the regular file at the absolute `path` that a test program
   /// left behind. Panics when it is not there.
   function removeFile(path: str): void {
-    let saved: u64 = Arch::Cpu::saveAndDisableInterrupts();
     let mut length: u64 = 0;
     let mut node: *mut Fs::Node = null;
 
@@ -410,11 +460,13 @@ namespace Tests::User {
       length += 1;
     }
 
+    Fs::Vfs::lock();
+
     if (Fs::Vfs::lookup(Fs::Vfs::root(), path as *u8, length, &mut node as *mut *mut Fs::Node) != Fs::Vfs::OK || Fs::Vfs::remove(node) != Fs::Vfs::OK) {
       @panic("user test: a file a test program made is missing");
     }
 
-    Arch::Cpu::restoreInterrupts(saved);
+    Fs::Vfs::unlock();
   }
 
   /// Panics unless running `line` ends with SIGSEGV.

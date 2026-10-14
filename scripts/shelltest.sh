@@ -104,6 +104,7 @@ rm
 rmdir
 sh
 shutdown
+stress
 touch
 S0
 > mkdir /tmp

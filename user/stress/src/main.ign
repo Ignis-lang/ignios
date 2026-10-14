@@ -1,0 +1,334 @@
+//!
+//! # stress
+//!
+//! Several processes working on the file tree and on memory at once, so the
+//! kernel's locks are exercised while system calls are preempted halfway.
+//!
+//! ## Overview
+//!
+//! Started without arguments, the program is the coordinator: it creates
+//! `/stress-shared`, starts `WORKERS` copies of itself with the worker number
+//! as argument, waits for all of them, and checks the shared file. Each
+//! worker runs `ROUNDS` rounds of:
+//!
+//! | Step                     | Checks                                             |
+//! |--------------------------|----------------------------------------------------|
+//! | own file `/stress-N`     | written in three pieces, read back whole, compared |
+//! | own directory            | made and removed                                   |
+//! | anonymous mapping        | mapped, written, unmapped                          |
+//! | `/stress-shared`         | one `RECORD`-byte record appended, every byte `a + N` |
+//!
+//! The shared file must end up exactly `WORKERS * ROUNDS * RECORD` bytes long,
+//! and every record must hold one worker's byte only: a lost or a torn append
+//! shows. The exit status is 0, or the number of the check that failed:
+//!
+//! | Status  | Check                                   |
+//! |---------|-----------------------------------------|
+//! | 1-9     | coordinator: create, spawn, wait, size, records, unlink |
+//! | 10-13   | a worker ended with a status (10 + its number)          |
+//! | 20-32   | worker: the step that failed                            |
+
+import Args from "std::args";
+import Io from "std::io";
+import Sys from "std::sys";
+import _ from "std::panic";
+
+/// Worker processes.
+const WORKERS: u64 = 4;
+
+/// Rounds per worker.
+const ROUNDS: u64 = 25;
+
+/// Bytes of one write to a worker's own file.
+const CHUNK: u64 = 1024;
+
+/// Bytes of a worker's own file: three chunks.
+const FILE_BYTES: u64 = 3072;
+
+/// Bytes of one record in the shared file.
+const RECORD: u64 = 512;
+
+/// Bytes of the anonymous mapping.
+const MAPPING: u64 = 8192;
+
+/// The shared file, NUL-terminated.
+const SHARED: str = "/stress-shared\0";
+
+/// The buffers.
+record State {
+  /// What a worker writes.
+  static mut written: u8[3072];
+
+  /// What it reads back.
+  static mut back: u8[3072];
+
+  /// One record of the shared file.
+  static mut item: u8[512];
+
+  /// A worker's file path, `/stress-N`.
+  static mut path: u8[16];
+
+  /// A worker's directory path, `/stressd-N`.
+  static mut directory: u8[16];
+
+  /// The arguments of a worker: `stress`, then its number.
+  static mut arguments: u8[16];
+}
+
+/// Called by `_start` with argc and argv: a worker number as the one
+/// argument makes a worker, none makes the coordinator.
+@externName("ignis_main")
+function main(count: u64, values: *u64): u64 {
+  if (count > 1) {
+    return worker((*Args::get(values, 1) - 0x30) as u64);
+  }
+
+  let status: u64 = coordinate();
+
+  if (status == 0) {
+    Io::printLine("stress: 4 workers, 25 rounds each, every file read back and every shared record whole");
+  }
+
+  return status;
+}
+
+/// Starts the workers, waits for them and checks the shared file.
+function coordinate(): u64 {
+  let created: i64 = Sys::open(SHARED as *u8, Sys::OPEN_WRITE | Sys::OPEN_CREATE | Sys::OPEN_TRUNCATE, 0x1A4);
+
+  if (created < 0 || Sys::close(created as u64) != 0) {
+    return 1;
+  }
+
+  let arguments: *mut u8 = &mut State::arguments as *mut u8;
+  let mut ids: u64[4];
+  let mut index: u64 = 0;
+
+  while (index < WORKERS) {
+    copy(arguments, "stress\0" as *u8, 7);
+    *(arguments + 7) = (0x30 + index) as u8;
+    *(arguments + 8) = 0;
+
+    let id: i64 = Sys::spawn("/bin/stress\0" as *u8, arguments as *u8, 9, 2);
+
+    if (id < 0) {
+      return 2;
+    }
+
+    *(&mut ids as *mut u64 + index) = id as u64;
+    index += 1;
+  }
+
+  index = 0;
+
+  while (index < WORKERS) {
+    let status: i64 = Sys::wait(*(&mut ids as *mut u64 + index));
+
+    if (status != 0) {
+      return status < 0 ? 3 : 10 + index;
+    }
+
+    index += 1;
+  }
+
+  let status: u64 = checkShared();
+
+  if (status != 0) {
+    return status;
+  }
+
+  return Sys::unlink(SHARED as *u8) == 0 ? 0 : 6;
+}
+
+/// Checks that the shared file holds `WORKERS * ROUNDS` records, each of one
+/// worker's byte only.
+function checkShared(): u64 {
+  let descriptor: i64 = Sys::open(SHARED as *u8, Sys::OPEN_READ, 0);
+
+  if (descriptor < 0) {
+    return 4;
+  }
+
+  let file: u64 = descriptor as u64;
+  let size: i64 = Sys::seek(file, 0, Sys::SEEK_END);
+
+  if (size != (WORKERS * ROUNDS * RECORD) as i64 || Sys::seek(file, 0, Sys::SEEK_SET) != 0) {
+    Sys::close(file);
+    return 4;
+  }
+
+  let item: *mut u8 = &mut State::item as *mut u8;
+  let mut done: u64 = 0;
+
+  while (done < WORKERS * ROUNDS) {
+    if (Sys::read(file, item, RECORD) != RECORD as i64 || !uniform(item as *u8, RECORD)) {
+      Sys::close(file);
+      return 5;
+    }
+
+    done += 1;
+  }
+
+  Sys::close(file);
+
+  return 0;
+}
+
+/// One worker: `ROUNDS` rounds of its own file, directory and mapping, and
+/// one append to the shared file per round.
+function worker(number: u64): u64 {
+  let path: *mut u8 = &mut State::path as *mut u8;
+  let directory: *mut u8 = &mut State::directory as *mut u8;
+
+  copy(path, "/stress-\0" as *u8, 8);
+  *(path + 8) = (0x30 + number) as u8;
+  *(path + 9) = 0;
+  copy(directory, "/stressd-\0" as *u8, 9);
+  *(directory + 9) = (0x30 + number) as u8;
+  *(directory + 10) = 0;
+
+  let mut round: u64 = 0;
+
+  while (round < ROUNDS) {
+    let status: u64 = workRound(number, round, path as *u8, directory as *u8);
+
+    if (status != 0) {
+      return status;
+    }
+
+    round += 1;
+  }
+
+  return 0;
+}
+
+/// One round of `worker`.
+function workRound(number: u64, round: u64, path: *u8, directory: *u8): u64 {
+  let written: *mut u8 = &mut State::written as *mut u8;
+  let back: *mut u8 = &mut State::back as *mut u8;
+
+  fill(written, ((number * 37 + round) & 0xFF) as u8, FILE_BYTES);
+
+  let opened: i64 = Sys::open(path, Sys::OPEN_READ | Sys::OPEN_WRITE | Sys::OPEN_CREATE | Sys::OPEN_TRUNCATE, 0x1A4);
+
+  if (opened < 0) {
+    return 20;
+  }
+
+  let file: u64 = opened as u64;
+  let mut piece: u64 = 0;
+
+  while (piece < FILE_BYTES / CHUNK) {
+    if (Sys::write(file, (written as *u8) + piece * CHUNK, CHUNK) != CHUNK as i64) {
+      return 21;
+    }
+
+    piece += 1;
+  }
+
+  if (Sys::seek(file, 0, Sys::SEEK_SET) != 0) {
+    return 22;
+  }
+
+  if (Sys::read(file, back, FILE_BYTES) != FILE_BYTES as i64) {
+    return 23;
+  }
+
+  if (!same(written as *u8, back as *u8, FILE_BYTES)) {
+    return 24;
+  }
+
+  if (Sys::close(file) != 0) {
+    return 25;
+  }
+
+  if (Sys::makeDirectory(directory, 0x1ED) != 0) {
+    return 26;
+  }
+
+  if (Sys::removeDirectory(directory) != 0) {
+    return 27;
+  }
+
+  let mapped: i64 = Sys::mapAnonymous(MAPPING);
+
+  if (mapped < 0) {
+    return 28;
+  }
+
+  fill(@pointerFromInteger<*mut u8>(mapped as u64), 0x5A, MAPPING);
+
+  if (Sys::munmap(mapped as u64, MAPPING) != 0) {
+    return 29;
+  }
+
+  if (Sys::unlink(path) != 0) {
+    return 30;
+  }
+
+  let shared: i64 = Sys::open(SHARED as *u8, Sys::OPEN_WRITE | Sys::OPEN_APPEND, 0);
+
+  if (shared < 0) {
+    return 31;
+  }
+
+  let item: *mut u8 = &mut State::item as *mut u8;
+
+  fill(item, (0x61 + number) as u8, RECORD);
+
+  let appended: i64 = Sys::write(shared as u64, item as *u8, RECORD);
+
+  Sys::close(shared as u64);
+
+  return appended == RECORD as i64 ? 0 : 32;
+}
+
+/// True when every one of the `count` bytes at `bytes` equals the first.
+function uniform(bytes: *u8, count: u64): boolean {
+  let mut index: u64 = 1;
+
+  while (index < count) {
+    if (*(bytes + index) != *bytes) {
+      return false;
+    }
+
+    index += 1;
+  }
+
+  return true;
+}
+
+/// True when the `count` bytes at `first` and `second` are equal.
+function same(first: *u8, second: *u8, count: u64): boolean {
+  let mut index: u64 = 0;
+
+  while (index < count) {
+    if (*(first + index) != *(second + index)) {
+      return false;
+    }
+
+    index += 1;
+  }
+
+  return true;
+}
+
+/// Sets the `count` bytes at `bytes` to `value`.
+function fill(bytes: *mut u8, value: u8, count: u64): void {
+  let mut index: u64 = 0;
+
+  while (index < count) {
+    *(bytes + index) = value;
+    index += 1;
+  }
+}
+
+/// Copies `count` bytes from `source` to `target`.
+function copy(target: *mut u8, source: *u8, count: u64): void {
+  let mut index: u64 = 0;
+
+  while (index < count) {
+    *(target + index) = *(source + index);
+    index += 1;
+  }
+}

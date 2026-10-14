@@ -245,6 +245,16 @@ namespace Fs::Vfs {
     Sched::Mutex::unlock(vfsLock());
   }
 
+  /// Panics when the running thread does not hold the VFS lock, once the
+  /// scheduler runs: a missing lock then fails the first call that lacks it,
+  /// on every boot, instead of a race that shows once in a while. The
+  /// boot-time setup and its self-test run before the scheduler, alone.
+  function requireLock(): void {
+    if (Sched::Scheduler::isStarted() && !Sched::Mutex::isHeldByCaller(vfsLock())) {
+      @panic("vfs: the tree was used without the VFS lock");
+    }
+  }
+
   /// Keeps `node` from being removed while its holder reads it without the
   /// VFS lock. The lock is held.
   function pin(node: *mut Fs::Node): void {
@@ -320,6 +330,8 @@ namespace Fs::Vfs {
   /// for a relative path and at the root for an absolute one. On `OK`
   /// writes the node to `result`. See the module header for the rules.
   function lookup(base: *mut Fs::Node, path: *u8, length: u64, result: *mut *mut Fs::Node): u64 {
+    requireLock();
+
     if (length >= PATH_MAX) {
       return NAME_TOO_LONG;
     }
@@ -400,6 +412,8 @@ namespace Fs::Vfs {
     nameOffset: *mut u64,
     nameLength: *mut u64
   ): u64 {
+    requireLock();
+
     if (length >= PATH_MAX) {
       return NAME_TOO_LONG;
     }
@@ -479,6 +493,8 @@ namespace Fs::Vfs {
     mode: u64,
     result: *mut *mut Fs::Node
   ): u64 {
+    requireLock();
+
     if ((*directory).kind != DIRECTORY) {
       return NOT_DIRECTORY;
     }
@@ -511,6 +527,8 @@ namespace Fs::Vfs {
   /// it with its name and owned data. Returns `NOT_EMPTY` for a directory
   /// with children and `INVALID` for the root.
   function remove(node: *mut Fs::Node): u64 {
+    requireLock();
+
     if (node == VfsState::root) {
       return INVALID;
     }
@@ -549,6 +567,8 @@ namespace Fs::Vfs {
     count: u64,
     copied: *mut u64
   ): u64 {
+    requireLock();
+
     if ((*node).kind != FILE) {
       return notFileStatus(node);
     }
@@ -577,6 +597,8 @@ namespace Fs::Vfs {
   /// `TOO_LARGE` past `MAX_FILE_SIZE`, `NO_MEMORY`, or `INVALID` when
   /// `offset + count` does not fit a signed 64-bit offset.
   function write(node: *mut Fs::Node, offset: u64, source: *u8, count: u64): u64 {
+    requireLock();
+
     if ((*node).kind != FILE) {
       return notFileStatus(node);
     }
@@ -623,6 +645,8 @@ namespace Fs::Vfs {
   /// `IS_DIRECTORY`, `INVALID` for a device, `TOO_LARGE` past
   /// `MAX_FILE_SIZE`, or `NO_MEMORY`.
   function truncate(node: *mut Fs::Node, length: u64): u64 {
+    requireLock();
+
     if ((*node).kind != FILE) {
       return notFileStatus(node);
     }
@@ -652,6 +676,8 @@ namespace Fs::Vfs {
   /// to the `capacity` bytes at `buffer`, without a NUL, and its length to
   /// `length`. Returns `NAME_TOO_LONG` when it does not fit.
   function pathOf(node: *mut Fs::Node, buffer: *mut u8, capacity: u64, length: *mut u64): u64 {
+    requireLock();
+
     if (node == VfsState::root) {
       if (capacity < 1) {
         return NAME_TOO_LONG;
@@ -694,6 +720,8 @@ namespace Fs::Vfs {
   /// The child of `directory` at `index` in the order they were added, or
   /// null past the last one.
   function child(directory: *mut Fs::Node, index: u64): *mut Fs::Node {
+    requireLock();
+
     let mut node: *mut Fs::Node = (*directory).firstChild;
     let mut position: u64 = 0;
 

@@ -49,8 +49,13 @@ import Sched from "@sched";
 import Time from "@time";
 import _ from "./exception";
 
-/// What `Trap::dispatch` saw of RFLAGS.AC, for `Tests::User`.
+/// What `Trap::dispatch` saw of RFLAGS.AC and of timer ticks, for
+/// `Tests::User`.
 record TrapState {
+  /// Timer ticks that interrupted a process's thread in ring 0: in a system
+  /// call, since those run with interrupts on.
+  static mut processKernelTicks: u64 = 0;
+
   /// Entries from ring 3 whose saved RFLAGS had AC set.
   static mut userEntriesWithAccessFlag: u64 = 0;
 
@@ -116,6 +121,10 @@ namespace Trap {
     }
 
     if (vector == TIMER_VECTOR) {
+      if (((*frame).cs & 3) == 0 && Sched::Scheduler::currentProcess() != 0) {
+        TrapState::processKernelTicks += 1;
+      }
+
       Time::Timer::handleTick();
       Apic::Lapic::endOfInterrupt();
       Sched::Scheduler::onTick();
@@ -163,6 +172,12 @@ namespace Trap {
     if ((Arch::Cpu::readFlags() & FLAG_ACCESS_CHECK) != 0) {
       TrapState::entriesWithAccessLeftOpen += 1;
     }
+  }
+
+  /// Timer ticks that landed while a process's thread ran kernel code, which
+  /// is a system call.
+  function processKernelTicks(): u64 {
+    return TrapState::processKernelTicks;
   }
 
   /// Interrupts and exceptions taken from ring 3 while the program had

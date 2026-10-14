@@ -372,6 +372,12 @@ namespace Sched::Scheduler {
     unlockRunQueue();
   }
 
+  /// True once `initialize` has built the thread table: from then on other
+  /// threads may run.
+  function isStarted(): boolean {
+    return SchedulerState::started;
+  }
+
   /// The id of the running thread.
   function currentId(): u64 {
     return (*Sched::Thread::slotPointer(SchedulerState::current)).id;
