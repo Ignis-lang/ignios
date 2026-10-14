@@ -262,6 +262,7 @@ namespace Tests::User {
     expectMemoryKilled("mmtest use-unmapped");
     expectMemoryKilled("mmtest execute");
     expectMemoryKilled("mmtest touch-none");
+    expectMemoryKilled("mmtest overflow");
 
     if (Proc::Programs::runNamed("mmtest double-free") != PANICKED) {
       @panic("user test: std::alloc did not catch a double free");
@@ -273,7 +274,7 @@ namespace Tests::User {
       @panic("user test: mappings leaked frames");
     }
 
-    Drivers::Console::writeLine("user: mmtest passed, writing read-only, using unmapped, executing non-exec and touching PROT_NONE memory were killed, a double free was caught, no frame leaked");
+    Drivers::Console::writeLine("user: mmtest passed, writing read-only, using unmapped, executing non-exec, touching PROT_NONE memory and overflowing the 8 MiB stack were killed, a double free was caught, no frame leaked");
   }
 
   /// Runs `/bin/stress`: four processes work on the file tree and on memory

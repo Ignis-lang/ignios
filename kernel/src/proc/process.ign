@@ -25,7 +25,7 @@
 //!     └─ Proc::Process::startElf(image, arguments)
 //!          ├─ Mm::AddressSpace::create            new PML4, kernel half shared
 //!          ├─ Proc::Elf::load                       map and fill PT_LOAD segments
-//!          ├─ mapStack                        8 zeroed no-execute pages
+//!          ├─ mapStack                        stack tables, 2 zeroed pages
 //!          ├─ buildStack                      argc, argv, envp, auxv, strings
 //!          └─ launch
 //!               ├─ slot := RUNNING, id := nextId++
@@ -64,8 +64,10 @@
 //!
 //! ```text
 //!   0x0000000000400000  program segments (text r-x, rodata r--, data rw-)
-//!   0x00007FFFFFFF7000  ┐
-//!                       │ stack: 8 pages, read/write, no-execute, zeroed
+//!   0x00007FFFFF7FF000  ┐ STACK_BOTTOM: the stack may grow down to here
+//!                       │ stack: up to 8 MiB, read/write, no-execute; the
+//!                       │ top 2 pages are mapped at start, the rest on
+//!                       │ first access (`Proc::Memory::growStack`)
 //!   0x00007FFFFFFFF000  ┘ STACK_TOP = Mm::AddressSpace::USER_LIMIT, the first
 //!                         byte past the stack and the page that stays unmapped
 //!   an ELF program starts with the Linux initial stack at the top of it
@@ -181,13 +183,13 @@ namespace Proc::Process {
   /// Where raw test programs are loaded.
   const CODE_BASE: u64 = 0x400000;
 
-  /// The user stack is `STACK_PAGES` pages that end at the user limit minus
-  /// the unmapped last page, so running off its bottom faults.
-  const STACK_PAGES: u64 = 8;
+  /// The stack pages mapped when a process starts: the arguments fit in
+  /// them (`buildStack`). The rest of the stack, down to
+  /// `Proc::Memory::STACK_BOTTOM`, is mapped on first access.
+  const INITIAL_STACK_PAGES: u64 = 2;
 
-  /// The first address past the user stack: `Mm::AddressSpace::USER_LIMIT`. The
-  /// stack grows down from here and the page at this address stays unmapped.
-  const STACK_TOP: u64 = Mm::AddressSpace::USER_LIMIT;
+  /// The first address past the user stack (`Proc::Memory::STACK_TOP`).
+  const STACK_TOP: u64 = Proc::Memory::STACK_TOP;
 
   /// The most arguments a program gets, its name included.
   const MAX_ARGUMENTS: u64 = 32;
@@ -376,12 +378,17 @@ namespace Proc::Process {
     *@pointerFromInteger<*mut u64>(@integerFromPointer(table) + index * 8) = value;
   }
 
-  /// Maps the user stack, zeroed and no-execute. Returns false when memory
-  /// runs out; the caller destroys the space.
+  /// Builds the page tables of the whole stack range and maps its first
+  /// pages, zeroed and no-execute. Returns false when memory runs out; the
+  /// caller destroys the space.
   function mapStack(root: u64): boolean {
+    if (!Proc::Memory::prepareStack(root)) {
+      return false;
+    }
+
     let mut page: u64 = 1;
 
-    while (page <= STACK_PAGES) {
+    while (page <= INITIAL_STACK_PAGES) {
       let address: u64 = STACK_TOP - page * PAGE_SIZE;
 
       if (Mm::AddressSpace::allocatePage(root, address, Mm::Vmm::WRITABLE | Mm::Vmm::NO_EXECUTE) == Mm::Pmm::NO_FRAME) {

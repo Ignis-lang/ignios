@@ -16,6 +16,7 @@
 //! | `use-unmapped`| reads a mapping after `munmap`                         |
 //! | `execute`     | jumps into a mapping without `PROT_EXEC`               |
 //! | `touch-none`  | reads a `PROT_NONE` mapping                            |
+//! | `overflow`    | recurses past the 8 MiB stack limit                    |
 //! | `double-free` | frees a block twice; `std::alloc` panics (status 101)  |
 //!
 //! ## Checks
@@ -37,6 +38,7 @@
 //! | 80-84  | `std::alloc`: 200 blocks aligned and apart, reuse after `free`, freed space merges back into one free block, a large block gets its own pages |
 //! | 85     | a closure that captures a value allocates through `@allocHandler` and frees through `@freeHandler` |
 //! | 86     | a `PROT_READ \| PROT_EXEC` private mapping of a file runs: `/mmexec` holds a `ret`, the mapping is called and returns (the kernel test removes `/mmexec`) |
+//! | 92-93  | the stack grows: a recursion with a page of locals per call reaches 1 MiB below its start and comes back intact |
 //! | 90-91  | `read` into two pages of a new mapping that were never touched, across the page boundary, works and gives the file's bytes |
 
 import Alloc from "std::alloc";
@@ -76,6 +78,11 @@ record State {
 
   /// One page read with `read`.
   static mut page: u8[4096];
+
+  /// The lowest address of the locals of `descend` so far. Storing it makes
+  /// the locals' address escape, so the compiler keeps the whole page of
+  /// them instead of the two bytes that are read.
+  static mut lowest: u64;
 }
 
 /// Exits with `status` unless `got` equals `wanted`, after printing both.
@@ -346,6 +353,48 @@ function checkLazy(): void {
   expect(Sys::munmap(mapped as u64, 2 * PAGE), 0, 90);
 }
 
+/// The stack grows on demand: a recursion with 4 KiB of locals per call
+/// reaches 1 MiB below the start and comes back with every frame intact.
+function checkStack(): void {
+  let mut here: u8 = 0;
+  let top: u64 = @integerFromPointer(&mut here as *mut u8);
+
+  @writeVolatile<u64>(&mut State::lowest as *mut u64, top);
+  require(descend(256) == 256 * 257 / 2, 92);
+  require(top - @readVolatile<u64>(&mut State::lowest as *mut u64) >= 1048576, 93);
+}
+
+/// Recurses `depth` times with a page of locals per call, marking both ends
+/// of each, and returns the sum of the depths on the way up, 0 when a mark
+/// changed. The work after the call keeps it from being a tail call.
+function descend(depth: u64): u64 {
+  let mut locals: u8[4096];
+  let first: *mut u8 = &mut locals as *mut u8;
+
+  @writeVolatile<u8>(first, (depth & 0xFF) as u8);
+  @writeVolatile<u8>(first + 4095, (depth & 0xFF) as u8);
+
+  if (@integerFromPointer(first) < @readVolatile<u64>(&mut State::lowest as *mut u64)) {
+    @writeVolatile<u64>(&mut State::lowest as *mut u64, @integerFromPointer(first));
+  }
+
+  if (depth == 0) {
+    return 0;
+  }
+
+  let below: u64 = descend(depth - 1);
+
+  if (below == 0 && depth > 1) {
+    return 0;
+  }
+
+  if (@readVolatile<u8>(first) != (depth & 0xFF) as u8 || @readVolatile<u8>(first + 4095) != (depth & 0xFF) as u8) {
+    return 0;
+  }
+
+  return below + depth;
+}
+
 function checkAllocator(): void {
   let before: u64 = Alloc::bytesInUse();
   let mut index: u64 = 0;
@@ -515,6 +564,10 @@ function misbehave(mode: *u8): u64 {
 
     Alloc::free(block);
     Alloc::free(block);
+  } else if (modeIs(mode, "overflow")) {
+    // Past the 8 MiB stack limit: the gap below it is not mapped.
+    @writeVolatile<u64>(&mut State::lowest as *mut u64, 0xFFFFFFFFFFFFFFFF);
+    descend(4096);
   } else if (modeIs(mode, "touch-none")) {
     let address: i64 = Sys::mmap(PAGE, Sys::PROT_NONE, Sys::MAP_PRIVATE | Sys::MAP_ANONYMOUS, 0xFFFFFFFFFFFFFFFF, 0);
 
@@ -543,6 +596,7 @@ function main(count: u64, values: *u64): u64 {
   checkLimit();
   checkFiles();
   checkLazy();
+  checkStack();
   checkAllocator();
   checkClosure();
   checkExecutable();

@@ -15,11 +15,15 @@
 //! (`resolve`). A file mapping is still filled at once, as a private copy of
 //! the file. `unmap` frees the touched pages and gives back the reservation
 //! of the others. The ELF image and the stack are not regions: `unmap`
-//! never touches them.
+//! never touches them. The stack grows on demand too: a fault anywhere in
+//! the 8 MiB below `STACK_TOP` gets a zeroed page (`growStack`), and the
+//! unmapped gap below `STACK_BOTTOM` ends a runaway recursion with SIGSEGV.
 //!
 //! ```text
 //!   0x00007FFFFFFFF000  STACK_TOP
-//!                       stack (8 pages)
+//!                       stack, grows down on demand
+//!   0x00007FFFFF7FF000  STACK_BOTTOM = STACK_TOP - 8 MiB
+//!                       (unmapped gap)
 //!   0x00007F0000000000  MAP_TOP ── first region ends here
 //!                       region 1  ▲ regions are handed out downwards,
 //!                       region 2  │ one after the other, never reused
@@ -108,6 +112,18 @@ namespace Proc::Memory {
   /// Process slots, `Proc::Process::MAX_PROCESSES` (this file cannot import
   /// `process.ign`, which imports it). A slot at or above it is refused.
   const MAX_SLOTS: u64 = 64;
+
+  /// The first address past the user stack: `Mm::AddressSpace::USER_LIMIT`.
+  /// The stack grows down from here, and the page at this address stays
+  /// unmapped.
+  const STACK_TOP: u64 = Mm::AddressSpace::USER_LIMIT;
+
+  /// How far the stack may grow: 8 MiB, Linux's default limit.
+  const STACK_LIMIT: u64 = 8388608;
+
+  /// The lowest address the stack may reach. Nothing is mapped below it
+  /// down to `MAP_TOP`, so running off the stack faults and kills.
+  const STACK_BOTTOM: u64 = STACK_TOP - STACK_LIMIT;
 
   /// The end of the first region.
   const MAP_TOP: u64 = 0x00007F0000000000;
@@ -306,6 +322,10 @@ namespace Proc::Memory {
   /// all, since x86 cannot map a page ring 3 cannot read; `PROT_NONE`
   /// allows nothing. Runs in the thread of the process that owns `slot`.
   function resolve(slot: u64, root: u64, address: u64, access: u64): boolean {
+    if (address >= STACK_BOTTOM && address < STACK_TOP) {
+      return growStack(root, address, access);
+    }
+
     let region: *mut Proc::Region = regionContaining(slot, address);
 
     if (region == null || (*region).protection == 0 || ((*region).protection & access) != access) {
@@ -331,6 +351,41 @@ namespace Proc::Memory {
     Mm::AddressSpace::mapPrepared(root, page, frame, pageFlags((*region).protection));
 
     return true;
+  }
+
+  /// Gives the stack page holding `address` a zeroed frame. The stack can be
+  /// read and written, never executed. Its frames are not reserved ahead,
+  /// as on Linux: when none is left the access is refused and the process
+  /// is killed with SIGSEGV. The page tables were built when the process
+  /// started (`prepareStack`), so only the frame can be missing.
+  function growStack(root: u64, address: u64, access: u64): boolean {
+    if ((access & EXECUTE) != 0) {
+      return false;
+    }
+
+    let page: u64 = address / PAGE_SIZE * PAGE_SIZE;
+
+    if ((Mm::Vmm::leafEntryIn(root, page) & Mm::Vmm::PRESENT) != 0) {
+      return true;
+    }
+
+    let frame: u64 = Mm::Pmm::allocateFrame();
+
+    if (frame == Mm::Pmm::NO_FRAME) {
+      return false;
+    }
+
+    Lib::Mem::fill(Boot::Hhdm::toVirtual(frame), 0, PAGE_SIZE);
+    Mm::AddressSpace::mapPrepared(root, page, frame, Mm::Vmm::WRITABLE | Mm::Vmm::NO_EXECUTE);
+
+    return true;
+  }
+
+  /// Builds the page tables of the whole stack range of `root`, so that
+  /// growing the stack later needs only the frames of its pages. Returns
+  /// false when no frame is available for a table.
+  function prepareStack(root: u64): boolean {
+    return Mm::AddressSpace::prepareRange(root, STACK_BOTTOM, STACK_LIMIT);
   }
 
   /// The region of `slot` that holds `address`, or null.
