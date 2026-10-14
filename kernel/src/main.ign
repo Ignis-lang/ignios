@@ -51,6 +51,8 @@
 //!   ├─ Time::Timer::initialize ............ APIC timer, 100 Hz            time/      doc 12
 //!   ├─ Tests::Context, Tests::Scheduler ... context switch, scheduler     tests/     doc 13
 //!   ├─ Sched::Scheduler::enablePreemption
+//!   ├─ Tests::Scheduler::runPreemptive, Tests::Locks::run
+//!   │  .................................... preemption, locks, wake tokens  tests/     doc 24, 25
 //!   ├─ Tests::User::run ................... ring 3 smoke tests            tests/     doc 14
 //!   ├─ Tests::CpuLocal::run ............... GS bases balanced             tests/     doc 18
 //!   ├─ Drivers::Keyboard::initialize ...... 8042 enable, IRQ1 live        drivers/   doc 06
