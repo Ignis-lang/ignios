@@ -21,6 +21,40 @@ namespace Tests::Pmm {
   /// an array of this size.
   const SELF_TEST_FRAMES: u64 = 8;
 
+  /// Reserving every available frame leaves nothing for `allocateFrame`,
+  /// and no second reservation, while `allocateReserved` still gets frames;
+  /// giving the reservation back restores both.
+  function checkReservations(): void {
+    let freeBefore: u64 = Mm::Pmm::freeFrameCount();
+    let available: u64 = Mm::Pmm::availableFrameCount();
+
+    if (Mm::Pmm::reservedFrameCount() != 0 || available != freeBefore || !Mm::Pmm::reserve(available)) {
+      @panic("pmm self-test: could not reserve every available frame");
+    }
+
+    let refused: boolean = Mm::Pmm::allocateFrame() == Mm::Pmm::NO_FRAME && Mm::Pmm::allocateLargeFrame() == Mm::Pmm::NO_FRAME && !Mm::Pmm::reserve(1);
+    let taken: u64 = Mm::Pmm::allocateReserved();
+
+    if (!refused || !Mm::Pmm::isAllocated(taken) || Mm::Pmm::reservedFrameCount() != available - 1) {
+      @panic("pmm self-test: a reservation did not keep its frames apart");
+    }
+
+    Mm::Pmm::freeFrame(taken);
+    Mm::Pmm::unreserve(available - 1);
+
+    let frame: u64 = Mm::Pmm::allocateFrame();
+
+    if (frame == Mm::Pmm::NO_FRAME || Mm::Pmm::reservedFrameCount() != 0) {
+      @panic("pmm self-test: frames stayed reserved after unreserve");
+    }
+
+    Mm::Pmm::freeFrame(frame);
+
+    if (Mm::Pmm::freeFrameCount() != freeBefore) {
+      @panic("pmm self-test: the reservation check leaked frames");
+    }
+  }
+
   /// Allocates and frees a few frames and checks the allocator's promises:
   /// aligned non-zero frames, no frame handed out twice, the free count
   /// following every step, a freed frame coming back first, and
@@ -97,6 +131,8 @@ namespace Tests::Pmm {
       @panic("pmm self-test: free count did not recover");
     }
 
-    Drivers::Console::writeLine("pmm: self-test ok");
+    checkReservations();
+
+    Drivers::Console::writeLine("pmm: self-test ok, reservations included");
   }
 }

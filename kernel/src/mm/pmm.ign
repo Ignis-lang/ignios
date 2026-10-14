@@ -69,6 +69,21 @@
 //! space (`Mm::AddressSpace::destroy`) therefore needs no idea of who else
 //! maps a frame.
 //!
+//! ## Reservations
+//!
+//! A lazy mapping gets its frames only when it is touched, but its `mmap`
+//! must already know they will be there. `reserve(n)` promises `n` of the
+//! free frames: `reserved` grows, and `allocateFrame` refuses to dip below
+//! it. The page fault that first touches a page takes its frame with
+//! `allocateReserved`, which therefore never fails. Unused promises go back
+//! with `unreserve`. Without swap this keeps the old guarantee: memory that
+//! `mmap` granted is memory the process can use.
+//!
+//! ```text
+//!   free frames:  ├──────── available ────────┼──── reserved ────┤
+//!                 allocateFrame, reserve        allocateReserved
+//! ```
+//!
 //! ## Allocation
 //!
 //! `takeFrame` scans word by word, starting at `searchWord`, for a word that
@@ -101,6 +116,10 @@ record PmmState {
 
   /// Frames currently free.
   static mut freeFrames: u64 = 0;
+
+  /// Free frames promised to reservations (`reserve`): only
+  /// `allocateReserved` may take them.
+  static mut reserved: u64 = 0;
 
   /// Index of the word where the next scan starts.
   static mut searchWord: u64 = 0;
@@ -190,11 +209,15 @@ namespace Mm::Pmm {
   }
 
   /// The physical address of a free frame, or `NO_FRAME`. The frame is not
-  /// zeroed.
+  /// zeroed. Frames promised to reservations are not handed out here.
   function allocateFrame(): u64 {
     Arch::Spin::lockIrq(frameLock());
 
-    let frame: u64 = takeFrame();
+    let mut frame: u64 = NO_FRAME;
+
+    if (PmmState::freeFrames > PmmState::reserved) {
+      frame = takeFrame();
+    }
 
     Arch::Spin::unlockIrq(frameLock());
 
@@ -213,7 +236,7 @@ namespace Mm::Pmm {
 
     let mut word: u64 = 0;
 
-    while (word + WORDS_PER_LARGE_FRAME <= PmmState::wordCount) {
+    while (PmmState::freeFrames - PmmState::reserved >= WORDS_PER_LARGE_FRAME * BITS_PER_WORD && word + WORDS_PER_LARGE_FRAME <= PmmState::wordCount) {
       if (isRunFree(word)) {
         let mut index: u64 = 0;
 
@@ -288,6 +311,71 @@ namespace Mm::Pmm {
     }
 
     return NO_FRAME;
+  }
+
+  /// Promises `count` free frames to the caller: they stay out of
+  /// `allocateFrame` and `allocateLargeFrame`, and `allocateReserved` takes
+  /// them one at a time. Returns false, promising nothing, when fewer than
+  /// `count` frames are free and not promised already. This is commit
+  /// accounting: memory promised to a lazy mapping is there when the mapping
+  /// is first touched.
+  function reserve(count: u64): boolean {
+    Arch::Spin::lockIrq(frameLock());
+
+    let granted: boolean = PmmState::freeFrames - PmmState::reserved >= count;
+
+    if (granted) {
+      PmmState::reserved += count;
+    }
+
+    Arch::Spin::unlockIrq(frameLock());
+
+    return granted;
+  }
+
+  /// Gives back `count` promised frames that were never taken. Panics when
+  /// fewer are promised.
+  function unreserve(count: u64): void {
+    Arch::Spin::lockIrq(frameLock());
+
+    if (count > PmmState::reserved) {
+      @panic("pmm: unreserve of more frames than are reserved");
+    }
+
+    PmmState::reserved -= count;
+    Arch::Spin::unlockIrq(frameLock());
+  }
+
+  /// Takes one frame of a reservation the caller holds. Never fails: a
+  /// reservation always has its frame. Panics when nothing is reserved.
+  function allocateReserved(): u64 {
+    Arch::Spin::lockIrq(frameLock());
+
+    if (PmmState::reserved == 0) {
+      @panic("pmm: allocateReserved without a reservation");
+    }
+
+    let frame: u64 = takeFrame();
+
+    if (frame == NO_FRAME) {
+      @panic("pmm: a reserved frame was missing");
+    }
+
+    PmmState::reserved -= 1;
+    Arch::Spin::unlockIrq(frameLock());
+
+    return frame;
+  }
+
+  /// Free frames not promised to a reservation: what `allocateFrame` and
+  /// `reserve` can still hand out.
+  function availableFrameCount(): u64 {
+    return PmmState::freeFrames - PmmState::reserved;
+  }
+
+  /// Frames promised to reservations.
+  function reservedFrameCount(): u64 {
+    return PmmState::reserved;
   }
 
   /// Adds a reference to the allocated frame at `address`: one more
