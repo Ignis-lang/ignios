@@ -1,0 +1,184 @@
+//!
+//! # Starting the Processors
+//!
+//! Every processor Limine reports, started through its MP feature.
+//!
+//! ## Overview
+//!
+//! Limine starts the application processors (APs) before the kernel runs and
+//! parks each one in a loop that watches the `gotoAddress` of its `MpInfo`.
+//! `startProcessors`, on the boot processor, gives each AP an index in
+//! `extraArgument` and then stores the entry point in `gotoAddress`: an
+//! aligned 8-byte store, which x86 makes atomic and orders after the stores
+//! before it, which is what the protocol asks. The AP jumps to `apMain` with
+//! RDI pointing at its `MpInfo`, on a stack of Limine's, with Limine's page
+//! tables and interrupts off.
+//!
+//! ```text
+//!   boot processor                          application processor n
+//!   info.extraArgument = n
+//!   info.gotoAddress = apMain ────────────► apMain(info)
+//!                                             CR3 = kernel tables, EFER.NXE, CR0.WP, PAT
+//!                                             own GDT slot and TSS, GS = own block
+//!                                             shared IDT, FPU, SMEP/SMAP, SYSCALL MSRs
+//!                                             local APIC on
+//!   waits until online[n] = 1 ◄──────────── online[n] = 1
+//! ```
+//!
+//! An AP takes no lock before its per-CPU block is set up: the lock code
+//! keeps its bookkeeping behind GS. Processors past `MAX_CPUS` stay parked in
+//! Limine's loop. See concept doc 27.
+
+import Apic from "@apic";
+import Arch from "@arch";
+import Boot from "@boot";
+import Drivers from "@drivers";
+import Mm from "@mm";
+import Time from "@time";
+
+/// What the processors report while they start.
+record SmpState {
+  /// 1 once processor n has finished its setup. The size must equal
+  /// `Arch::CpuLocal::MAX_CPUS`.
+  static mut online: u64[8];
+
+  /// The local APIC id of processor n.
+  static mut lapicIds: u64[8];
+
+  /// Processors started, the boot processor included.
+  static mut count: u64 = 1;
+}
+
+/// The processor start API.
+namespace Smp {
+  /// Timer ticks the boot processor waits for the others: 1 s.
+  const START_TIMEOUT_TICKS: u64 = 100;
+
+  /// Starts every processor the MP response lists, up to
+  /// `Arch::CpuLocal::MAX_CPUS`, waits until each has run its setup, and
+  /// reports them. The timer must be running. Panics when a processor does
+  /// not come online within `START_TIMEOUT_TICKS`.
+  function startProcessors(): void {
+    let response: *mut Boot::Limine::MpResponse = Boot::Limine::mp();
+
+    *onlineOf(0) = 1;
+
+    if (response == null) {
+      Drivers::Console::writeLine("smp: no MP response, 1 processor online");
+      return;
+    }
+
+    *lapicIdOf(0) = (*response).bspLapicId as u64;
+
+    let mut next: u64 = 1;
+    let mut left: u64 = 0;
+    let mut index: u64 = 0;
+
+    while (index < (*response).cpuCount) {
+      let info: *mut Boot::Limine::MpInfo = *((*response).cpus + index);
+
+      if ((*info).lapicId != (*response).bspLapicId) {
+        if (next < Arch::CpuLocal::MAX_CPUS) {
+          *lapicIdOf(next) = (*info).lapicId as u64;
+          (*info).extraArgument = next;
+          @writeVolatile<u64>(&mut (*info).gotoAddress as *mut u64, Arch::ContextAsm::ignis_function_address(apMain));
+          next += 1;
+        } else {
+          left += 1;
+        }
+      }
+
+      index += 1;
+    }
+
+    SmpState::count = next;
+
+    // The deadline needs ticks, so interrupts are on while it waits; the
+    // scheduler does not preempt yet at this point of the boot.
+    let saved: u64 = Arch::Cpu::saveAndDisableInterrupts();
+    let deadline: u64 = Time::Timer::ticks() + START_TIMEOUT_TICKS;
+
+    Arch::Cpu::enableInterrupts();
+
+    while (onlineCount() < next && Time::Timer::ticks() < deadline) {
+      Arch::Cpu::pause();
+    }
+
+    Arch::Cpu::disableInterrupts();
+    Arch::Cpu::restoreInterrupts(saved);
+
+    if (onlineCount() < next) {
+      @panic("smp: a processor did not come online");
+    }
+
+    Drivers::Console::write("smp: ");
+    Drivers::Console::writeDecimal(next);
+    Drivers::Console::write(next == 1 ? " processor online, lapic id" : " processors online, lapic ids");
+
+    let mut cpu: u64 = 0;
+
+    while (cpu < next) {
+      Drivers::Console::write(" ");
+      Drivers::Console::writeDecimal(*lapicIdOf(cpu));
+      cpu += 1;
+    }
+
+    if (left > 0) {
+      Drivers::Console::write(", ");
+      Drivers::Console::writeDecimal(left);
+      Drivers::Console::write(" more left parked");
+    }
+
+    Drivers::Console::writeLine("");
+  }
+
+  /// Where an application processor starts, with the address of its
+  /// `MpInfo`. Runs the per-CPU part of the boot, reports itself online and
+  /// parks.
+  function apMain(argument: u64): void {
+    let info: *mut Boot::Limine::MpInfo = @pointerFromInteger<*mut Boot::Limine::MpInfo>(argument);
+    let cpu: u64 = (*info).extraArgument;
+
+    // The kernel tables first: Limine's are in memory the kernel may reuse.
+    Mm::Vmm::initializeProcessor();
+    Arch::Gdt::initialize(cpu);
+    Arch::CpuLocal::initialize(cpu);
+    Arch::Idt::load();
+    Arch::Fpu::initializeProcessor();
+    Arch::Protection::initializeProcessor();
+    Arch::UserMode::initialize();
+    Apic::Lapic::initializeProcessor();
+
+    @writeVolatile<u64>(onlineOf(cpu), 1);
+
+    Arch::Cpu::haltForever();
+  }
+
+  /// Processors started, the boot processor included.
+  function processorCount(): u64 {
+    return SmpState::count;
+  }
+
+  /// Processors that finished their setup.
+  function onlineCount(): u64 {
+    let mut count: u64 = 0;
+    let mut cpu: u64 = 0;
+
+    while (cpu < Arch::CpuLocal::MAX_CPUS) {
+      count += @readVolatile<u64>(onlineOf(cpu));
+      cpu += 1;
+    }
+
+    return count;
+  }
+
+  /// `SmpState::online[cpu]`.
+  function onlineOf(cpu: u64): *mut u64 {
+    return &mut SmpState::online as *mut u64 + cpu;
+  }
+
+  /// `SmpState::lapicIds[cpu]`.
+  function lapicIdOf(cpu: u64): *mut u64 {
+    return &mut SmpState::lapicIds as *mut u64 + cpu;
+  }
+}

@@ -95,6 +95,13 @@ namespace Arch::Fpu {
   /// Turns on the x87 and SSE units and builds the initial state. Runs once,
   /// before the first thread is created.
   function initialize(): void {
+    initializeProcessor();
+    save(initialState());
+  }
+
+  /// Turns the x87 and SSE units on for the running processor and resets
+  /// them; every processor runs it, the boot processor through `initialize`.
+  function initializeProcessor(): void {
     let cr0: u64 = Arch::Cpu::readCr0();
 
     Arch::Cpu::writeCr0((cr0 & ~(CR0_EMULATION | CR0_TASK_SWITCHED)) | CR0_MONITOR_COPROCESSOR);
@@ -107,8 +114,6 @@ namespace Arch::Fpu {
       fninit
       ldmxcsr [{mxcsrAddress}]
     }
-
-    save(initialState());
   }
 
   /// The template a new thread's area is copied from.

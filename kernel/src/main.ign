@@ -50,6 +50,7 @@
 //!   ├─ Apic::Lapic::initialize ............ local APIC on                 apic/      doc 05
 //!   ├─ Apic::Ioapic::initialize + routeIsa(keyboard)                      apic/      doc 12
 //!   ├─ Time::Timer::initialize ............ APIC timer, 100 Hz            time/      doc 12
+//!   ├─ Smp::startProcessors ............... the other processors, parked  smp/       doc 27
 //!   ├─ Tests::Context, Tests::Scheduler ... context switch, scheduler     tests/     doc 13
 //!   ├─ Sched::Scheduler::enablePreemption
 //!   ├─ Tests::Scheduler::runPreemptive, Tests::Locks::run
@@ -83,6 +84,7 @@ import Mm from "@mm";
 import Proc from "@proc";
 import Sched from "@sched";
 import Shell from "@shell";
+import Smp from "@smp";
 import Syscall from "@syscall";
 import Tests from "@tests";
 import Time from "@time";
@@ -183,6 +185,8 @@ function kmain(): void {
   Time::Timer::initialize(Trap::TIMER_VECTOR as u8);
   Time::Timer::report();
   Tests::Timer::run();
+
+  Smp::startProcessors();
 
   Tests::Context::run();
   Tests::Scheduler::runCooperative();

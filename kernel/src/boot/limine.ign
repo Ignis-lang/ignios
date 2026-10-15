@@ -46,6 +46,7 @@
 //! | Executable address | `Mm::Vmm::mapKernelImage`                    | physical and virtual kernel base   |
 //! | Modules            | `Modules`                                | files listed in `boot/limine.conf` |
 //! | RSDP               | `Acpi`                                   | physical/direct-map address of ACPI|
+//! | MP                 | `Smp::startProcessors`                   | the processors, and a way to start each one |
 //!
 //! The record layouts follow `PROTOCOL.md` of the Limine boot protocol
 //! (https://codeberg.org/Limine/limine-protocol). Every record is `@cLayout`,
@@ -354,6 +355,63 @@ namespace Boot::Limine {
     public response: *mut ModuleResponse;
   }
 
+  /// One processor in the MP response. Writing `gotoAddress` starts a
+  /// parked application processor there, with RDI pointing at this record.
+  @cLayout
+  record MpInfo {
+    /// ACPI processor UID, from the MADT.
+    public processorId: u32;
+
+    /// Local APIC id, from the MADT.
+    public lapicId: u32;
+
+    /// Bootloader use only; a parked processor keeps its stack pointer here.
+    public reserved: u64;
+
+    /// Zero until the kernel stores the entry point; the store starts the
+    /// processor.
+    public gotoAddress: u64;
+
+    /// Free for the kernel: IgniOS passes the processor's index here.
+    public extraArgument: u64;
+  }
+
+  /// Answer to the MP request (x86-64 layout).
+  @cLayout
+  record MpResponse {
+    /// Revision of this response layout.
+    public revision: u64;
+
+    /// Bit 0: x2APIC was enabled. IgniOS never asks for it.
+    public flags: u32;
+
+    /// Local APIC id of the bootstrap processor.
+    public bspLapicId: u32;
+
+    /// Processors present, the bootstrap processor included.
+    public cpuCount: u64;
+
+    /// `cpuCount` pointers to `MpInfo`.
+    public cpus: *mut *mut MpInfo;
+  }
+
+  /// The MP request. Its presence makes Limine start and park the other
+  /// processors. `flags` bit 0 would ask for x2APIC; it stays clear.
+  @cLayout
+  record MpRequest {
+    /// Request identifier: the two common words and two specific ones.
+    public id: u64[4];
+
+    /// Request revision, 0.
+    public revision: u64;
+
+    /// Null until Limine answers; read it with `readResponse`.
+    public response: *mut MpResponse;
+
+    /// Request flags, 0.
+    public flags: u64;
+  }
+
   /// All the requests, as globals the bootloader finds by scanning the image.
   /// Each `id` ends with the two request-specific words from `PROTOCOL.md`.
   /// The records are initialized `static mut` globals, so they are stored in
@@ -398,6 +456,14 @@ namespace Boot::Limine {
       id: [COMMON_MAGIC_0, COMMON_MAGIC_1, 0x3e7e279702be32af, 0xca1c4f3bd1280cee],
       revision: 0,
       response: null,
+    };
+
+    /// Storage of the MP request.
+    static mut mp: MpRequest = MpRequest {
+      id: [COMMON_MAGIC_0, COMMON_MAGIC_1, 0x95a67b819a1b857e, 0xa0b61b723b6a73e0],
+      revision: 0,
+      response: null,
+      flags: 0,
     };
 
     /// Storage of the ACPI RSDP request.
@@ -479,6 +545,12 @@ namespace Boot::Limine {
     return readResponse<ExecutableAddressResponse>(
       &mut Requests::executableAddress.response as *mut *mut ExecutableAddressResponse,
     );
+  }
+
+  /// The processors and their start slots, or null when the bootloader does
+  /// not support the MP feature.
+  function mp(): *mut MpResponse {
+    return readResponse<MpResponse>(&mut Requests::mp.response as *mut *mut MpResponse);
   }
 
   /// The modules the configuration lists, or null when there are none: the

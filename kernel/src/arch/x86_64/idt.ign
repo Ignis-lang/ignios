@@ -117,6 +117,12 @@ namespace Arch::Idt {
     // The spurious vector is far from the others, so it is installed on its own.
     setGate(spuriousVector, IdtAsm::ignis_interrupt_thunk(spuriousVector), selector, 0, INTERRUPT_GATE);
 
+    load();
+  }
+
+  /// Loads the table, built by `initialize`, on the running processor. Every
+  /// processor shares it.
+  function load(): void {
     let descriptor: IdtPointer = IdtPointer {
       limit: (GATE_COUNT * GATE_SIZE - 1) as u16,
       base: tableBase(),

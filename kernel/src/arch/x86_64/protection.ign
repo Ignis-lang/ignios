@@ -88,6 +88,22 @@ namespace Arch::Protection {
     Arch::Cpu::writeCr4(cr4);
   }
 
+  /// Turns on, on the running processor, what `initialize` found on the
+  /// boot processor. Processors of one machine share their features.
+  function initializeProcessor(): void {
+    let mut cr4: u64 = Arch::Cpu::readCr4();
+
+    if (ProtectionState::smep) {
+      cr4 |= CR4_SMEP;
+    }
+
+    if (ProtectionState::smap) {
+      cr4 |= CR4_SMAP;
+    }
+
+    Arch::Cpu::writeCr4(cr4);
+  }
+
   /// True when the processor reports SMEP.
   function smepSupported(): boolean {
     return Arch::Cpu::cpuidMaxLeaf() >= FEATURES_LEAF && (Arch::Cpu::cpuidEbx(FEATURES_LEAF, 0) & CPUID_SMEP) != 0;

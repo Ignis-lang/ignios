@@ -1,0 +1,29 @@
+//!
+//! # Smp
+//!
+//! Starting the other processors.
+//!
+//! ## Public API
+//!
+//! | Name  | File        | Purpose                                                      |
+//! |-------|-------------|--------------------------------------------------------------|
+//! | `Smp` | `start.ign` | start every processor Limine parked, and run its own setup   |
+//!
+//! ## Dependencies
+//!
+//! | Imports   | Why                                                          |
+//! |-----------|--------------------------------------------------------------|
+//! | `Boot`    | the Limine MP response                                       |
+//! | `Arch`    | the per-CPU GDT, TSS, block, IDT, FPU, SMEP/SMAP, `SYSCALL`  |
+//! | `Mm`      | the kernel page tables, EFER.NXE, CR0.WP, PAT                |
+//! | `Apic`    | each processor's local APIC                                  |
+//! | `Time`    | the deadline while the boot processor waits                  |
+//! | `Drivers` | the boot report                                              |
+//!
+//! Only `main.ign` imports `Smp`.
+
+import _ from "./start";
+
+/// Aggregate namespace of the processor start code, contributed by
+/// `start.ign`.
+export namespace Smp {}

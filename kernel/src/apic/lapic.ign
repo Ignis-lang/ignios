@@ -162,6 +162,19 @@ namespace Apic::Lapic {
       @panic("lapic: cannot map the APIC page");
     }
 
+    initializeProcessor();
+  }
+
+  /// Enables the running processor's local APIC, reached through the page
+  /// `initialize` mapped: every processor sees its own APIC at the same
+  /// address.
+  function initializeProcessor(): void {
+    let base: u64 = Arch::Cpu::readMsr(APIC_BASE_MSR);
+
+    if ((base & APIC_BASE_X2APIC) != 0) {
+      @panic("lapic: x2APIC mode is not supported");
+    }
+
     Arch::Cpu::writeMsr(APIC_BASE_MSR, base | APIC_BASE_ENABLE);
 
     writeRegister(TASK_PRIORITY_REGISTER, 0);

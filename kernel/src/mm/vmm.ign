@@ -313,6 +313,16 @@ namespace Mm::Vmm {
     }
   }
 
+  /// Gives an application processor what `initialize` set on the boot
+  /// processor: EFER.NXE, CR0.WP, the PAT layout, and the kernel page
+  /// tables in CR3.
+  function initializeProcessor(): void {
+    Arch::Cpu::writeMsr(EFER_MSR, Arch::Cpu::readMsr(EFER_MSR) | EFER_NO_EXECUTE_ENABLE);
+    Arch::Cpu::writeCr0(Arch::Cpu::readCr0() | CR0_WRITE_PROTECT);
+    programPat();
+    Arch::Cpu::writeCr3(VmmState::root);
+  }
+
   /// Writes `PAT_LAYOUT` to IA32_PAT. `initialize` calls it before loading
   /// CR3, so every mapping made afterwards, and the pages Limine mapped that
   /// the kernel keeps using, see the same memory types. Writing the MSR does

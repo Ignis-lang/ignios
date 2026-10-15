@@ -76,7 +76,10 @@ LDFLAGS := -m elf_x86_64 -nostdlib -static --no-dynamic-linker \
 # OVMF is attached as two pflash drives (firmware code read-only, variables
 # writable) and the boot image as a raw disk. `make run` and `make powertest`
 # use these, so `reboot` resets the machine.
-QEMU_MACHINE := -machine q35,accel=kvm:tcg -cpu max -m 256M \
+# Processors QEMU emulates; every automated target runs with them.
+SMP ?= 4
+
+QEMU_MACHINE := -machine q35,accel=kvm:tcg -cpu max -m 256M -smp $(SMP) \
 	-drive if=pflash,unit=0,format=raw,readonly=on,file=$(OVMF_CODE) \
 	-drive if=pflash,unit=1,format=raw,file=$(OVMF_VARS_COPY) \
 	-drive format=raw,file=$(IMAGE)
@@ -187,6 +190,7 @@ run-headless: $(IMAGE) $(OVMF_VARS_COPY)
 	grep -q '^user: nativetest passed' $(SERIAL_LOG)
 	grep -q '^user: stress passed' $(SERIAL_LOG)
 	grep -q '^memory: demand paging self-test ok' $(SERIAL_LOG)
+	grep -q '^smp: $(SMP) processors\? online' $(SERIAL_LOG)
 	grep -q '^locks: spinlock self-test ok' $(SERIAL_LOG)
 	grep -q '^locks: mutex and wait queue self-test ok' $(SERIAL_LOG)
 	grep -q '^locks: scratch self-test ok' $(SERIAL_LOG)
