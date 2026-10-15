@@ -69,6 +69,12 @@ import Drivers from "@drivers";
 import Mm from "@mm";
 
 /// The local APIC API. All register access is volatile MMIO.
+/// Whether the boot processor's APIC is set up.
+record LapicState {
+  /// True once `Apic::Lapic::initialize` ran.
+  static mut ready: boolean = false;
+}
+
 namespace Apic::Lapic {
   /// Vector of the spurious interrupt the APIC raises when an interrupt
   /// disappears before the processor takes it. Its handler must not signal
@@ -92,6 +98,12 @@ namespace Apic::Lapic {
   /// higher half, away from the direct map, the heap and the kernel image.
   const MAPPING: u64 = 0xFFFFA00000000000;
 
+  /// The IPI that stops a processor for good: panic, reboot, shutdown.
+  const STOP_VECTOR: u8 = 49;
+
+  /// The IPI that makes an idle processor look at the run queue.
+  const RESCHEDULE_VECTOR: u8 = 50;
+
   /// Offset `0x20`: the APIC id in bits 31-24.
   const ID_REGISTER: u64 = 0x20;
 
@@ -109,6 +121,23 @@ namespace Apic::Lapic {
 
   /// Offset `0x320`: the LVT entry of the timer.
   const TIMER_REGISTER: u64 = 0x320;
+
+  /// Interrupt command register, low half: vector, delivery, shorthand. A
+  /// write to it sends the IPI.
+  const INTERRUPT_COMMAND_LOW_REGISTER: u64 = 0x300;
+
+  /// Interrupt command register, high half: the destination APIC id in bits
+  /// 31:24.
+  const INTERRUPT_COMMAND_HIGH_REGISTER: u64 = 0x310;
+
+  /// ICR bit 14: level assert, required for a fixed IPI.
+  const ICR_LEVEL_ASSERT: u32 = 0x4000;
+
+  /// ICR bits 19:18 = 3: every processor but the sender.
+  const ICR_ALL_EXCLUDING_SELF: u32 = 0xC0000;
+
+  /// ICR bit 12: the last IPI is still being sent.
+  const ICR_DELIVERY_PENDING: u32 = 0x1000;
 
   /// Offset `0x350`: the LVT entry of local pin 0, where the 8259 connects.
   const LINT0_REGISTER: u64 = 0x350;
@@ -163,6 +192,7 @@ namespace Apic::Lapic {
     }
 
     initializeProcessor();
+    LapicState::ready = true;
   }
 
   /// Enables the running processor's local APIC, reached through the page
@@ -181,6 +211,39 @@ namespace Apic::Lapic {
     writeRegister(LINT0_REGISTER, DELIVERY_EXTINT | LVT_MASKED);
     writeRegister(LINT1_REGISTER, DELIVERY_NMI);
     writeRegister(SPURIOUS_REGISTER, SOFTWARE_ENABLE | (SPURIOUS_VECTOR as u32));
+  }
+
+  /// Stops every other processor (`STOP_VECTOR`): before a panic report, a
+  /// reboot or a shutdown, so nothing else runs while the machine stops. A
+  /// processor that has interrupts off ignores it; the only ones that do are
+  /// still parked at boot, before they run anything. No effect before the
+  /// APIC is set up.
+  function stopOthers(): void {
+    if (LapicState::ready) {
+      sendIpiToOthers(STOP_VECTOR);
+    }
+  }
+
+  /// Sends the fixed interrupt `vector` to the processor whose local APIC
+  /// id is `lapicId`, and waits until the APIC has dispatched it.
+  function sendIpi(lapicId: u64, vector: u8): void {
+    writeRegister(INTERRUPT_COMMAND_HIGH_REGISTER, (lapicId as u32) << 24);
+    writeRegister(INTERRUPT_COMMAND_LOW_REGISTER, vector as u32 | ICR_LEVEL_ASSERT);
+    waitForDelivery();
+  }
+
+  /// Sends the fixed interrupt `vector` to every processor but this one.
+  function sendIpiToOthers(vector: u8): void {
+    writeRegister(INTERRUPT_COMMAND_HIGH_REGISTER, 0);
+    writeRegister(INTERRUPT_COMMAND_LOW_REGISTER, vector as u32 | ICR_LEVEL_ASSERT | ICR_ALL_EXCLUDING_SELF);
+    waitForDelivery();
+  }
+
+  /// Spins while the ICR's delivery status says the last IPI is pending.
+  function waitForDelivery(): void {
+    while ((readRegister(INTERRUPT_COMMAND_LOW_REGISTER) & ICR_DELIVERY_PENDING) != 0) {
+      Arch::Cpu::pause();
+    }
   }
 
   /// Tells the APIC the interrupt being handled is done, so it can deliver

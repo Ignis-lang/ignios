@@ -173,9 +173,12 @@ namespace Smp {
   /// thread, then releases them. Before this the kernel runs on the boot
   /// processor alone, which the single-processor self-tests rely on.
   function releaseProcessors(): void {
+    Sched::Scheduler::setProcessorLapic(0, *lapicIdOf(0));
+
     let mut cpu: u64 = 1;
 
     while (cpu < SmpState::count) {
+      Sched::Scheduler::setProcessorLapic(cpu, *lapicIdOf(cpu));
       Sched::Scheduler::addProcessor(cpu);
       cpu += 1;
     }

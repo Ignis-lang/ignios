@@ -23,6 +23,7 @@
 //! This file is not a subsystem. `main.ign` imports it so the handler is
 //! compiled in.
 
+import Apic from "@apic";
 import Arch from "@arch";
 import Drivers from "@drivers";
 
@@ -46,6 +47,7 @@ record PanicState {
 function onPanic(message: str, file: str, line: u32): never {
   Arch::Cpu::disableInterrupts();
   Drivers::Serial::bypassLocks();
+  Apic::Lapic::stopOthers();
 
   if (PanicState::active || !Drivers::Console::isInitialized()) {
     Drivers::Serial::write("\npanic: ");

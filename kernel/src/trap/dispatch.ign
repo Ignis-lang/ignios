@@ -121,6 +121,16 @@ namespace Trap {
       return;
     }
 
+    if (vector == Apic::Lapic::STOP_VECTOR as u64) {
+      Arch::Cpu::haltForever();
+    }
+
+    if (vector == Apic::Lapic::RESCHEDULE_VECTOR as u64) {
+      Apic::Lapic::endOfInterrupt();
+      Sched::Scheduler::onReschedule();
+      return;
+    }
+
     if (vector == TIMER_VECTOR) {
       if (((*frame).cs & 3) == 0 && Sched::Scheduler::currentProcess() != 0) {
         TrapState::processKernelTicks += 1;

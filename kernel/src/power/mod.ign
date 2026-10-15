@@ -39,6 +39,7 @@
 //! | `Drivers` | the last line on the console             |
 
 import Acpi from "@acpi";
+import Apic from "@apic";
 import Arch from "@arch";
 import Drivers from "@drivers";
 
@@ -83,6 +84,7 @@ export namespace Power {
     }
 
     Drivers::Console::writeLine("power: shutting down");
+    Apic::Lapic::stopOthers();
 
     let saved: u64 = Arch::Cpu::saveAndDisableInterrupts();
     let control: u16 = Acpi::Fadt::pm1aControl() as u16;
@@ -116,6 +118,7 @@ export namespace Power {
   function reset(): never {
     Drivers::Console::writeLine("power: rebooting");
     Arch::Cpu::disableInterrupts();
+    Apic::Lapic::stopOthers();
 
     if (Acpi::Fadt::canReset()) {
       Arch::Port::writeByte(Acpi::Fadt::resetPort() as u16, Acpi::Fadt::resetValue() as u8);

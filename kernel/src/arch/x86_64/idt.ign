@@ -42,7 +42,7 @@
 //! | 48 (`0x30`)  | local APIC timer                                    |
 //! | 255 (`0xFF`) | local APIC spurious interrupt                       |
 //!
-//! These 50 vectors (49 contiguous plus the spurious one) are the gates
+//! These 52 vectors (51 contiguous plus the spurious one) are the gates
 //! `initialize` fills, and the boot log prints `idt: 50 gates loaded`. See
 //! concept doc 04.
 
@@ -83,9 +83,10 @@ namespace Arch::Idt {
   const GATE_SIZE: u64 = 16;
 
   /// Vectors 0-31 are exceptions, 32-47 the remapped PIC lines and the IOAPIC
-  /// keyboard, and 48 the local APIC timer. Those and the local APIC spurious
+  /// keyboard, 48 the local APIC timer, 49 and 50 the stop and reschedule
+  /// IPIs. Those and the local APIC spurious
   /// vector are the only vectors that have a thunk.
-  const THUNK_COUNT: u64 = 49;
+  const THUNK_COUNT: u64 = 51;
 
   /// Vector 8, the double fault, the only gate that uses an IST stack.
   const DOUBLE_FAULT: u64 = 8;

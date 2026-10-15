@@ -212,6 +212,7 @@ function kmain(): void {
   // The self-tests above assume one processor; from here every processor
   // runs threads from the shared run queue.
   Smp::releaseProcessors();
+  Tests::Smp::run();
 
   Tests::User::run();
   Tests::CpuLocal::run();

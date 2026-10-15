@@ -76,6 +76,7 @@
 //!
 //! See concept doc 13.
 
+import Apic from "@apic";
 import Arch from "@arch";
 import Lib from "@lib";
 import Mm from "@mm";
@@ -116,6 +117,19 @@ record SchedulerState {
   /// Ticks of processor n that would have switched threads but found a
   /// spinlock held.
   static mut deferred: u64[8];
+
+  /// Bit n set while processor n runs its idle thread. Changed under the run
+  /// queue lock.
+  static mut idleMask: u64;
+
+  /// The local APIC id of processor n, for the reschedule IPI.
+  static mut lapicIds: u64[8];
+
+  /// Reschedule IPIs sent.
+  static mut ipisSent: u64;
+
+  /// Reschedule IPIs that found work and switched an idle processor to it.
+  static mut ipiSwitches: u64;
 
   /// The run queue lock, rank `Lib::Rank::RUN_QUEUE`. It guards the queue,
   /// the thread table and every thread's state, and is held across a context
@@ -249,6 +263,7 @@ namespace Sched::Scheduler {
     }
 
     enqueue(slot);
+    kickIdleProcessor();
 
     let id: u64 = (*Sched::Thread::slotPointer(slot)).id;
 
@@ -397,6 +412,14 @@ namespace Sched::Scheduler {
   function idleLoop(argument: u64): void {
     while (true) {
       yield();
+
+      // A reschedule IPI clears this processor's idle bit; one that came
+      // while a spinlock was held did nothing, so the bit is set again
+      // before every sleep, or later wake-ups would skip this processor.
+      Arch::Spin::lockIrq(runQueueLock());
+      markIdle(true);
+      Arch::Spin::unlockIrq(runQueueLock());
+
       Arch::Cpu::waitForInterrupt();
     }
   }
@@ -608,6 +631,7 @@ namespace Sched::Scheduler {
     (*thread).state = Sched::Thread::RUNNING;
     (*thread).cpu = cpu;
     Arch::CpuLocal::setCurrentSlot(idle);
+    markIdle(true);
     *sliceLeft() = TIME_SLICE_TICKS;
     Arch::Fpu::restore(Sched::Thread::fpuArea(idle) as *u8);
     Arch::Context::switchTo(&mut abandoned as *mut u64, (*thread).savedRsp);
@@ -719,6 +743,7 @@ namespace Sched::Scheduler {
 
     (*Sched::Thread::slotPointer(next)).state = Sched::Thread::RUNNING;
     (*Sched::Thread::slotPointer(next)).cpu = Arch::CpuLocal::index();
+    markIdle(Sched::Thread::isIdleSlot(next));
     *sliceLeft() = TIME_SLICE_TICKS;
 
     if (next == outgoing) {
@@ -764,7 +789,90 @@ namespace Sched::Scheduler {
 
     if (!Sched::Thread::isIdleSlot(slot)) {
       enqueue(slot);
+      kickIdleProcessor();
     }
+  }
+
+  /// Sends a reschedule IPI to one other processor that is idle, so the
+  /// thread just queued runs now instead of at that processor's next tick.
+  /// The processor's idle bit is cleared, so a burst of wake-ups sends one
+  /// IPI per idle processor; it is set again when the processor next goes
+  /// idle. The run queue lock is held.
+  function kickIdleProcessor(): void {
+    let others: u64 = SchedulerState::idleMask & ~(1 << Arch::CpuLocal::index());
+
+    if (others == 0) {
+      return;
+    }
+
+    let mut cpu: u64 = 0;
+
+    while ((others & (1 << cpu)) == 0) {
+      cpu += 1;
+    }
+
+    SchedulerState::idleMask = SchedulerState::idleMask & ~(1 << cpu);
+    SchedulerState::ipisSent += 1;
+    Apic::Lapic::sendIpi(*(&mut SchedulerState::lapicIds as *mut u64 + cpu), Apic::Lapic::RESCHEDULE_VECTOR);
+  }
+
+  /// Records whether the running processor now runs its idle thread. The
+  /// run queue lock is held.
+  function markIdle(idle: boolean): void {
+    let bit: u64 = 1 << Arch::CpuLocal::index();
+
+    if (idle) {
+      SchedulerState::idleMask = SchedulerState::idleMask | bit;
+    } else {
+      SchedulerState::idleMask = SchedulerState::idleMask & ~bit;
+    }
+  }
+
+  /// The reschedule IPI handler, with interrupts off: an idle processor
+  /// switches to the head of the run queue. Does nothing while a spinlock
+  /// is held on this processor, or when it is busy or nothing waits.
+  function onReschedule(): void {
+    if (!SchedulerState::started || Arch::Spin::holdsAny()) {
+      return;
+    }
+
+    lockRunQueue();
+
+    if (Sched::Thread::isIdleSlot(Arch::CpuLocal::currentSlot()) && SchedulerState::queueLength > 0) {
+      SchedulerState::ipiSwitches += 1;
+      makeReady(Arch::CpuLocal::currentSlot());
+      switchToNext();
+    } else if (Sched::Thread::isIdleSlot(Arch::CpuLocal::currentSlot())) {
+      markIdle(true);
+    }
+
+    unlockRunQueue();
+  }
+
+  /// The run queue length and the idle mask, for a failing self-test to
+  /// report.
+  function queueLength(): u64 {
+    return SchedulerState::queueLength;
+  }
+
+  /// Bit n set while processor n runs its idle thread.
+  function idleMask(): u64 {
+    return SchedulerState::idleMask;
+  }
+
+  /// Records the local APIC id of processor `cpu`, for the reschedule IPI.
+  function setProcessorLapic(cpu: u64, lapicId: u64): void {
+    *(&mut SchedulerState::lapicIds as *mut u64 + cpu) = lapicId;
+  }
+
+  /// Reschedule IPIs sent.
+  function rescheduleIpiCount(): u64 {
+    return SchedulerState::ipisSent;
+  }
+
+  /// Reschedule IPIs that switched an idle processor to a queued thread.
+  function rescheduleSwitchCount(): u64 {
+    return SchedulerState::ipiSwitches;
   }
 
   /// Appends `slot` to the run queue. The queue is a ring buffer of

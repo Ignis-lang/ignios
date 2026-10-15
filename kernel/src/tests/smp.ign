@@ -1,0 +1,143 @@
+//!
+//! # Multiprocessor Self-Test
+//!
+//! Runs right after the application processors joined the scheduler, while
+//! they are idle.
+//!
+//! | Check      | What it proves                                                     |
+//! |------------|--------------------------------------------------------------------|
+//! | reschedule | a thread spawned while the boot processor spins runs on another processor, woken by a reschedule IPI rather than its next tick |
+
+import Arch from "@arch";
+import Drivers from "@drivers";
+import Sched from "@sched";
+import Smp from "@smp";
+import Time from "@time";
+
+/// What the threads report.
+record SmpTestState {
+  /// The processor the probe thread ran on, plus 1; 0 until it ran.
+  static mut ranOn: u64;
+
+  /// Held while the boot processor waits for a probe: it defers this
+  /// processor's preemption, so the probe cannot run here.
+  static mut pin: Arch::SpinLock;
+}
+
+/// The checks.
+namespace Tests::Smp {
+  /// Spawn-and-wait rounds of the reschedule check.
+  const ROUNDS: u64 = 8;
+
+  /// Ticks the boot processor waits for a probe before it gives up: 5 s,
+  /// far more than an IPI takes, so a slow host does not fail the test.
+  const PROBE_TIMEOUT_TICKS: u64 = 500;
+
+  /// Rank of `pin`: below the run queue, which `spawn` takes under it.
+  const PIN_RANK: u64 = 40;
+
+  function run(): void {
+    if (Smp::processorCount() < 2) {
+      Drivers::Console::writeLine("smp: self-test skipped, one processor");
+      return;
+    }
+
+    checkReschedule();
+  }
+
+  /// Spawns a probe thread while this processor spins holding a spinlock,
+  /// which defers its own preemption, so only another processor can run it. Each round must see it run on
+  /// another processor; over all rounds reschedule IPIs must have been sent
+  /// and at least one must have switched an idle processor to the probe.
+  /// One round could find the idle thread taking the probe on its own just
+  /// before the IPI lands, so the rounds add up.
+  function checkReschedule(): void {
+    let ipisBefore: u64 = Sched::Scheduler::rescheduleIpiCount();
+    let switchesBefore: u64 = Sched::Scheduler::rescheduleSwitchCount();
+    let mut round: u64 = 0;
+
+    Arch::Spin::initialize(pinLock(), PIN_RANK);
+
+    while (round < ROUNDS) {
+      @writeVolatile<u64>(&mut SmpTestState::ranOn as *mut u64, 0);
+
+      let saved: u64 = Arch::Cpu::saveAndDisableInterrupts();
+
+      Arch::Cpu::enableInterrupts();
+      Arch::Spin::lock(pinLock());
+
+      // Read while the lock defers preemption: this thread cannot move to
+      // another processor until it lets go. After `join` it may run anywhere.
+      let spinningOn: u64 = Arch::CpuLocal::index();
+      let deadline: u64 = Time::Timer::ticks() + PROBE_TIMEOUT_TICKS;
+      let probe: u64 = Sched::Scheduler::spawn(Arch::ContextAsm::ignis_function_address(probeThread), 0);
+
+      while (@readVolatile<u64>(&mut SmpTestState::ranOn as *mut u64) == 0 && Time::Timer::ticks() < deadline) {
+        Arch::Cpu::pause();
+      }
+
+      Arch::Spin::unlock(pinLock());
+      Arch::Cpu::disableInterrupts();
+      Arch::Cpu::restoreInterrupts(saved);
+
+      let ranOn: u64 = @readVolatile<u64>(&mut SmpTestState::ranOn as *mut u64);
+
+      Sched::Scheduler::join(probe);
+
+      if (ranOn == 0 || ranOn - 1 == spinningOn) {
+        report(round, ranOn, spinningOn);
+      }
+
+      round += 1;
+    }
+
+    let ipis: u64 = Sched::Scheduler::rescheduleIpiCount() - ipisBefore;
+    let switches: u64 = Sched::Scheduler::rescheduleSwitchCount() - switchesBefore;
+
+    if (ipis == 0 || switches == 0) {
+      @panic("smp self-test: no reschedule IPI woke an idle processor");
+    }
+
+    Drivers::Console::write("smp: reschedule self-test ok, ");
+    Drivers::Console::writeDecimal(ROUNDS);
+    Drivers::Console::write(" threads ran on other processors, ");
+    Drivers::Console::writeDecimal(ipis);
+    Drivers::Console::write(" reschedule IPIs, ");
+    Drivers::Console::writeDecimal(switches);
+    Drivers::Console::writeLine(" of them switched an idle processor");
+  }
+
+  /// Prints what the scheduler looked like when a probe failed, then panics
+  /// with the reason.
+  function report(round: u64, ranOn: u64, spinningOn: u64): void {
+    Drivers::Console::write("smp self-test: round ");
+    Drivers::Console::writeDecimal(round);
+    Drivers::Console::write(", spun on processor ");
+    Drivers::Console::writeDecimal(spinningOn);
+    Drivers::Console::write(", probe ran on ");
+    Drivers::Console::writeDecimal(ranOn);
+    Drivers::Console::write(" (processor + 1, 0 = never), queue ");
+    Drivers::Console::writeDecimal(Sched::Scheduler::queueLength());
+    Drivers::Console::write(", idle mask ");
+    Drivers::Console::writeHex(Sched::Scheduler::idleMask());
+    Drivers::Console::write(", tick ");
+    Drivers::Console::writeDecimal(Time::Timer::ticks());
+    Drivers::Console::writeLine("");
+
+    if (ranOn == 0) {
+      @panic("smp self-test: a thread queued while this processor spun did not run within 5 s");
+    }
+
+    @panic("smp self-test: a thread queued while this processor spun ran on it anyway");
+  }
+
+  /// `SmpTestState::pin`.
+  function pinLock(): *mut Arch::SpinLock {
+    return &mut SmpTestState::pin as *mut Arch::SpinLock;
+  }
+
+  /// Records the processor it runs on.
+  function probeThread(argument: u64): void {
+    @writeVolatile<u64>(&mut SmpTestState::ranOn as *mut u64, Arch::CpuLocal::index() + 1);
+  }
+}
