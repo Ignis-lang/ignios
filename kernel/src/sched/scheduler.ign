@@ -85,8 +85,9 @@ import _ from "./thread";
 /// The scheduler state. The array sizes must equal `Sched::Scheduler::MAX_THREADS`,
 /// and have to be integer literals.
 record SchedulerState {
-  /// The run queue: a ring buffer of slot numbers.
-  static mut queue: u64[72];
+  /// The run queue: a ring buffer of slot numbers, shared by every
+  /// processor.
+  static mut queue: u64[80];
 
   /// Index in `queue` of the next thread to run.
   static mut queueHead: u64;
@@ -94,21 +95,17 @@ record SchedulerState {
   /// Threads in the run queue.
   static mut queueLength: u64;
 
-  /// Slot of the running thread.
-  static mut current: u64;
-
-  /// Slot of the thread that just died plus 1, or 0 for none. The next thread to
-  /// run frees its stack (`reapZombie`).
-  static mut zombie: u64;
-
   /// Context switches since boot.
   static mut switches: u64;
 
   /// Times the timer took the processor from a thread that used its slice.
   static mut preemptions: u64;
 
-  /// Ticks left in the running thread's time slice.
-  static mut sliceLeft: u64;
+  /// Ticks left in the time slice of the thread running on processor n.
+  /// The running slot and the zombie of each processor live in its per-CPU
+  /// block (`Arch::CpuLocal::currentSlot`, `zombie`). Sizes equal
+  /// `Arch::CpuLocal::MAX_CPUS`.
+  static mut sliceLeft: u64[8];
 
   /// True once `initialize` has built the table, so `onTick` may run.
   static mut started: boolean;
@@ -116,8 +113,9 @@ record SchedulerState {
   /// True once `enablePreemption` has been called.
   static mut preemptive: boolean;
 
-  /// Ticks that would have switched threads but found a spinlock held.
-  static mut deferred: u64;
+  /// Ticks of processor n that would have switched threads but found a
+  /// spinlock held.
+  static mut deferred: u64[8];
 
   /// The run queue lock, rank `Lib::Rank::RUN_QUEUE`. It guards the queue,
   /// the thread table and every thread's state, and is held across a context
@@ -137,7 +135,7 @@ namespace Sched::Scheduler {
     Arch::Spin::initialize(runQueueLock(), Lib::Rank::RUN_QUEUE);
     Sched::Thread::initializeBootThread();
 
-    SchedulerState::current = Sched::Thread::BOOT_SLOT;
+    Arch::CpuLocal::setCurrentSlot(Sched::Thread::BOOT_SLOT);
 
     if (!Sched::Thread::createThread(Sched::Thread::IDLE_SLOT, Arch::ContextAsm::ignis_function_address(idleLoop), 0, 0)) {
       @panic("scheduler: cannot create the idle thread");
@@ -151,7 +149,7 @@ namespace Sched::Scheduler {
   function enablePreemption(): void {
     Arch::Spin::lockIrq(runQueueLock());
 
-    SchedulerState::sliceLeft = TIME_SLICE_TICKS;
+    *sliceLeft() = TIME_SLICE_TICKS;
     SchedulerState::preemptive = true;
 
     Arch::Spin::unlockIrq(runQueueLock());
@@ -170,7 +168,7 @@ namespace Sched::Scheduler {
       return;
     }
 
-    let current: *mut Sched::Thread::Control = Sched::Thread::slotPointer(SchedulerState::current);
+    let current: *mut Sched::Thread::Control = Sched::Thread::slotPointer(Arch::CpuLocal::currentSlot());
 
     (*current).runTicks += 1;
 
@@ -179,12 +177,12 @@ namespace Sched::Scheduler {
     // switches nothing. The slice stays used up, so the switch happens on
     // the first tick after the release; sleepers wake on that tick too.
     if (Arch::Spin::holdsAny()) {
-      if (SchedulerState::sliceLeft > 0) {
-        SchedulerState::sliceLeft -= 1;
+      if (*sliceLeft() > 0) {
+        *sliceLeft() -= 1;
       }
 
-      if (SchedulerState::sliceLeft == 0 && SchedulerState::current != Sched::Thread::IDLE_SLOT) {
-        SchedulerState::deferred += 1;
+      if (*sliceLeft() == 0 && !Sched::Thread::isIdleSlot(Arch::CpuLocal::currentSlot())) {
+        *deferredOf(Arch::CpuLocal::index()) += 1;
       }
 
       return;
@@ -193,9 +191,9 @@ namespace Sched::Scheduler {
     lockRunQueue();
     wakeSleepers();
 
-    if (SchedulerState::current == Sched::Thread::IDLE_SLOT) {
+    if (Sched::Thread::isIdleSlot(Arch::CpuLocal::currentSlot())) {
       if (SchedulerState::queueLength > 0) {
-        makeReady(Sched::Thread::IDLE_SLOT);
+        makeReady(Arch::CpuLocal::currentSlot());
         switchToNext();
       }
 
@@ -203,23 +201,23 @@ namespace Sched::Scheduler {
       return;
     }
 
-    if (SchedulerState::sliceLeft > 0) {
-      SchedulerState::sliceLeft -= 1;
+    if (*sliceLeft() > 0) {
+      *sliceLeft() -= 1;
     }
 
-    if (SchedulerState::sliceLeft > 0) {
+    if (*sliceLeft() > 0) {
       unlockRunQueue();
       return;
     }
 
     if (SchedulerState::queueLength == 0) {
-      SchedulerState::sliceLeft = TIME_SLICE_TICKS;
+      *sliceLeft() = TIME_SLICE_TICKS;
       unlockRunQueue();
       return;
     }
 
     SchedulerState::preemptions += 1;
-    makeReady(SchedulerState::current);
+    makeReady(Arch::CpuLocal::currentSlot());
     switchToNext();
     unlockRunQueue();
   }
@@ -270,7 +268,7 @@ namespace Sched::Scheduler {
     wakeSleepers();
 
     if (SchedulerState::queueLength > 0) {
-      makeReady(SchedulerState::current);
+      makeReady(Arch::CpuLocal::currentSlot());
       switchToNext();
     }
 
@@ -288,12 +286,12 @@ namespace Sched::Scheduler {
       return;
     }
 
-    if (SchedulerState::current == Sched::Thread::IDLE_SLOT) {
+    if (Sched::Thread::isIdleSlot(Arch::CpuLocal::currentSlot())) {
       @panic("scheduler: the idle thread cannot sleep");
     }
 
     let saved: u64 = Arch::Cpu::saveAndDisableInterrupts();
-    let current: *mut Sched::Thread::Control = Sched::Thread::slotPointer(SchedulerState::current);
+    let current: *mut Sched::Thread::Control = Sched::Thread::slotPointer(Arch::CpuLocal::currentSlot());
 
     lockRunQueue();
 
@@ -321,7 +319,7 @@ namespace Sched::Scheduler {
       @panic("scheduler: a thread cannot wait for itself");
     }
 
-    if (SchedulerState::current == Sched::Thread::IDLE_SLOT) {
+    if (Sched::Thread::isIdleSlot(Arch::CpuLocal::currentSlot())) {
       @panic("scheduler: the idle thread cannot wait");
     }
 
@@ -329,7 +327,7 @@ namespace Sched::Scheduler {
 
     lockRunQueue();
 
-    let current: *mut Sched::Thread::Control = Sched::Thread::slotPointer(SchedulerState::current);
+    let current: *mut Sched::Thread::Control = Sched::Thread::slotPointer(Arch::CpuLocal::currentSlot());
 
     if (Sched::Thread::isAlive(id) && !takeInterrupt(current)) {
       (*current).joinTarget = id;
@@ -350,13 +348,13 @@ namespace Sched::Scheduler {
 
     Arch::Cpu::disableInterrupts();
 
-    if (SchedulerState::current == Sched::Thread::BOOT_SLOT || SchedulerState::current == Sched::Thread::IDLE_SLOT) {
+    if (Arch::CpuLocal::currentSlot() == Sched::Thread::BOOT_SLOT || Sched::Thread::isIdleSlot(Arch::CpuLocal::currentSlot())) {
       @panic("scheduler: the boot or idle thread cannot exit");
     }
 
     lockRunQueue();
-    (*Sched::Thread::slotPointer(SchedulerState::current)).state = Sched::Thread::DEAD;
-    SchedulerState::zombie = SchedulerState::current + 1;
+    (*Sched::Thread::slotPointer(Arch::CpuLocal::currentSlot())).state = Sched::Thread::DEAD;
+    Arch::CpuLocal::setZombie(Arch::CpuLocal::currentSlot() + 1);
     switchToNext();
 
     @panic("scheduler: a dead thread was resumed");
@@ -380,7 +378,7 @@ namespace Sched::Scheduler {
 
   /// The id of the running thread.
   function currentId(): u64 {
-    return (*Sched::Thread::slotPointer(SchedulerState::current)).id;
+    return (*Sched::Thread::slotPointer(Arch::CpuLocal::currentSlot())).id;
   }
 
   /// How many times the processor changed threads.
@@ -408,18 +406,18 @@ namespace Sched::Scheduler {
   /// the address space are freed under it (page tables, heap and frames
   /// rank above it), and nothing in that path may sleep.
   function reapZombie(): void {
-    let marker: u64 = SchedulerState::zombie;
+    let marker: u64 = Arch::CpuLocal::zombie();
 
     if (marker == 0) {
       return;
     }
 
-    SchedulerState::zombie = 0;
+    Arch::CpuLocal::setZombie(0);
 
     let thread: *mut Sched::Thread::Control = Sched::Thread::slotPointer(marker - 1);
 
-    Sched::Thread::unmapStack((*thread).stackBase, Sched::Thread::STACK_PAGES);
-
+    // The stack stays mapped for the next thread in the slot (see
+    // `thread.ign`, "Thread Stacks").
     if ((*thread).root != 0) {
       Mm::AddressSpace::destroy((*thread).root);
       (*thread).root = 0;
@@ -440,13 +438,13 @@ namespace Sched::Scheduler {
   function park(): void {
     noSpinlockHeld();
 
-    if (SchedulerState::current == Sched::Thread::IDLE_SLOT) {
+    if (Sched::Thread::isIdleSlot(Arch::CpuLocal::currentSlot())) {
       @panic("scheduler: the idle thread cannot park");
     }
 
     let saved: u64 = Arch::Cpu::saveAndDisableInterrupts();
 
-    let current: *mut Sched::Thread::Control = Sched::Thread::slotPointer(SchedulerState::current);
+    let current: *mut Sched::Thread::Control = Sched::Thread::slotPointer(Arch::CpuLocal::currentSlot());
 
     lockRunQueue();
 
@@ -531,12 +529,12 @@ namespace Sched::Scheduler {
   /// 0 for none. Only the thread itself writes it, so it is
   /// read without a lock.
   function setProcess(slotPlusOne: u64): void {
-    (*Sched::Thread::slotPointer(SchedulerState::current)).process = slotPlusOne;
+    (*Sched::Thread::slotPointer(Arch::CpuLocal::currentSlot())).process = slotPlusOne;
   }
 
   /// What `setProcess` recorded for the running thread.
   function currentProcess(): u64 {
-    return (*Sched::Thread::slotPointer(SchedulerState::current)).process;
+    return (*Sched::Thread::slotPointer(Arch::CpuLocal::currentSlot())).process;
   }
 
   /// Panics when this CPU holds a spinlock: a thread must not give up the
@@ -550,17 +548,71 @@ namespace Sched::Scheduler {
   /// The running thread's scratch area, `Sched::Thread::SCRATCH_BYTES` bytes
   /// no other thread touches.
   function scratch(): *mut u8 {
-    return Sched::Thread::scratchOf(SchedulerState::current);
+    return Sched::Thread::scratchOf(Arch::CpuLocal::currentSlot());
   }
 
   /// The slot of the running thread.
   function currentSlot(): u64 {
-    return SchedulerState::current;
+    return Arch::CpuLocal::currentSlot();
   }
 
   /// Ticks whose switch was put off because a spinlock was held.
   function deferredCount(): u64 {
-    return SchedulerState::deferred;
+    let mut total: u64 = 0;
+    let mut cpu: u64 = 0;
+
+    while (cpu < Arch::CpuLocal::MAX_CPUS) {
+      total += *deferredOf(cpu);
+      cpu += 1;
+    }
+
+    return total;
+  }
+
+  /// The slice counter of the running processor. Interrupts are off or the
+  /// run queue lock is held, so the thread cannot move meanwhile.
+  function sliceLeft(): *mut u64 {
+    return &mut SchedulerState::sliceLeft as *mut u64 + Arch::CpuLocal::index();
+  }
+
+  /// The deferred-switch counter of processor `cpu`.
+  function deferredOf(cpu: u64): *mut u64 {
+    return &mut SchedulerState::deferred as *mut u64 + cpu;
+  }
+
+  /// Creates the idle thread of processor `cpu`, before the processor joins
+  /// (`startProcessor`). Runs on the boot processor.
+  function addProcessor(cpu: u64): void {
+    Arch::Spin::lockIrq(runQueueLock());
+
+    let created: boolean = Sched::Thread::createThread(Sched::Thread::idleSlot(cpu), Arch::ContextAsm::ignis_function_address(idleLoop), 0, 0);
+
+    Arch::Spin::unlockIrq(runQueueLock());
+
+    if (!created) {
+      @panic("scheduler: cannot create a processor's idle thread");
+    }
+  }
+
+  /// Makes the running application processor join the scheduler: it becomes
+  /// its idle thread, the way a switch would enter it, holding the run
+  /// queue lock that `threadBegin` releases. Interrupts must be off. Never
+  /// returns; the stack it runs on is abandoned.
+  function startProcessor(): void {
+    let cpu: u64 = Arch::CpuLocal::index();
+    let idle: u64 = Sched::Thread::idleSlot(cpu);
+    let thread: *mut Sched::Thread::Control = Sched::Thread::slotPointer(idle);
+    let mut abandoned: u64 = 0;
+
+    lockRunQueue();
+    (*thread).state = Sched::Thread::RUNNING;
+    (*thread).cpu = cpu;
+    Arch::CpuLocal::setCurrentSlot(idle);
+    *sliceLeft() = TIME_SLICE_TICKS;
+    Arch::Fpu::restore(Sched::Thread::fpuArea(idle) as *u8);
+    Arch::Context::switchTo(&mut abandoned as *mut u64, (*thread).savedRsp);
+
+    @panic("scheduler: a processor's boot stack was resumed");
   }
 
   /// True while a thread with this id is in the table, dead or not yet
@@ -658,21 +710,22 @@ namespace Sched::Scheduler {
 
     wakeSleepers();
 
-    let outgoing: u64 = SchedulerState::current;
-    let mut next: u64 = Sched::Thread::IDLE_SLOT;
+    let outgoing: u64 = Arch::CpuLocal::currentSlot();
+    let mut next: u64 = Sched::Thread::idleSlot(Arch::CpuLocal::index());
 
     if (SchedulerState::queueLength > 0) {
       next = dequeue();
     }
 
     (*Sched::Thread::slotPointer(next)).state = Sched::Thread::RUNNING;
-    SchedulerState::sliceLeft = TIME_SLICE_TICKS;
+    (*Sched::Thread::slotPointer(next)).cpu = Arch::CpuLocal::index();
+    *sliceLeft() = TIME_SLICE_TICKS;
 
     if (next == outgoing) {
       return;
     }
 
-    SchedulerState::current = next;
+    Arch::CpuLocal::setCurrentSlot(next);
     SchedulerState::switches += 1;
 
     activateSpaceOf(next);
@@ -709,7 +762,7 @@ namespace Sched::Scheduler {
   function makeReady(slot: u64): void {
     (*Sched::Thread::slotPointer(slot)).state = Sched::Thread::READY;
 
-    if (slot != Sched::Thread::IDLE_SLOT) {
+    if (!Sched::Thread::isIdleSlot(slot)) {
       enqueue(slot);
     }
   }

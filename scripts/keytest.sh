@@ -102,11 +102,14 @@ import sys
 log_path, expected, expected_backspaces = sys.argv[1], sys.argv[2], int(sys.argv[3])
 raw = open(log_path, "rb").read()
 
-marker = b"keyboard: "
+# The last boot line before the terminal starts: everything after it is the
+# shell and what was typed. (The keyboard itself is set up earlier, before
+# the other processors join.)
+marker = b"cpu local: self-test ok"
 start = raw.find(marker)
 
 if start < 0:
-    sys.exit("keytest: no keyboard line in the serial log")
+    sys.exit("keytest: no cpu local line in the serial log")
 
 typed = raw[raw.index(b"\n", start) + 1:]
 backspaces = typed.count(b"\x08")

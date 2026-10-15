@@ -34,6 +34,7 @@ import Lib from "@lib";
 import Mm from "@mm";
 import Proc from "@proc";
 import Sched from "@sched";
+import Smp from "@smp";
 import Time from "@time";
 import Trap from "@trap";
 
@@ -573,19 +574,37 @@ namespace Tests::User {
     Drivers::Console::writeLine("user: write, getpid, sched_yield, nanosleep, -ENOSYS, -EFAULT, -EBADF and -EINVAL behave as on Linux");
   }
 
-  /// Runs two copies of the FPU program at the same time. They yield to
-  /// each other and then spin until the timer preempts them, so both kinds
-  /// of switch between them have to save one x87 and SSE state and restore
-  /// the other. At least one preemption must have happened.
+  /// Runs one copy of the FPU program more than there are processors, all
+  /// at the same time, so at least two share a processor. They yield to each
+  /// other and then spin until the timer preempts them, so both kinds of
+  /// switch between them have to save one x87 and SSE state and restore the
+  /// other. At least one preemption must have happened.
   function runFpu(): void {
     let preemptionsBefore: u64 = Sched::Scheduler::preemptionCount();
-    let first: u64 = startProgram(FPU);
-    let second: u64 = startProgram(FPU);
-    let firstStatus: u64 = Proc::Process::wait(first);
-    let secondStatus: u64 = Proc::Process::wait(second);
+    let copies: u64 = Smp::processorCount() + 1;
+    let mut ids: u64[9];
+    let mut index: u64 = 0;
+
+    while (index < copies) {
+      ids[index] = startProgram(FPU);
+      index += 1;
+    }
+
+    let mut failed: boolean = false;
+
+    index = 0;
+
+    while (index < copies) {
+      if (Proc::Process::wait(ids[index]) != 0) {
+        failed = true;
+      }
+
+      index += 1;
+    }
+
     let preemptions: u64 = Sched::Scheduler::preemptionCount() - preemptionsBefore;
 
-    if (firstStatus != 0 || secondStatus != 0) {
+    if (failed) {
       @panic("user test: the x87 or SSE state of a process changed across a switch");
     }
 
@@ -593,7 +612,9 @@ namespace Tests::User {
       @panic("user test: the FPU programs were never preempted");
     }
 
-    Drivers::Console::write("user: two processes kept their own xmm0-xmm15, MXCSR and x87 control word across 50 yields and ");
+    Drivers::Console::write("user: ");
+    Drivers::Console::writeDecimal(copies);
+    Drivers::Console::write(" processes kept their own xmm0-xmm15, MXCSR and x87 control word across 50 yields and ");
     Drivers::Console::writeDecimal(preemptions);
     Drivers::Console::writeLine(" preemptions");
   }

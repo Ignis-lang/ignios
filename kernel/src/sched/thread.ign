@@ -7,9 +7,10 @@
 //!
 //! A thread is a slot in a fixed table: an id, a state, the stack pointer it
 //! was switched out with, and a kernel stack of its own. Slot 0 is the boot
-//! thread, the code `kmain` was already running on Limine's stack. Slot 1 is
-//! the idle thread, which runs only when nothing else is ready. Every other
-//! slot is free until `Sched::Scheduler::spawn` fills it. This file owns the
+//! thread, the code `kmain` was already running on Limine's stack. Slots 1 to
+//! 8 are the idle threads, one per processor (slot 1 + n for processor n),
+//! each of which runs only when nothing else is ready for its processor.
+//! Every other slot is free until `Sched::Scheduler::spawn` fills it. This file owns the
 //! table and the stacks. `scheduler.ign` decides which slot runs.
 //!
 //! ## Thread States
@@ -28,8 +29,8 @@
 //!                    reapZombie of thread `id` makes it READY
 //! ```
 //!
-//! Exactly one thread is RUNNING. The idle thread is never in the run queue:
-//! it runs when the queue is empty.
+//! One thread per processor is RUNNING. The idle threads are never in the
+//! run queue: a processor runs its own when the queue is empty.
 //!
 //! ## Thread Stacks
 //!
@@ -54,6 +55,12 @@
 //! their own, below an unmapped guard page: a thread that overflows its stack
 //! takes a page fault instead of writing over another thread's stack.
 //!
+//! Every slot's stack is mapped once, at boot, and stays mapped: a new
+//! thread in the slot reuses it. A processor may still hold a translation of
+//! a stack in its TLB after the thread moved away (kernel threads share one
+//! CR3, so switching between them flushes nothing); since the mapping never
+//! changes, such a stale entry is harmless, and no TLB shootdown is needed.
+//!
 //! See concept doc 13.
 
 import Arch from "@arch";
@@ -64,7 +71,7 @@ import Mm from "@mm";
 /// and has to be an integer literal.
 record ThreadState {
   /// The thread table, indexed by slot.
-  static mut threads: Sched::Thread::Control[72];
+  static mut threads: Sched::Thread::Control[80];
 
   /// The id the next created thread gets.
   static mut nextId: u64;
@@ -79,7 +86,7 @@ record ThreadState {
 /// attributed field.
 record FpuAreaState {
   @aligned(16)
-  static mut areas: u8[36864];
+  static mut areas: u8[40960];
 }
 
 /// The thread table and the thread stacks.
@@ -138,22 +145,29 @@ namespace Sched::Thread {
     /// 1 when `interrupt` came while the thread was not waiting: its next
     /// `sleep`, `join` or `park` returns at once.
     public interrupted: u64;
+
+    /// The processor the thread ran on last.
+    public cpu: u64;
   }
 
   /// Bytes of every thread's scratch area.
   const SCRATCH_BYTES: u64 = 5120;
 
-  /// Size of the thread table, the boot and idle threads included.
-  const MAX_THREADS: u64 = 72;
+  /// Size of the thread table, the boot thread and the eight idle threads
+  /// included: 64 processes and a few kernel threads fit in the rest.
+  const MAX_THREADS: u64 = 80;
 
   /// Size of `FpuAreaState::areas` in bytes.
-  const FPU_AREA_BYTES: u64 = 36864;
+  const FPU_AREA_BYTES: u64 = 40960;
 
   /// Slot of the boot thread.
   const BOOT_SLOT: u64 = 0;
 
-  /// Slot of the idle thread.
+  /// Slot of processor 0's idle thread; processor n's is `IDLE_SLOT + n`.
   const IDLE_SLOT: u64 = 1;
+
+  /// The first slot `spawn` may fill: past every processor's idle slot.
+  const FIRST_SPAWN_SLOT: u64 = 9;
 
   /// Returned by `spawn` when the table is full or the stack cannot be
   /// mapped.
@@ -272,6 +286,11 @@ namespace Sched::Thread {
     return (*slotPointer(slot)).state != UNUSED;
   }
 
+  /// The processor the thread in `slot` runs or last ran on.
+  function slotCpu(slot: u64): u64 {
+    return (*slotPointer(slot)).cpu;
+  }
+
   /// Timer ticks the thread in `slot` has been running when a tick arrived.
   /// The count grows only once preemption is enabled.
   function slotRunTicks(slot: u64): u64 {
@@ -285,6 +304,32 @@ namespace Sched::Thread {
     }
 
     return (*slotPointer(slot)).wakeTick;
+  }
+
+  /// The idle slot of processor `cpu`.
+  function idleSlot(cpu: u64): u64 {
+    return IDLE_SLOT + cpu;
+  }
+
+  /// True for any processor's idle slot.
+  function isIdleSlot(slot: u64): boolean {
+    return slot >= IDLE_SLOT && slot < FIRST_SPAWN_SLOT;
+  }
+
+  /// The free slots `spawn` can still fill.
+  function spawnableSlots(): u64 {
+    let mut count: u64 = 0;
+    let mut slot: u64 = FIRST_SPAWN_SLOT;
+
+    while (slot < MAX_THREADS) {
+      if ((*slotPointer(slot)).state == UNUSED) {
+        count += 1;
+      }
+
+      slot += 1;
+    }
+
+    return count;
   }
 
   /// Threads currently in the table, idle and boot included.
@@ -317,10 +362,6 @@ namespace Sched::Thread {
       }
     }
 
-    if (!mapStack(base)) {
-      return false;
-    }
-
     (*thread).id = ThreadState::nextId;
     (*thread).state = READY;
     (*thread).stackBase = base;
@@ -331,6 +372,7 @@ namespace Sched::Thread {
     (*thread).process = 0;
     (*thread).wakePending = 0;
     (*thread).interrupted = 0;
+    (*thread).cpu = 0;
     (*thread).root = root;
     (*thread).savedRsp = Arch::Context::prepareStack(base + STACK_SPAN, entry, argument);
     resetFpuArea(slot);
@@ -379,7 +421,7 @@ namespace Sched::Thread {
 
   /// A free slot above the idle thread, or `NO_THREAD`.
   function findFreeSlot(): u64 {
-    let mut slot: u64 = IDLE_SLOT + 1;
+    let mut slot: u64 = FIRST_SPAWN_SLOT;
 
     while (slot < MAX_THREADS) {
       if ((*slotPointer(slot)).state == UNUSED) {
@@ -424,7 +466,19 @@ namespace Sched::Thread {
     if ((*boot).scratch == 0) {
       @panic("thread: no heap for the boot thread's scratch area");
     }
+
     resetFpuArea(BOOT_SLOT);
+
+    // Every other slot's stack, once and for good (see "Thread Stacks").
+    let mut slot: u64 = IDLE_SLOT;
+
+    while (slot < MAX_THREADS) {
+      if (!mapStack(STACK_REGION + slot * STACK_SPAN)) {
+        @panic("thread: no memory for the thread stacks");
+      }
+
+      slot += 1;
+    }
 
     ThreadState::nextId = 1;
   }

@@ -305,11 +305,13 @@ import re
 import sys
 
 raw = open(sys.argv[1], "rb").read().decode("utf-8", "replace")
-marker = "keyboard: PS/2"
+# The last boot line before the terminal starts (the keyboard itself is set
+# up earlier, before the other processors join).
+marker = "cpu local: self-test ok"
 start = raw.find(marker)
 
 if start < 0:
-    sys.exit("shelltest: no keyboard line in the serial log")
+    sys.exit("shelltest: no cpu local line in the serial log")
 
 lines = [line.rstrip("\r") for line in raw[start:].split("\n")[1:]]
 lines = [line for line in lines if not line.startswith("elf: ")]

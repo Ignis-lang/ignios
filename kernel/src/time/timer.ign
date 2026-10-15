@@ -111,6 +111,13 @@ namespace Time::Timer {
     Apic::Lapic::startTimerPeriodic(vector, initialCount as u32);
   }
 
+  /// Starts the running application processor's APIC timer with the
+  /// period the boot processor calibrated: every processor's timer counts
+  /// at the same bus rate.
+  function startProcessor(): void {
+    Apic::Lapic::startTimerPeriodic(TimerState::vector as u8, TimerState::initialCount as u32);
+  }
+
   /// The APIC timer counting rate in Hz at the divide setting in use.
   function countRate(): u64 {
     return TimerState::countRate;
@@ -123,6 +130,13 @@ namespace Time::Timer {
 
   /// Called from the timer interrupt, which cannot nest with itself.
   function handleTick(): void {
+    // Every processor's timer interrupts it; only the boot processor's
+    // counts, or time would run as many times faster as there are
+    // processors.
+    if (Arch::CpuLocal::index() != 0) {
+      return;
+    }
+
     let current: u64 = @readVolatile<u64>(&mut TimerState::ticks as *mut u64);
 
     @writeVolatile<u64>(&mut TimerState::ticks as *mut u64, current + 1);

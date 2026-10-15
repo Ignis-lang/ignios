@@ -55,9 +55,10 @@
 //!   ├─ Sched::Scheduler::enablePreemption
 //!   ├─ Tests::Scheduler::runPreemptive, Tests::Locks::run
 //!   │  .................................... preemption, locks, wake tokens  tests/     doc 24, 25
+//!   ├─ Drivers::Keyboard::initialize ...... 8042 enable, IRQ1 live        drivers/   doc 06
+//!   ├─ Smp::releaseProcessors ............. the others join the scheduler smp/       doc 27
 //!   ├─ Tests::User::run ................... ring 3 smoke tests            tests/     doc 14
 //!   ├─ Tests::CpuLocal::run ............... GS bases balanced             tests/     doc 18
-//!   ├─ Drivers::Keyboard::initialize ...... 8042 enable, IRQ1 live        drivers/   doc 06
 //!   └─ Shell::Terminal::run ............... prompt loop, never returns    shell/
 //! ```
 //!
@@ -198,14 +199,22 @@ function kmain(): void {
 
   Tests::Scheduler::runPreemptive();
   Tests::Locks::run();
-  Tests::User::run();
-  Tests::CpuLocal::run();
 
-  // The keyboard is initialized last: its interrupt is live from here on, and
-  // the terminal is the first code that consumes it.
+  // The 8042 is set up by polling with interrupts off, so that the IRQ1
+  // handler does not take the controller's replies. That holds only while
+  // the boot processor, which receives IRQ1, is the one running: so before
+  // the others join. Keys typed from here on wait in the scancode queue
+  // until the terminal reads them.
   if (!Drivers::Keyboard::initialize()) {
     Arch::Cpu::haltForever();
   }
+
+  // The self-tests above assume one processor; from here every processor
+  // runs threads from the shared run queue.
+  Smp::releaseProcessors();
+
+  Tests::User::run();
+  Tests::CpuLocal::run();
 
   Shell::Terminal::run();
 }

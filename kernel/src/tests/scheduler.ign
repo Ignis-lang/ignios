@@ -245,7 +245,7 @@ namespace Tests::Scheduler {
   /// Filling every slot must make the next `spawn` fail cleanly, and the
   /// slots must be usable again once their threads are gone.
   function testFullTable(): void {
-    let free: u64 = Sched::Thread::MAX_THREADS - Sched::Thread::threadCount();
+    let free: u64 = Sched::Thread::spawnableSlots();
     let mut first: u64 = Sched::Thread::NO_THREAD;
     let mut last: u64 = Sched::Thread::NO_THREAD;
     let mut spawned: u64 = 0;

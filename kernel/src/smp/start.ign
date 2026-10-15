@@ -23,6 +23,11 @@
 //!                                             shared IDT, FPU, SMEP/SMAP, SYSCALL MSRs
 //!                                             local APIC on
 //!   waits until online[n] = 1 ◄──────────── online[n] = 1
+//!   ...single-processor self-tests...       waits for `released`
+//!   releaseProcessors: idle thread n,
+//!   released = 1 ─────────────────────────► APIC timer, then its idle thread:
+//!                                             it runs whatever the shared run
+//!                                             queue holds
 //! ```
 //!
 //! An AP takes no lock before its per-CPU block is set up: the lock code
@@ -34,6 +39,7 @@ import Arch from "@arch";
 import Boot from "@boot";
 import Drivers from "@drivers";
 import Mm from "@mm";
+import Sched from "@sched";
 import Time from "@time";
 
 /// What the processors report while they start.
@@ -47,6 +53,10 @@ record SmpState {
 
   /// Processors started, the boot processor included.
   static mut count: u64 = 1;
+
+  /// Set by `releaseProcessors`: the parked processors may join the
+  /// scheduler.
+  static mut released: u64 = 0;
 }
 
 /// The processor start API.
@@ -151,7 +161,26 @@ namespace Smp {
 
     @writeVolatile<u64>(onlineOf(cpu), 1);
 
-    Arch::Cpu::haltForever();
+    while (@readVolatile<u64>(&mut SmpState::released as *mut u64) == 0) {
+      Arch::Cpu::pause();
+    }
+
+    Time::Timer::startProcessor();
+    Sched::Scheduler::startProcessor();
+  }
+
+  /// Lets the parked processors join the scheduler: creates each one's idle
+  /// thread, then releases them. Before this the kernel runs on the boot
+  /// processor alone, which the single-processor self-tests rely on.
+  function releaseProcessors(): void {
+    let mut cpu: u64 = 1;
+
+    while (cpu < SmpState::count) {
+      Sched::Scheduler::addProcessor(cpu);
+      cpu += 1;
+    }
+
+    @writeVolatile<u64>(&mut SmpState::released as *mut u64, 1);
   }
 
   /// Processors started, the boot processor included.

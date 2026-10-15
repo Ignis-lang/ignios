@@ -150,6 +150,43 @@ namespace Arch::CpuLocal {
     return asm () -> (value: u64 in rax) { mov {value}, qword ptr gs:[40] };
   }
 
+  /// The thread table slot running on this processor (`gs:[48]`), read in
+  /// one instruction so a thread that is preempted and moved to another
+  /// processor cannot read another processor's value. 0, the boot thread,
+  /// before `initialize`.
+  function currentSlot(): u64 {
+    if (!CpuLocalState::ready) {
+      return 0;
+    }
+
+    return asm () -> (value: u64 in rax) { mov {value}, qword ptr gs:[48] };
+  }
+
+  /// Sets the slot running on this processor. The scheduler calls it with
+  /// interrupts off.
+  function setCurrentSlot(value: u64): void {
+    if (CpuLocalState::ready) {
+      asm (value in rax) clobber(memory) { mov qword ptr gs:[48], {value} }
+    }
+  }
+
+  /// The slot of the thread that died just before the current one was
+  /// switched in on this processor, plus 1; 0 for none (`gs:[56]`).
+  function zombie(): u64 {
+    if (!CpuLocalState::ready) {
+      return 0;
+    }
+
+    return asm () -> (value: u64 in rax) { mov {value}, qword ptr gs:[56] };
+  }
+
+  /// Sets this processor's zombie marker.
+  function setZombie(value: u64): void {
+    if (CpuLocalState::ready) {
+      asm (value in rax) clobber(memory) { mov qword ptr gs:[56], {value} }
+    }
+  }
+
   /// The address of this processor's block.
   function blockAddress(): u64 {
     return blockOf(index());

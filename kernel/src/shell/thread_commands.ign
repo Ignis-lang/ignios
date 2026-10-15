@@ -48,12 +48,16 @@ namespace Shell::ThreadCommands {
   /// Column width of the tick count in the `ps` table.
   const TICKS_WIDTH: u64 = 8;
 
-  /// Prints one row per thread in the table: id, state, the ticks it was
-  /// running at, and the tick a sleeper wakes at.
+  /// Column width of the processor in the `ps` table.
+  const CPU_WIDTH: u64 = 5;
+
+  /// Prints one row per thread in the table: id, state, the processor it
+  /// runs or last ran on, the ticks it was running at, and the tick a
+  /// sleeper wakes at.
   function printThreads(): void {
     Sched::Scheduler::lockTable();
 
-    Drivers::Console::writeLine("  id  state     ticks   wake");
+    Drivers::Console::writeLine("  id  state     cpu  ticks   wake");
 
     let mut slot: u64 = 0;
 
@@ -62,6 +66,7 @@ namespace Shell::ThreadCommands {
         Drivers::Console::write("  ");
         writeNumber(Sched::Thread::slotId(slot), ID_WIDTH);
         writeText(Sched::Thread::stateName(slot), STATE_WIDTH);
+        writeNumber(Sched::Thread::slotCpu(slot), CPU_WIDTH);
         writeNumber(Sched::Thread::slotRunTicks(slot), TICKS_WIDTH);
 
         if (Sched::Thread::slotWakeTick(slot) != 0) {

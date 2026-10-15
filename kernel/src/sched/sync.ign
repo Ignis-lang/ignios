@@ -92,7 +92,7 @@ namespace Sched::Wait {
   function sleepOn(queue: *mut Sched::WaitQueue, spin: *mut Arch::SpinLock): void {
     let slot: u64 = Sched::Scheduler::currentSlot();
 
-    if (slot == Sched::Thread::IDLE_SLOT) {
+    if (Sched::Thread::isIdleSlot(slot)) {
       @panic("wait queue: the idle thread cannot sleep");
     }
 

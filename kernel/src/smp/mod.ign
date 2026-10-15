@@ -17,7 +17,8 @@
 //! | `Arch`    | the per-CPU GDT, TSS, block, IDT, FPU, SMEP/SMAP, `SYSCALL`  |
 //! | `Mm`      | the kernel page tables, EFER.NXE, CR0.WP, PAT                |
 //! | `Apic`    | each processor's local APIC                                  |
-//! | `Time`    | the deadline while the boot processor waits                  |
+//! | `Time`    | the deadline while the boot processor waits; each AP's timer |
+//! | `Sched`   | each AP's idle thread, and its entry into the scheduler      |
 //! | `Drivers` | the boot report                                              |
 //!
 //! Only `main.ign` imports `Smp`.
