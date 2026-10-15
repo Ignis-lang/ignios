@@ -31,7 +31,7 @@ The concept documents explain the x86_64 and kernel background, and this guide r
 | 20 | Memory mappings: `mmap` and a user heap | 21 | The native IgniOS ABI |
 | 22 | Processes from user space and the shell | 23 | The process lifecycle: parents, waiting and killing |
 | 24 | Locks: spinlocks, ranks, wait queues and mutexes | 25 | Locking the kernel: from interrupts off to explicit locks |
-| 26 | Demand paging: frame references, reservations and a growing stack | | |
+| 26 | Demand paging: frame references, reservations and a growing stack | 27 | Several processors: Limine MP, per-CPU state and IPIs |
 
 ## The subsystems
 
@@ -53,6 +53,7 @@ Each subsystem is a directory under `kernel/src/` with a `mod.ign` facade. The f
 | `power/` | `Power` | `@power` | Acpi, Arch, Drivers | power off and reset |
 | `syscall/` | `Syscall` | `@syscall` | Arch, Drivers, Fs, Lib, Mm, Power, Proc, Sched, Time | `Operation`, `Core`, `Linux`, `Native` |
 | `trap/` | `Trap` | `@trap` | Apic, Arch, Drivers, Proc, Sched, Time | `Exception`, `Setup`, the dispatcher |
+| `smp/` | `Smp` | `@smp` | Apic, Arch, Boot, Drivers, Mm, Sched, Time | `Smp` (start the processors) |
 | `shell/` | `Shell` | `@shell` | Arch, Drivers, Lib, Proc, Sched, Time | `Terminal`, `Commands`, `ThreadCommands` |
 | `tests/` | `Tests` | `@tests` | Arch, Boot, Drivers, Fs, Lib, Mm, Proc, Sched, Time, Trap | the boot self-tests |
 
@@ -74,7 +75,7 @@ Each subsystem is a directory under `kernel/src/` with a `mod.ign` facade. The f
 | 5 | Memory | `boot/hhdm.ign`, `mm/pmm.ign`, `mm/vmm.ign`, `mm/heap.ign`, `mm/address_space.ign` |
 | 6 | ACPI, APIC, the timer and power | `acpi/*.ign`, `power/mod.ign`, `arch/x86_64/pic.ign`, `apic/lapic.ign`, `apic/ioapic.ign`, `arch/x86_64/pit.ign`, `time/timer.ign` |
 | 7 | Keyboard | `drivers/ps2.ign`, `lib/scancode_queue.ign`, `drivers/keyboard.ign`, `fs/tty.ign` |
-| 8 | Threads, scheduling, locks and the shell | `arch/x86_64/context.ign`, `context_asm.S`, `sched/thread.ign`, `sched/scheduler.ign`, `arch/x86_64/spinlock.ign`, `sched/sync.ign`, `lib/rank.ign`, `shell/*.ign` |
+| 8 | Threads, scheduling, locks, processors and the shell | `arch/x86_64/context.ign`, `context_asm.S`, `sched/thread.ign`, `sched/scheduler.ign`, `arch/x86_64/spinlock.ign`, `sched/sync.ign`, `smp/start.ign`, `tests/smp.ign`, `lib/rank.ign`, `shell/*.ign` |
 | 9 | User mode | `arch/x86_64/usermode.ign`, `usermode_asm.S`, `proc/process.ign`, `syscall/*.ign`, `proc/elf.ign`, `mm/modules.ign`, `proc/programs.ign`, `user/` |
 | 10 | Files | `initramfs/`, `fs/tar.ign`, `fs/initramfs.ign`, `fs/vfs.ign`, `fs/files.ign`, `syscall/linux/files.ign`, `user/fstest/`, `user/cat/`, `user/ls/`, `user/touch/`, `user/mkdir/` |
 | 11 | Boot self-tests | `tests/*.ign`, `arch/x86_64/user_test_asm.S` |
@@ -128,7 +129,7 @@ Read `gdt.ign` before `idt.ign`, because the IDT gates name a GDT selector and t
 
 **`arch/x86_64/cpu.ign`.** Short wrappers for `cli`, `sti`, `hlt`, `rdmsr`, `wrmsr`, `cpuid` and control registers. `saveAndDisableInterrupts` and `restoreInterrupts` turn interrupts off on this processor only; shared data is guarded by the locks of `spinlock.ign` and `sched/sync.ign`, ranked in `lib/rank.ign`. Doc 02.
 
-**`arch/x86_64/gdt.ign` and `gdt_asm.S`.** The GDT has five entries and the TSS descriptor. The header decodes every descriptor value bit by bit and draws the TSS. The selector order (kernel code, kernel data, user data, user code) is the order `SYSCALL` and `SYSRET` need. `gdt_asm.S` reloads `CS` with a far return, because `CS` cannot be loaded with `mov`. Doc 03.
+**`arch/x86_64/gdt.ign` and `gdt_asm.S`.** The GDT has five entries and one TSS descriptor per processor: the table is shared, but `ltr` marks the descriptor it loads busy, so each processor needs its own, with its own TSS and double fault stack. The header decodes every descriptor value bit by bit and draws the TSS. The selector order (kernel code, kernel data, user data, user code) is the order `SYSCALL` and `SYSRET` need. `gdt_asm.S` reloads `CS` with a far return, because `CS` cannot be loaded with `mov`. Doc 03.
 
 **`arch/x86_64/idt.ign`.** The 256-entry table. The header draws the 16-byte gate and explains the attribute byte `0x8E`. Only 50 gates are filled (vectors 0 to 48 and the APIC spurious vector 255). Doc 04.
 
@@ -162,7 +163,7 @@ Docs 05 and 12.
 
 **`arch/x86_64/pic.ign`.** The legacy 8259. The kernel remaps it to vectors `0x20` to `0x2F` and masks every line. The table in the header lists the four initialization words. It stays remapped so a spurious interrupt lands on a known vector.
 
-**`apic/lapic.ign`.** The local APIC. Look at the register table and the LVT entry layout. `initialize` maps the page uncached, enables the APIC through the spurious vector register and sets LINT0 masked and LINT1 to NMI.
+**`apic/lapic.ign`.** The local APIC. Look at the register table and the LVT entry layout. `initialize` maps the page uncached, enables the APIC through the spurious vector register and sets LINT0 masked and LINT1 to NMI. Every processor sees its own APIC at the same address, so `initializeProcessor` only enables it. `sendIpi` and `sendIpiToOthers` write the interrupt command register: vector 49 stops a processor (`stopOthers`, before a panic, a reboot or a shutdown), vector 50 wakes an idle one. Doc 27.
 
 **`apic/ioapic.ign`.** The IOAPIC and its redirection entries. The header shows the 64-bit entry bit by bit. `route` writes the high half before the low half, because the low write is the one that unmasks the pin.
 
@@ -192,7 +193,7 @@ Doc 13.
 
 **`sched/thread.ign`.** The thread table: one slot per thread, its state and its stack, and the 512-byte x87 and SSE area of each slot. The header has the state diagram and the layout of a thread stack with its guard page.
 
-**`sched/scheduler.ign`.** The run queue, sleeping and the timer-driven preemption. The header has the call chain from the timer interrupt to a switch. Look at how a dead thread's stack is freed by the next thread (`reapZombie`), because a thread cannot free the stack it is running on. Sleeping and waking are here and not in a file of their own, because `sleep` calls `switchToNext` and `switchToNext` calls the wake-up scan. `join` blocks a thread until another one is gone: the thread that frees the dead one (`reapZombie`) makes its waiters ready, so a waiter runs once, not once per tick. `switchToNext` also swaps the x87 and SSE state.
+**`sched/scheduler.ign`.** The run queue, sleeping and the timer-driven preemption. The header has the call chain from the timer interrupt to a switch. Look at how a dead thread's stack is freed by the next thread (`reapZombie`), because a thread cannot free the stack it is running on. Sleeping and waking are here and not in a file of their own, because `sleep` calls `switchToNext` and `switchToNext` calls the wake-up scan. `join` blocks a thread until another one is gone: the thread that frees the dead one (`reapZombie`) makes its waiters ready, so a waiter runs once, not once per tick. `switchToNext` also swaps the x87 and SSE state. With several processors there is still one run queue under one lock; each processor's running slot and zombie live in its per-CPU block, each has an idle thread of its own, and a mask of idle processors decides who gets a reschedule IPI when a thread becomes ready (`kickIdleProcessor`, `onReschedule`). Doc 27.
 
 **`arch/x86_64/spinlock.ign` and `sched/sync.ign`.** The lock primitives, phase C1 of the concurrency proposal; no subsystem uses them yet. A spinlock takes its word with `xchg` and, while held, raises the per-CPU preemption counter (`gs:[24]`) so the timer tick defers any thread switch; `lockIrq` also turns interrupts off for data a handler touches. Every lock has a rank: a CPU takes spinlocks in rising rank order and releases them in reverse, and a violation panics, which turns a lock-order deadlock into a boot failure. `sync.ign` adds wait queues, where a thread queues itself and releases the spinlock with interrupts off so no wake-up is lost, and a mutex whose waiters sleep. Mutex ranks follow the thread, and a mutex cannot be taken while a spinlock is held. The scheduler panics when a thread yields or sleeps with a spinlock held. Phase C2 (doc 25) put every subsystem behind these locks: `lib/rank.ign` gives every lock its rank in one table, with the chains that decide the order. The run queue lock is held across a context switch and released by the thread switched in. Doc 24.
 
@@ -206,7 +207,9 @@ Docs 14 and 15.
 
 **`arch/x86_64/usermode.ign` and `usermode_asm.S`.** How the CPU enters and leaves ring 3. `ignis_enter_user` builds an `iretq` frame. `initialize` programs `IA32_STAR`, `IA32_LSTAR` and `IA32_FMASK`, and the header shows the bit fields. The `SYSCALL` entry stub in `usermode_asm.S` is the most delicate code in the tree: it switches stacks by hand through the per-CPU block, builds the same frame the interrupt stub builds, and refuses to execute `SYSRET` with a non-canonical return address.
 
-**`arch/x86_64/cpu_local.ign` and `cpu_local_asm.S`.** The per-CPU block behind the GS base. The header has the table of the two GS MSRs in ring 0 and ring 3, and the list of every place that runs `swapgs`: the `SYSCALL` entry and exit, the interrupt stub when the saved CS is ring 3, and the first entry to ring 3. Doc 18.
+**`arch/x86_64/cpu_local.ign` and `cpu_local_asm.S`.** The per-CPU block behind the GS base. The header has the table of the two GS MSRs in ring 0 and ring 3, and the list of every place that runs `swapgs`: the `SYSCALL` entry and exit, the interrupt stub when the saved CS is ring 3, and the first entry to ring 3. There is one 64-byte block per processor, with its index at `gs:[40]` and the running thread's slot and zombie at `gs:[48]` and `gs:[56]`, each read in one instruction so a thread that moves to another processor never reads a stale value. Doc 18, 27.
+
+**`smp/start.ign`.** The other processors. Limine starts them before the kernel runs and parks each one on a word of its `MpInfo`; `startProcessors` gives each an index and writes its entry point there. Each one loads the kernel page tables first, then its own GDT slot, TSS and per-CPU block, the shared IDT, the FPU, SMEP/SMAP, the `SYSCALL` MSRs and its local APIC, reports itself online and waits. After the single-processor self-tests, `releaseProcessors` creates their idle threads and lets them start their APIC timers and join the scheduler. Only processor 0's tick advances time, and device interrupts stay on processor 0. Doc 27.
 
 **`proc/process.ign`.** The process table. A process is a slot plus a kernel thread that owns the address space. The header draws the lifetime from `startElf` to `wait`, which blocks in `Sched::Scheduler::join` until the process thread is gone. Each process records its parent, and only the parent may wait for it; `releaseChildren` frees the children of a process that ends, or makes the running ones orphans that are freed when they end, so no slot stays taken. `waitAny` parks the caller (`Sched::Scheduler::park`) until a child ends and `wakeParent` wakes it. `kill` marks a process and wakes it from a sleep, a wait or a keyboard read (`Sched::Scheduler::interrupt`, `Drivers::Tty::cancel`); `checkKill`, at the end of every system call and every interrupt from ring 3, ends it with status 137, so a process never dies in the middle of kernel code. The table holds 64 processes; the descriptor and region tables of each grow on the heap.
 
@@ -487,6 +490,11 @@ timer: self-test ok, 10 ticks so far
 `Tests::Timer::run` enabled interrupts and slept until 10 ticks (100 ms) had arrived.
 
 ```text
+smp: 4 processors online, lapic ids 0 1 2 3
+```
+`Smp::startProcessors` released the three application processors QEMU emulates (`-smp 4`). Each ran its setup and parked; the self-tests below still run on processor 0 alone. Doc 27.
+
+```text
 context: self-test ok, stack switch, argument, alignment and registers checked
 ```
 `Tests::Context::run` switched into a hand-built thread and back three times. Doc 13.
@@ -507,10 +515,15 @@ locks: spinlock self-test ok, interrupts restored, 3 switches deferred while a l
 locks: mutex and wait queue self-test ok, a contender slept until the holder was done, three waiters woke together and a kill did not wake them
 locks: scratch self-test ok, two threads kept their own system call scratch across switches
 locks: wake token self-test ok, a wake before a park and a kill before a 10000 s sleep were not lost
-locks: vfs self-test ok, a file operation waited while another thread held the VFS lock
+locks: vfs self-test ok, a file operation waited while another thread held the VFS lock, and a stale read cancel did not reach a new process
+keyboard: PS/2, scancode set 1, US layout, IRQ1 through the IOAPIC
+smp: reschedule self-test ok, 8 threads ran on other processors, 8 reschedule IPIs, 5 of them switched an idle processor
+smp: spinlock stress ok, 4 workers ran at once on 4 processors, 80000 increments, none lost
+smp: mutex stress ok, 4 workers counted on 4 processors, 12000 increments, none lost
 ```
 `Sched::Scheduler::enablePreemption` was called, then `Tests::Scheduler::runPreemptive`. The timer took the processor away from spinning threads at least twice (the number varies).
 `Tests::Locks::run` then checked the lock primitives. It held a spinlock across more than a time slice while a helper thread wanted the processor: no switch happened, three ticks deferred theirs, and a switch followed the release. Three workers incremented a counter under a spinlock, each read-to-write section longer than a time slice, and the total came out right. A mutex contender slept until its holder, sleeping with the mutex, was done; three threads queued on a wait queue ignored a kill-style interrupt and all woke on `wakeAll`. Then the checks of phase C2: two threads filled their system call scratch areas, yielded and found their own bytes; a wake sent before a park and a kill sent before a 10 000 s sleep each ended the wait at once; and a file operation started while another thread held the VFS lock waited for it. Doc 24.
+`Drivers::Keyboard::initialize` configured the 8042 by polling, before the other processors join: IRQ1 lands on processor 0, and the setup relies on the thread that polls being the one there. Then `Smp::releaseProcessors` let the others join the scheduler, and `Tests::Smp::run` checked them: a thread spawned while processor 0 spun with preemption deferred ran on another processor, woken by a reschedule IPI (how many IPIs found the processor still idle varies); one worker per processor added to a shared counter under a spinlock, running at the same time, and under a mutex, and no update was lost. Doc 27.
 
 ### User mode self-tests
 
@@ -549,66 +562,69 @@ user: write, getpid, sched_yield, nanosleep, -ENOSYS, -EFAULT, -EBADF and -EINVA
 Program 3 wrote its message twice, once to descriptor 1 and once to descriptor 2 (both go to the console), and checked every system call and error value. Doc 15.
 
 ```text
-process 6 exited with status 0
 process 7 exited with status 0
-user: two processes kept their own xmm0-xmm15, MXCSR and x87 control word across 50 yields and 6 preemptions
+process 6 exited with status 0
+process 9 exited with status 0
+process 10 exited with status 0
+process 8 exited with status 0
+user: 5 processes kept their own xmm0-xmm15, MXCSR and x87 control word across 50 yields and 12 preemptions
 ```
-`Tests::User::runFpu` started program 13 twice. Each copy loaded a pattern made from its pid into the sixteen XMM registers, the MXCSR rounding bits and the x87 control word, yielded to the other 50 times and checked everything after each yield, then spun 2^29 times so the timer had to preempt it, and checked again. The number of preemptions varies, and the test requires at least one. Doc 16.
+`Tests::User::runFpu` started program 13 once more than there are processors, so at least two copies shared one. Each copy loaded a pattern made from its pid into the sixteen XMM registers, the MXCSR rounding bits and the x87 control word, yielded 50 times and checked everything after each yield, then spun 2^29 times so the timer had to preempt it, and checked again. The number of preemptions varies, and the test requires at least one. Doc 16.
 
 ```text
-process 8 exited with status 42
-process 9 exited with status 5
+process 11 exited with status 42
+process 12 exited with status 5
 user: wait blocked until the process was gone, 6 switches for a 200 ms process, none for one that had already ended
 ```
 `Tests::User::runWait`. Program 0 and then program 14 were started. Program 14 slept 200 ms (20 ticks) with `nanosleep` and exited with 5. Waiting for it cost a handful of switches, where waking once per tick would cost about 40. Program 0 was ahead in the run queue, so it had already ended and been cleaned up by then, and the wait for it returned 42 without blocking. Doc 13.
 
 ```text
-process 10 faulted: #PF Page Fault at rip 0x0000000000400000, error 0x0000000000000006, address 0x0000000000000000
-process 10 killed, status 139
+process 13 faulted: #PF Page Fault at rip 0x0000000000400000, error 0x0000000000000006, address 0x0000000000000000
+process 13 killed, status 139
 ```
 Program 4 wrote to address 0. Error code `0x6` is write (bit 1) and user (bit 2) with the page not present (bit 0 clear). Status 139 is 128 + 11, SIGSEGV. `Trap::Exception::killUserProcess` printed the first line. Doc 04.
 
 ```text
-process 11 faulted: #GP General Protection Fault at rip 0x0000000000400000, error 0x0000000000000000
-process 11 killed, status 139
-process 12 faulted: #GP General Protection Fault at rip 0x0000000000400000, error 0x0000000000000000
-process 12 killed, status 139
+process 14 faulted: #GP General Protection Fault at rip 0x0000000000400000, error 0x0000000000000000
+process 14 killed, status 139
+process 15 faulted: #GP General Protection Fault at rip 0x0000000000400000, error 0x0000000000000000
+process 15 killed, status 139
 ```
 Programs 5 and 6 ran `hlt` and `cli` at their first byte. Both are privileged, so ring 3 gets a general protection fault.
 
 ```text
-process 13 faulted: #UD Invalid Opcode at rip 0x0000000000400000
-process 13 killed, status 132
+process 16 faulted: #UD Invalid Opcode at rip 0x0000000000400000
+process 16 killed, status 132
 ```
 Program 7 ran `ud2`. #UD has no error code, so none is printed. 132 is 128 + 4, SIGILL.
 
 ```text
-process 14 faulted: #PF Page Fault at rip 0x000000000040000a, error 0x0000000000000005, address 0xffff800000000000
-process 14 killed, status 139
+process 17 faulted: #PF Page Fault at rip 0x000000000040000a, error 0x0000000000000005, address 0xffff800000000000
+process 17 killed, status 139
 ```
 Program 8 read kernel memory. The address is mapped, but without the user bit. Error `0x5` is user (bit 2) and protection violation (bit 0). `rip` is `0x40000a` because the load follows a 10-byte `mov`.
 
 ```text
-process 15 faulted: #GP General Protection Fault at rip 0x0000000000400006, error 0x0000000000000000
-process 15 killed, status 139
+process 18 faulted: #GP General Protection Fault at rip 0x0000000000400006, error 0x0000000000000000
+process 18 killed, status 139
 ```
 Program 9 executed `out dx, al` to port `0x3F8`. The TSS has no I/O permission bitmap, so ring 3 may not touch any port.
 
 ```text
-process 16 faulted: #PF Page Fault at rip 0x0000000000400007, error 0x0000000000000007, address 0x0000000000400007
-process 16 killed, status 139
+process 19 faulted: #PF Page Fault at rip 0x0000000000400007, error 0x0000000000000007, address 0x0000000000400007
+process 19 killed, status 139
 ```
 Program 10 wrote to its own code page. Error `0x7` is write, user and protection violation. The page is read and execute, so the write fails.
 
 ```text
-process 17 faulted: #PF Page Fault at rip 0x00007fffffffeff8, error 0x0000000000000015, address 0x00007fffffffeff8
-process 17 killed, status 139
+process 20 faulted: #PF Page Fault at rip 0x00007fffffffeff8, error 0x0000000000000015, address 0x00007fffffffeff8
+process 20 killed, status 139
 ```
 Program 11 jumped to its stack. The stack pointer starts at the stack top minus 8, `0x7FFFFFFFEFF8`. Error `0x15` is instruction fetch (bit 4), user (bit 2) and protection violation (bit 0): the stack is no-execute.
 
 ```text
-process 18 faulted: #DE Divide Error at rip 0x0000000000400009
-process 18 killed, status 136
+process 21 faulted: #DE Divide Error at rip 0x0000000000400009
+process 21 killed, status 136
 ```
 Program 12 divided by zero. 136 is 128 + 8, SIGFPE.
 
@@ -638,7 +654,7 @@ syscall 9999 = -14
 sleep(0.05 s) = 0
 yield() = 0
 goodbye from user mode
-process 19 exited with status 0
+process 22 exited with status 0
 user: /bin/hello from the initramfs ran with 3 arguments and exited with status 0
 ```
 The output of `user/hello/src/main.ign`. The first line is argv as `main` received it from `_start`; `make run-headless` checks it. It is process 19, after the 18 test processes. `data 42` shows `.data` was loaded (41 plus 1), `bss 0 then 1` shows `.bss` was zeroed. The i64 minimum line shows that `Io::printNumber` negates in `u64`, where -2^63 has a magnitude; `make run-headless` fails if it is wrong. The three negative results are native status codes, negated by the portable `Sys` functions: `BAD_ADDRESS` (13), `BAD_DESCRIPTOR` (10) and `NOT_SUPPORTED` (14). A Linux program would see `-EFAULT`, `-EBADF` and `-ENOSYS` (-14, -9, -38) from the same mistakes.
@@ -659,7 +675,7 @@ elf: PT_LOAD 0x0000000000403000 file 403 mem 403 r--
 elf: PT_LOAD 0x0000000000404000 file 0 mem 4753 rw-
 elf: 3 segments, 6 pages, entry 0x0000000000400000, stack pointer 0x00007fffffffefa0, argc 1, abi linux
 fstest: openat, read, write, lseek, close, fstat, newfstatat, getdents64 and mkdirat behave as on Linux
-process 21 exited with status 0
+process 24 exited with status 0
 user: fstest passed, and removing /fstest gave back every byte it used
 ```
 `Tests::User::runFiles` ran `/bin/fstest` (`user/fstest/src/main.ign`). Its data segment has no file bytes and 4753 bytes of memory: it is all `.bss`, the buffers of the checks. The program went through every file system call from ring 3: `openat` of `/etc/motd` gave descriptor 3, the first one after the console's 0, 1 and 2; reads, seeks, `fstat`; every `openat` error; `mkdirat` of `/fstest`; creating, appending and truncating `/fstest/a`; a path relative to a directory descriptor; `getdents64` (`.`, `..`, `a`, `b`); the limit of 256 descriptors (the table grows from 16); and the console as a character device. Its exit status would have named the first check that failed. The test then removed `/fstest` with `Fs::Vfs::remove` and checked that the heap and the PMM were back where they were before the program started. Doc 15.
@@ -667,19 +683,19 @@ user: fstest passed, and removing /fstest gave back every byte it used
 ```text
 Welcome to IgniOS.
 mmtest: anonymous and file mappings, protection, munmap, their errors and std::alloc behave as expected
-process 22 exited with status 0
-process 23 faulted: #PF Page Fault at rip 0x0000000000400375, error 0x0000000000000006, address 0x00007efffffff000
-process 23 killed, status 139
-process 24 faulted: #PF Page Fault at rip 0x000000000040051f, error 0x0000000000000004, address 0x00007efffffff000
-process 24 killed, status 139
-process 25 faulted: #PF Page Fault at rip 0x00007efffffff000, error 0x0000000000000015, address 0x00007efffffff000
-process 25 killed, status 139
-process 26 faulted: #PF Page Fault at rip 0x00000000004005ac, error 0x0000000000000004, address 0x00007efffffff000
+process 25 exited with status 0
+process 26 faulted: #PF Page Fault at rip 0x0000000000400375, error 0x0000000000000006, address 0x00007efffffff000
 process 26 killed, status 139
-process 27 faulted: #PF Page Fault at rip 0x00000000004025ff, error 0x0000000000000006, address 0x00007fffff7fe110
+process 27 faulted: #PF Page Fault at rip 0x000000000040051f, error 0x0000000000000004, address 0x00007efffffff000
 process 27 killed, status 139
+process 28 faulted: #PF Page Fault at rip 0x00007efffffff000, error 0x0000000000000015, address 0x00007efffffff000
+process 28 killed, status 139
+process 29 faulted: #PF Page Fault at rip 0x00000000004005ac, error 0x0000000000000004, address 0x00007efffffff000
+process 29 killed, status 139
+process 30 faulted: #PF Page Fault at rip 0x00000000004025ff, error 0x0000000000000006, address 0x00007fffff7fe110
+process 30 killed, status 139
 panic: alloc: free of a pointer that is not a live block at alloc.ign:112
-process 28 exited with status 101
+process 31 exited with status 101
 user: mmtest passed, writing read-only, using unmapped, executing non-exec, touching PROT_NONE memory and overflowing the 8 MiB stack were killed, a double free was caught, no frame leaked
 ```
 `Tests::User::runMemory` ran `/bin/mmtest` (the loader's `elf:` lines left out). The first line is `/etc/motd`, which the program read into a mapping and wrote from it, to show that system calls take mapped memory as a buffer. The checks also mapped `/etc/motd` and a page of `/bin/hello` privately, and ran `std::alloc` through 200 blocks, a large block and a closure. Then the program ran four more times with an argument, each one doing something the page tables must stop, and each one was killed. Every first mapping of a process is the page below `0x7F0000000000`, `0x7EFFFFFFF000`. The error codes say why: `0x7` is a write to a present read-only user page, `0x4` a user read of a page that is not present (unmapped, or `PROT_NONE`, which maps nothing), `0x15` an instruction fetch from a no-execute page; `rip` equal to the address is the jump into the mapping. The last run freed a `std::alloc` block twice; the allocator panicked, and the shared handler of `std::panic` printed the message with its file and line on standard error and exited with 101. The PMM free count was the same afterwards. Doc 20. The program also read a file into two pages of a fresh mapping it never touched, and recursed 7 MiB deep with a page of locals per call, close to the 8 MiB limit; a fifth kill line is the `overflow` mode, whose recursion ran off the bottom of the 8 MiB stack (address `0x7fffff7fe...`, just below `STACK_BOTTOM`). The write to a read-only mapping now faults with error 6 (page not present) instead of 7: the page was never touched, so the resolver is asked first and refuses the write.
@@ -688,21 +704,21 @@ user: mmtest passed, writing read-only, using unmapped, executing non-exec, touc
 elf: 3 segments, 6 pages, entry 0x0000000000400000, stack pointer 0x00007fffffffefa0, argc 1, abi native
 nativetest: hello through the native ABI
 /
-process 30 exited with status 0
+process 33 exited with status 0
 ...
-process 104 killed, status 137
-process 105 killed, status 137
-process 106 killed, status 137
 process 107 killed, status 137
 process 108 killed, status 137
+process 109 killed, status 137
+process 110 killed, status 137
+process 111 killed, status 137
 nativetest: every native call, its arguments and its status codes behave as specified
-process 29 exited with status 0
+process 32 exited with status 0
 elf: the IgniOS ABI note names an unknown version
 elf: a note runs past the end of the file
 user: nativetest passed, a note of version 2 and a note past the end of the file were refused
 ...
 stress: 4 workers, 25 rounds each, every file read back and every shared record whole
-process 114 exited with status 0
+process 120 exited with status 0
 user: stress passed, 4 processes at once, 5 timer ticks landed inside system calls
 ```
 `Tests::User::runNative` ran `/bin/nativetest`. Its ELF carries the IgniOS note, so the loader printed `abi native` (every other program says `abi linux`) and the process used the native call table. The program checked that a call returns its status in RAX and its value in RDX, that an error leaves RDX at 0 even when RDX went in with another value, and that call 9999 and Linux's `getpid` number 39 are both `NOT_SUPPORTED`; then every native call with its errors, in a directory `/nt` that the test removed afterwards (the table in `user/nativetest/src/main.ign` lists the checks). The lines left out (`...`) are its own children: `/bin/pwd` and `/bin/rmdir` runs for the spawn checks, 63 `pwd` children that fill the 64-slot process table, and helpers for the parent checks (an orphan and a child that ends before its parent are both freed). The five `killed, status 137` lines are the kill checks: a child sleeping 10 s, one spinning in ring 3, one waiting for the keyboard, one waiting for its own child, and one that killed itself. Each ended right away with 128 + 9. Then the test handed the loader two copies of the same file with the note broken, one claiming version 2 and one with a description larger than the file; both were refused before anything was mapped, and no memory leaked. Doc 21.
@@ -715,11 +731,6 @@ cpu local: self-test ok, after ring 3 the kernel GS base is the per-CPU block an
 `Tests::CpuLocal::run`, after every way in and out of ring 3 has run many times: `IA32_GS_BASE` still names the per-CPU block, a `gs:[0]` load returns the block's own address, and `IA32_KERNEL_GS_BASE`, the user's base while the kernel runs, is 0. A missing or extra `swapgs` anywhere would break this. Doc 18.
 
 ### The terminal
-
-```text
-keyboard: PS/2, scancode set 1, US layout, IRQ1 through the IOAPIC
-```
-`Drivers::Keyboard::initialize` configured the 8042 and enabled the first port. The keyboard interrupt, routed earlier, is now live.
 
 ```text
 elf: 3 segments, 3 pages, entry 0x0000000000400000, stack pointer 0x00007fffffffefa0, argc 1, abi native
