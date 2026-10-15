@@ -1,6 +1,6 @@
 /* The per-CPU block and the routines that reach it through GS.
  *
- * The block, one per processor (IgniOS runs on one):
+ * The blocks, one per processor, 64 bytes each, MAX_CPUS (8) of them:
  *
  *   gs:[0]   self          the block's own address, so code can turn the
  *                          GS-relative block into an ordinary pointer
@@ -10,6 +10,7 @@
  *                          and the push that saves it in the frame
  *   gs:[24]  preempt count above 0 while this CPU holds a spinlock
  *   gs:[32]  spin top      the highest rank of the spinlocks it holds
+ *   gs:[40]  cpu index     the processor's number, 0 for the boot processor
  *
  * These offsets are used by usermode_asm.S too. Arch::CpuLocal::initialize
  * points IA32_GS_BASE at the block and sets IA32_KERNEL_GS_BASE to 0. See
@@ -22,7 +23,8 @@
 
 .section .text
 
-/* u64 ignis_cpu_local_address(void): the address of the block. */
+/* u64 ignis_cpu_local_address(void): the address of the first block; block
+ * n is 64 * n bytes further. */
 .global ignis_cpu_local_address
 ignis_cpu_local_address:
     lea rax, [rip + ignis_cpu_local]
@@ -45,6 +47,6 @@ ignis_set_syscall_kernel_stack:
 
 .balign 64
 ignis_cpu_local:
-    .skip 64
+    .skip 64 * 8
 
 .section .note.GNU-stack,"",@progbits

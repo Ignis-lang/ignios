@@ -33,11 +33,11 @@ namespace Trap::Setup {
   /// `0x28`, which proves the far return and `ltr` in `Arch::Gdt::initialize`
   /// took effect.
   function initializeGdt(): void {
-    Arch::Gdt::initialize();
+    Arch::Gdt::initialize(0);
 
     // Right after the GDT load, which resets the GS base: from here on locks
     // can keep their per-CPU state behind GS.
-    Arch::CpuLocal::initialize();
+    Arch::CpuLocal::initialize(0);
 
     Drivers::Serial::write("gdt: cs=");
     Drivers::Serial::writeHex(Arch::Gdt::currentCode() as u64);

@@ -35,9 +35,10 @@
 //! saved CS decides on the way out too, so a thread switch inside the
 //! handler cannot unbalance it.
 //!
-//! The block layout is defined in `cpu_local_asm.S`. With one processor
-//! there is one block. A second processor would get its own block and its
-//! own `initialize` call.
+//! The block layout is defined in `cpu_local_asm.S`. There is one block per
+//! processor, `MAX_CPUS` of them; each processor runs `initialize` with its
+//! own index before it takes any lock, and from then on `index` reads that
+//! index back through GS.
 //!
 //! An NMI or machine check taken between a `swapgs` and the instruction
 //! that changes privilege would run with the wrong GS base. Both are fatal
@@ -71,14 +72,26 @@ namespace Arch::CpuLocal {
   /// IA32_GS_BASE.
   const KERNEL_GS_BASE_MSR: u32 = 0xC0000102;
 
-  /// Fills in the self pointer and makes GS name the block: IA32_GS_BASE
-  /// is the block and IA32_KERNEL_GS_BASE, the user's GS base while the
-  /// kernel runs, is 0. Runs once in ring 0, before the first entry to
-  /// ring 3 and after the GDT load, which resets the GS base.
-  function initialize(): void {
-    let block: u64 = blockAddress();
+  /// The most processors the kernel runs on.
+  const MAX_CPUS: u64 = 8;
+
+  /// Bytes of one block.
+  const BLOCK_SIZE: u64 = 64;
+
+  /// Fills in the self pointer and the index of block `cpu` and makes GS
+  /// name it: IA32_GS_BASE is the block and IA32_KERNEL_GS_BASE, the user's
+  /// GS base while the kernel runs, is 0. Each processor runs it once in
+  /// ring 0, before it takes a lock or enters ring 3 and after its GDT load,
+  /// which resets the GS base.
+  function initialize(cpu: u64): void {
+    if (cpu >= MAX_CPUS) {
+      @panic("cpu local: processor index beyond MAX_CPUS");
+    }
+
+    let block: u64 = blockOf(cpu);
 
     *(block as *mut u64) = block;
+    *((block + 40) as *mut u64) = cpu;
 
     Arch::Cpu::writeMsr(GS_BASE_MSR, block);
     Arch::Cpu::writeMsr(KERNEL_GS_BASE_MSR, 0);
@@ -127,9 +140,24 @@ namespace Arch::CpuLocal {
     }
   }
 
+  /// The index of the processor running this code (`gs:[40]`), 0 for the
+  /// boot processor; 0 before `initialize`.
+  function index(): u64 {
+    if (!CpuLocalState::ready) {
+      return 0;
+    }
+
+    return asm () -> (value: u64 in rax) { mov {value}, qword ptr gs:[40] };
+  }
+
   /// The address of this processor's block.
   function blockAddress(): u64 {
-    return CpuLocalAsm::ignis_cpu_local_address();
+    return blockOf(index());
+  }
+
+  /// The address of the block of processor `cpu`.
+  function blockOf(cpu: u64): u64 {
+    return CpuLocalAsm::ignis_cpu_local_address() + cpu * BLOCK_SIZE;
   }
 
   /// IA32_GS_BASE. In ring 0 it must be `blockAddress()`.
