@@ -1,7 +1,7 @@
 //!
 //! # Scheduler
 //!
-//! Kernel threads on one processor, switched cooperatively and by the timer.
+//! Kernel threads on every processor, switched cooperatively and by the timer.
 //!
 //! ## Overview
 //!

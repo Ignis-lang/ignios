@@ -215,8 +215,8 @@ namespace Apic::Lapic {
 
   /// Stops every other processor (`STOP_VECTOR`): before a panic report, a
   /// reboot or a shutdown, so nothing else runs while the machine stops. A
-  /// processor that has interrupts off ignores it; the only ones that do are
-  /// still parked at boot, before they run anything. No effect before the
+  /// processor with interrupts off takes the IPI only when it turns them on
+  /// again; one that spins with them off never stops. No effect before the
   /// APIC is set up.
   function stopOthers(): void {
     if (LapicState::ready) {

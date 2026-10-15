@@ -30,8 +30,12 @@ import Drivers from "@drivers";
 /// Set by the first panic so a second panic knows the console path already
 /// failed or is in use.
 record PanicState {
-  /// True once a panic is being reported.
-  static mut active: boolean = false;
+  /// 1 once a panic is being reported, claimed with `xchg` so that of two
+  /// processors panicking at once only one reports.
+  static mut claimed: u64 = 0;
+
+  /// The processor reporting it.
+  static mut reporter: u64 = 0;
 }
 
 /// Reports the panic on COM1, and on the console once it is initialized, then
@@ -46,10 +50,23 @@ record PanicState {
 @panicHandler
 function onPanic(message: str, file: str, line: u32): never {
   Arch::Cpu::disableInterrupts();
+
+  let first: boolean = Arch::Spin::exchange(@integerFromPointer(&mut PanicState::claimed as *mut u64)) == 0;
+
+  // Another processor is already reporting a panic: this one stops quietly
+  // instead of mixing its lines into the report.
+  if (!first && @readVolatile<u64>(&mut PanicState::reporter as *mut u64) != Arch::CpuLocal::index()) {
+    Arch::Cpu::haltForever();
+  }
+
+  if (first) {
+    @writeVolatile<u64>(&mut PanicState::reporter as *mut u64, Arch::CpuLocal::index());
+  }
+
   Drivers::Serial::bypassLocks();
   Apic::Lapic::stopOthers();
 
-  if (PanicState::active || !Drivers::Console::isInitialized()) {
+  if (!first || !Drivers::Console::isInitialized()) {
     Drivers::Serial::write("\npanic: ");
     Drivers::Serial::write(message);
     Drivers::Serial::write(" at ");
@@ -60,8 +77,6 @@ function onPanic(message: str, file: str, line: u32): never {
 
     Arch::Cpu::haltForever();
   }
-
-  PanicState::active = true;
 
   Drivers::Console::setColors(Drivers::Color::BRIGHT_WHITE, Drivers::Color::RED);
   Drivers::Console::write("\npanic: ");

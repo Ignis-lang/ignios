@@ -8,7 +8,7 @@
 //! |------------|--------------------------------------------------------------------|
 //! | reschedule | a thread spawned while the boot processor spins runs on another processor, woken by a reschedule IPI rather than its next tick |
 //! | spinlock   | one worker per processor adds 1 to a shared counter `SPIN_ROUNDS` times under a spinlock, with a pause between the read and the write; workers saw each other running on other processors, and the total is exact |
-//! | mutex      | the same with a `Sched::Mutex`, whose contenders sleep and are woken across processors: the total is exact and the workers counted on at least two processors (a mutex is not fair, so they may take turns rather than overlap) |
+//! | mutex      | the same with a `Sched::Mutex`, whose contenders sleep and are woken: the total is exact (a mutex is not fair, so its workers may take turns on one processor; the processors they counted on are reported) |
 //!
 //! Without a working lock, the read-pause-write of two processors overlaps and
 //! updates are lost; on one processor only preemption could interleave them,
@@ -41,13 +41,12 @@ record SmpTestState {
   /// 1 while the stress uses the mutex instead of the spinlock.
   static mut useMutex: u64;
 
-  /// Per worker: the processor it runs on plus 1 while it is in its loop,
-  /// 0 otherwise. The size must be at least `Arch::CpuLocal::MAX_CPUS`.
-  static mut active: u64[8];
-
-  /// Set by a worker that saw another worker in its loop on another
-  /// processor at the same time.
+  /// Set by a worker that saw another worker's round count move on another
+  /// processor while its own processor ran without interruption.
   static mut sawPeer: u64;
+
+  /// Per worker: rounds done so far.
+  static mut rounds: u64[8];
 
   /// Workers that reached the start barrier.
   static mut started: u64;
@@ -84,6 +83,13 @@ namespace Tests::Smp {
   /// Pause instructions between the read and the write of the counter.
   const WINDOW: u64 = 16;
 
+  /// Rounds between two checks for a worker running at the same time.
+  const PEER_CHECK_INTERVAL: u64 = 256;
+
+  /// Pause instructions a worker waits, interrupts off, for another
+  /// worker's round count to move.
+  const PEER_WINDOW: u64 = 2000;
+
   function run(): void {
     if (Smp::processorCount() < 2) {
       Drivers::Console::writeLine("smp: self-test skipped, one processor");
@@ -113,7 +119,7 @@ namespace Tests::Smp {
     SmpTestState::useMutex = withMutex ? 1 : 0;
 
     while (index < workers) {
-      *(&mut SmpTestState::active as *mut u64 + index) = 0;
+      *(&mut SmpTestState::rounds as *mut u64 + index) = 0;
       index += 1;
     }
 
@@ -142,19 +148,17 @@ namespace Tests::Smp {
       @panic("smp self-test: updates were lost under a lock shared by several processors");
     }
 
-    // Spinlock waiters spin, so the workers always overlap. A mutex is not
-    // fair: the thread that releases it may take it again before the one it
-    // woke runs, so mutex workers may take turns instead; for them the
-    // check is that the lock moved between processors.
+    // Spinlock workers never sleep, one per processor, so they run at the
+    // same time. A mutex is not fair: the thread that releases it may take
+    // it again before the one it woke runs, and its own processor may then
+    // run the next waiter before an idle one wakes. Mutex workers may take
+    // turns on one processor, which is valid scheduling: for them only the
+    // total is checked, and the processors they counted on are reported.
     if (!withMutex && SmpTestState::sawPeer == 0) {
       @panic("smp self-test: the spinlock stress workers never ran on two processors at once");
     }
 
     let processors: u64 = bitCount(SmpTestState::cpusSeen);
-
-    if (processors < 2) {
-      @panic("smp self-test: the stress workers all counted on one processor");
-    }
 
     Drivers::Console::write(withMutex ? "smp: mutex stress ok, " : "smp: spinlock stress ok, ");
     Drivers::Console::writeDecimal(workers);
@@ -190,11 +194,10 @@ namespace Tests::Smp {
         Arch::Spin::lockIrq(&mut SmpTestState::counterLock as *mut Arch::SpinLock);
       }
 
-      // Inside the lock the thread cannot move, so the processor it records
-      // is the one it runs on.
+      // Inside a spinlock the thread cannot move; inside the mutex it can,
+      // and this is only the processor it counted on.
       let cpu: u64 = Arch::CpuLocal::index();
 
-      @writeVolatile<u64>(&mut SmpTestState::active as *mut u64 + index, cpu + 1);
       SmpTestState::cpusSeen = SmpTestState::cpusSeen | (1 << cpu);
 
       let value: u64 = @readVolatile<u64>(&mut SmpTestState::counter as *mut u64);
@@ -213,11 +216,14 @@ namespace Tests::Smp {
         Arch::Spin::unlockIrq(&mut SmpTestState::counterLock as *mut Arch::SpinLock);
       }
 
-      notePeers(index, cpu);
       round += 1;
+      @writeVolatile<u64>(&mut SmpTestState::rounds as *mut u64 + index, round);
+
+      if (!withMutex && round % PEER_CHECK_INTERVAL == 0) {
+        notePeers(index);
+      }
     }
 
-    @writeVolatile<u64>(&mut SmpTestState::active as *mut u64 + index, 0);
   }
 
   /// The number of set bits in `value`.
@@ -233,20 +239,41 @@ namespace Tests::Smp {
     return count;
   }
 
-  /// Sets `sawPeer` when another worker is in its loop on another processor
-  /// while worker `index` runs on `cpu`.
-  function notePeers(index: u64, cpu: u64): void {
+  /// Sets `sawPeer` when another worker's round count moves while this
+  /// processor runs worker `index` with interrupts off: during that window
+  /// nothing else runs here, so the other worker ran on another processor at
+  /// the same time.
+  function notePeers(index: u64): void {
+    let saved: u64 = Arch::Cpu::saveAndDisableInterrupts();
+    let workers: u64 = Smp::processorCount();
+    let mut before: u64[8];
     let mut other: u64 = 0;
 
-    while (other < Smp::processorCount()) {
-      let seen: u64 = @readVolatile<u64>(&mut SmpTestState::active as *mut u64 + other);
+    while (other < workers) {
+      before[other] = @readVolatile<u64>(&mut SmpTestState::rounds as *mut u64 + other);
+      other += 1;
+    }
 
-      if (other != index && seen != 0 && seen - 1 != cpu) {
+    let mut wait: u64 = 0;
+
+    while (wait < PEER_WINDOW) {
+      Arch::Cpu::pause();
+      wait += 1;
+    }
+
+    other = 0;
+
+    while (other < workers) {
+      let after: u64 = @readVolatile<u64>(&mut SmpTestState::rounds as *mut u64 + other);
+
+      if (other != index && after != before[other]) {
         @writeVolatile<u64>(&mut SmpTestState::sawPeer as *mut u64, 1);
       }
 
       other += 1;
     }
+
+    Arch::Cpu::restoreInterrupts(saved);
   }
 
   /// Spawns a probe thread while this processor spins holding a spinlock,

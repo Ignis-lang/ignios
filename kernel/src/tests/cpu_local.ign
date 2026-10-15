@@ -20,13 +20,20 @@ import Drivers from "@drivers";
 namespace Tests::CpuLocal {
   /// Checks the GS bases and the self pointer of the per-CPU block.
   function run(): void {
+    // Interrupts off: with several processors the thread could move between
+    // the reads, and each read must be of the same processor.
+    let saved: u64 = Arch::Cpu::saveAndDisableInterrupts();
     let block: u64 = Arch::CpuLocal::blockAddress();
+    let named: boolean = Arch::CpuLocal::gsBase() == block && Arch::CpuLocal::selfThroughGs() == block;
+    let userBase: u64 = Arch::CpuLocal::userGsBase();
 
-    if (Arch::CpuLocal::gsBase() != block || Arch::CpuLocal::selfThroughGs() != block) {
+    Arch::Cpu::restoreInterrupts(saved);
+
+    if (!named) {
       @panic("cpu local self-test: GS does not name the per-CPU block in ring 0");
     }
 
-    if (Arch::CpuLocal::userGsBase() != 0) {
+    if (userBase != 0) {
       @panic("cpu local self-test: the saved user GS base is not 0");
     }
 

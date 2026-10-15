@@ -84,7 +84,6 @@ export namespace Power {
     }
 
     Drivers::Console::writeLine("power: shutting down");
-    Apic::Lapic::stopOthers();
 
     let saved: u64 = Arch::Cpu::saveAndDisableInterrupts();
     let control: u16 = Acpi::Fadt::pm1aControl() as u16;
@@ -94,6 +93,10 @@ export namespace Power {
       return false;
     }
 
+    // From here the machine turns off: the other processors stop first, so
+    // nothing runs while it does. A failure before this point returns with
+    // them still running.
+    Apic::Lapic::stopOthers();
     writeSleep(control, Acpi::Fadt::sleepTypeA());
 
     if (Acpi::Fadt::pm1bControl() != 0) {
@@ -109,9 +112,10 @@ export namespace Power {
       poll += 1;
     }
 
-    Arch::Cpu::restoreInterrupts(saved);
-
-    return false;
+    // The other processors are stopped for good, so there is nothing to
+    // return to: report and halt.
+    Drivers::Console::writeLine("power: the machine did not turn off, halting");
+    Arch::Cpu::haltForever();
   }
 
   /// Resets the machine. Never returns.

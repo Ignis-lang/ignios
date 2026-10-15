@@ -549,7 +549,9 @@ namespace Mm::Vmm {
 
   /// Drops the TLB entry of the page containing `virtualAddress`. A mapping
   /// change is not visible to the processor until its old translation is gone
-  /// from the TLB (`invlpg`). Single processor: no shootdown is needed.
+  /// from the TLB (`invlpg`), on this processor only. No shootdown is sent:
+  /// no kernel mapping is removed while other processors run, and a user
+  /// space is loaded on one processor at a time (concept doc 27).
   function flush(virtualAddress: u64): void {
     Arch::Cpu::invalidatePage(virtualAddress);
   }

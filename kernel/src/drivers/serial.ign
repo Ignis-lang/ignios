@@ -127,45 +127,49 @@ namespace Drivers::Serial {
 
   /// Writes a NUL-terminated string, sending `\r\n` for each `\n`.
   function write(text: str): void {
-    acquire();
+    let held: boolean = acquire();
     send(text);
-    release();
+    release(held);
   }
 
   /// Writes `text` followed by a newline, in one uninterrupted piece.
   function writeLine(text: str): void {
-    acquire();
+    let held: boolean = acquire();
     send(text);
     send("\n");
-    release();
+    release(held);
   }
 
   /// Writes `value` in decimal (see `Lib::Format::decimal`).
   function writeDecimal(value: u64): void {
-    acquire();
+    let held: boolean = acquire();
     Lib::Format::decimal(value, writeByte);
-    release();
+    release(held);
   }
 
   /// Writes `value` as `0x` and 16 hex digits (see `Lib::Format::hexadecimal`).
   function writeHex(value: u64): void {
-    acquire();
+    let held: boolean = acquire();
     Lib::Format::hexadecimal(value, writeByte);
-    release();
+    release(held);
   }
 
   /// Takes the port lock with `lockIrq`, so a line is never interleaved with
-  /// another processor's or an interrupt handler's. Nothing once `bypassLocks`
-  /// was called.
-  function acquire(): void {
-    if (!SerialState::bypass) {
-      Arch::Spin::lockIrq(portLock());
+  /// another processor's or an interrupt handler's. Returns whether it took
+  /// it: once `bypassLocks` was called it takes nothing and returns false.
+  function acquire(): boolean {
+    if (SerialState::bypass) {
+      return false;
     }
+
+    Arch::Spin::lockIrq(portLock());
+
+    return true;
   }
 
-  /// Releases what `acquire` took.
-  function release(): void {
-    if (!SerialState::bypass) {
+  /// Releases what `acquire` took, when it took it (`held`).
+  function release(held: boolean): void {
+    if (held) {
       Arch::Spin::unlockIrq(portLock());
     }
   }

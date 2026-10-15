@@ -341,7 +341,7 @@ namespace Drivers::Console {
   /// Sets the palette colors of the characters written from now on. Cells that
   /// are already drawn keep their colors.
   function setColors(foreground: u8, background: u8): void {
-    acquire();
+    let held: boolean = acquire();
 
     let cursorWasDrawn: boolean = ConsoleState::cursorDrawn;
 
@@ -355,13 +355,13 @@ namespace Drivers::Console {
       showCursor();
     }
 
-    release();
+    release(held);
   }
 
   /// Fills the screen with the background color and moves the cursor home.
   /// The serial mirror is not cleared.
   function clear(): void {
-    acquire();
+    let held: boolean = acquire();
 
     ConsoleState::cursorDrawn = false;
     fillPixels(0, 0, ConsoleState::width, ConsoleState::height, ConsoleState::background);
@@ -370,7 +370,7 @@ namespace Drivers::Console {
     ConsoleState::row = 0;
     showCursor();
 
-    release();
+    release(held);
   }
 
   /// Writes one byte: printable ASCII is drawn, `\n` starts a new line, `\r`
@@ -378,22 +378,22 @@ namespace Drivers::Console {
   /// TAB_WIDTH and backspace erases the previous cell. Other bytes draw `?`.
   /// Before `initialize`, the byte only goes to the serial mirror.
   function writeChar(character: u8): void {
-    acquire();
+    let held: boolean = acquire();
     put(character);
-    release();
+    release(held);
   }
 
   /// Writes a NUL-terminated string.
   function write(text: str): void {
-    acquire();
+    let held: boolean = acquire();
     putText(text);
-    release();
+    release(held);
   }
 
   /// Writes the `count` bytes at `bytes` in one piece: no other writer's
   /// text lands in the middle.
   function writeBytes(bytes: *u8, count: u64): void {
-    acquire();
+    let held: boolean = acquire();
 
     let mut index: u64 = 0;
 
@@ -402,46 +402,53 @@ namespace Drivers::Console {
       index += 1;
     }
 
-    release();
+    release(held);
   }
 
   /// Writes `text` followed by a newline.
   function writeLine(text: str): void {
-    acquire();
+    let held: boolean = acquire();
     putText(text);
     put(NEWLINE);
-    release();
+    release(held);
   }
 
   /// Writes `value` in decimal.
   function writeDecimal(value: u64): void {
-    acquire();
+    let held: boolean = acquire();
     Lib::Format::decimal(value, put);
-    release();
+    release(held);
   }
 
   /// Writes `value` as `0x` and 16 hex digits.
   function writeHex(value: u64): void {
-    acquire();
+    let held: boolean = acquire();
     Lib::Format::hexadecimal(value, put);
-    release();
+    release(held);
   }
 
-  /// Takes the console lock and then the serial port, both with `lockIrq`:
-  /// the screen and its serial mirror change together, and a line is never
-  /// interleaved with another processor's or an interrupt handler's. Nothing
-  /// once the panic report bypassed the locks.
-  function acquire(): void {
-    if (!Drivers::Serial::locksBypassed()) {
-      Arch::Spin::lockIrq(consoleLock());
-      Drivers::Serial::acquire();
+  /// Takes the console lock with `lockIrq` and then the serial port: the
+  /// screen and its serial mirror change together, and a line is never
+  /// interleaved with another processor's or an interrupt handler's. Returns
+  /// whether it took them: once the panic report bypassed the locks it takes
+  /// nothing and returns false.
+  function acquire(): boolean {
+    if (Drivers::Serial::locksBypassed()) {
+      return false;
     }
+
+    Arch::Spin::lockIrq(consoleLock());
+    Arch::Spin::lock(Drivers::Serial::portLock());
+
+    return true;
   }
 
-  /// Releases what `acquire` took, in reverse order.
-  function release(): void {
-    if (!Drivers::Serial::locksBypassed()) {
-      Drivers::Serial::release();
+  /// Releases what `acquire` took, in reverse order, when it took them
+  /// (`held`): a panic that turns the bypass on in between must not leave
+  /// the locks held.
+  function release(held: boolean): void {
+    if (held) {
+      Arch::Spin::unlock(Drivers::Serial::portLock());
       Arch::Spin::unlockIrq(consoleLock());
     }
   }

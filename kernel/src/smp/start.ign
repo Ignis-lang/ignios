@@ -90,7 +90,10 @@ namespace Smp {
       if ((*info).lapicId != (*response).bspLapicId) {
         if (next < Arch::CpuLocal::MAX_CPUS) {
           *lapicIdOf(next) = (*info).lapicId as u64;
-          (*info).extraArgument = next;
+
+          // Volatile, and before the volatile store of the entry point: the
+          // processor reads the argument as soon as it sees the entry.
+          @writeVolatile<u64>(&mut (*info).extraArgument as *mut u64, next);
           @writeVolatile<u64>(&mut (*info).gotoAddress as *mut u64, Arch::ContextAsm::ignis_function_address(apMain));
           next += 1;
         } else {
