@@ -22,6 +22,7 @@
 //! | memory            | `/bin/mmtest` checks `mmap`, `munmap` and `std::alloc`; four forbidden accesses to mappings are killed; a double free panics; nothing leaks |
 //! | native            | `/bin/nativetest` checks every native call and status code; the loader refuses an IgniOS note of another version and one that runs past the file |
 //! | stress            | `/bin/stress` runs four processes on the file tree and memory at once; a timer tick lands inside a system call; nothing leaks |
+//! | clone             | a thread through `clone`: registers, stack, FS base on several processors, tid words, refused flags; `exit` ends the thread, `exit_group` the process |
 //! | refused           | a missing program, a directory, a file that is not ELF, an empty line and 33 arguments start nothing and leak nothing |
 //!
 //! `main.ign` calls `Tests::User::run` once, after the scheduler tests and before
@@ -107,6 +108,14 @@ namespace Tests::User {
   /// when it lost it.
   const ALIGNMENT_SPIN: u64 = 15;
 
+  /// Index 16: a thread through `clone`, checked from both sides; the
+  /// child ends with `exit`, the parent with `exit_group(0)`.
+  const CLONE: u64 = 16;
+
+  /// Index 17: a child on the parent's stack ends the process with
+  /// `exit_group(77)`.
+  const CLONE_GROUP: u64 = 17;
+
   /// The most thread switches a wait for `NAP` may cost: the waiter blocks
   /// once and is woken once, plus the switches of `NAP`, of the `EXIT`
   /// program that runs first and of the idle thread. Polling once per tick
@@ -167,6 +176,7 @@ namespace Tests::User {
     runSyscalls();
     runFpu();
     runWait();
+    runClone();
     runIsolation();
     runHello();
     runRefused();
@@ -756,6 +766,57 @@ namespace Tests::User {
     Drivers::Console::write("user: wait blocked until the process was gone, ");
     Drivers::Console::writeDecimal(switches);
     Drivers::Console::writeLine(" switches for a 200 ms process, none for one that had already ended");
+  }
+
+  /// Runs `CLONE` and watches its thread count: two while the child runs,
+  /// one again after the child's `exit` while the process still runs, then
+  /// the parent's status 0. Runs `CLONE_GROUP`, whose child's `exit_group`
+  /// ends the yielding parent with 77. No process slot stays taken.
+  function runClone(): void {
+    let slotsBefore: u64 = Proc::Process::usedSlots();
+    let id: u64 = startProgram(CLONE);
+    let mut sawTwo: boolean = false;
+    let mut sawOneAfter: boolean = false;
+
+    while (Proc::Process::stateOf(id) == Proc::Process::RUNNING) {
+      let count: u64 = Proc::Process::threadCountOf(id);
+
+      if (count == 2) {
+        sawTwo = true;
+      } else if (count == 1 && sawTwo) {
+        sawOneAfter = true;
+      }
+
+      Sched::Scheduler::sleep(1);
+    }
+
+    let status: u64 = Proc::Process::wait(id);
+
+    if (status != 0) {
+      Drivers::Console::write("user test: clone check ");
+      Drivers::Console::writeDecimal(status);
+      Drivers::Console::writeLine(" failed");
+      @panic("user test: a cloned thread or its parent saw the wrong state");
+    }
+
+    if (!sawTwo || !sawOneAfter) {
+      @panic("user test: the process did not run one thread after its child's exit");
+    }
+
+    let groupStatus: u64 = runProgram(CLONE_GROUP);
+
+    if (groupStatus != 77) {
+      Drivers::Console::write("user test: exit_group from a thread gave status ");
+      Drivers::Console::writeDecimal(groupStatus);
+      Drivers::Console::writeLine("");
+      @panic("user test: exit_group from a thread did not end the process");
+    }
+
+    if (Proc::Process::usedSlots() != slotsBefore) {
+      @panic("user test: the threaded programs left a process slot taken");
+    }
+
+    Drivers::Console::writeLine("user: clone made a thread with the parent's registers, its own stack, tid and FS base on every processor; exit ended the thread, exit_group the process");
   }
 
   /// Starts program `index` as a process and returns its id.

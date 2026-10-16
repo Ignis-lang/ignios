@@ -35,7 +35,10 @@
 //!          └─ each thread: finishThread at its next checkKill
 //! ```
 //!
-//! The process id is not the thread id.
+//! The process id is not the scheduler's thread id. The Linux thread id
+//! (`Sched::Thread::Control::tid`, `gettid`) comes from the process id
+//! counter: the first thread's is the process id, every later thread's
+//! (`addThread`, `reserveThreadId`) is an id no process will get.
 //!
 //! ## Lifetime
 //!
@@ -551,7 +554,7 @@ namespace Proc::Process {
 
     // No image page was touched, so the staging alone still describes what
     // the regions hold.
-    let thread: u64 = Sched::Scheduler::spawnMember(threadEntry, slot, root, slot + 1);
+    let thread: u64 = Sched::Scheduler::spawnUser(threadEntry, slot, root, slot + 1, ProcessState::nextId, 0);
 
     if (thread == Sched::Thread::NO_THREAD) {
       Fs::Files::closeAll(slot);
@@ -584,8 +587,15 @@ namespace Proc::Process {
   /// space and counts as one of its threads until it ends through
   /// `exitThread` or the end of the process. Refused, with `NO_THREAD`,
   /// when the slot holds no running process, the process is ending, or no
-  /// thread slot is free. Returns the thread id.
+  /// thread slot is free. Returns the thread id. Its Linux thread id comes
+  /// from the process id counter and its FS base is 0.
   function addThread(slot: u64, entry: u64, argument: u64): u64 {
+    return addThreadWith(slot, entry, argument, 0, 0);
+  }
+
+  /// `addThread` for a thread with the Linux thread id `tid` (from
+  /// `reserveThreadId`; 0 takes the next one) and the FS base `fsBase`.
+  function addThreadWith(slot: u64, entry: u64, argument: u64, tid: u64, fsBase: u64): u64 {
     if (slot >= MAX_PROCESSES) {
       return Sched::Thread::NO_THREAD;
     }
@@ -599,7 +609,14 @@ namespace Proc::Process {
       return Sched::Thread::NO_THREAD;
     }
 
-    let thread: u64 = Sched::Scheduler::spawnMember(entry, argument, (*process).root, slot + 1);
+    let mut threadId: u64 = tid;
+
+    if (threadId == 0) {
+      threadId = ProcessState::nextId;
+      ProcessState::nextId += 1;
+    }
+
+    let thread: u64 = Sched::Scheduler::spawnUser(entry, argument, (*process).root, slot + 1, threadId, fsBase);
 
     if (thread != Sched::Thread::NO_THREAD) {
       (*process).threadCount += 1;
@@ -608,6 +625,21 @@ namespace Proc::Process {
     Sched::Mutex::unlock(tableLock());
 
     return thread;
+  }
+
+  /// Takes the next id of the process id counter for a thread that is
+  /// about to be added (`addThreadWith`), so it can be written to user
+  /// memory before the thread runs. An id taken for a thread that is never
+  /// added is lost, like any other.
+  function reserveThreadId(): u64 {
+    Sched::Mutex::lock(tableLock());
+
+    let id: u64 = ProcessState::nextId;
+
+    ProcessState::nextId += 1;
+    Sched::Mutex::unlock(tableLock());
+
+    return id;
   }
 
   /// `Proc::Memory::dropStaged` of `staged`, when there is one.
@@ -715,7 +747,7 @@ namespace Proc::Process {
   }
 
   /// Ends the whole running process with `status` (native `EXIT`, Linux
-  /// `exit` and `exit_group`) and never returns: the status is recorded
+  /// `exit_group`) and never returns: the status is recorded
   /// unless an earlier end set one, every other thread is interrupted and
   /// ends at its next `checkKill`, and the calling thread ends now.
   function exitCurrent(status: u64): never {
@@ -730,9 +762,9 @@ namespace Proc::Process {
     endCurrent(status, true);
   }
 
-  /// Ends only the calling thread. Its status becomes the process's when it
-  /// is the last thread and no end of the whole process set one first.
-  /// Never returns.
+  /// Ends only the calling thread (Linux `exit`). Its status becomes the
+  /// process's when it is the last thread and no end of the whole process
+  /// set one first. Never returns.
   function exitThread(status: u64): never {
     finishThread(status);
   }

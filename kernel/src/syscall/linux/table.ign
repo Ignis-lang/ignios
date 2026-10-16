@@ -12,8 +12,12 @@
 //! | 24       | `sched_yield` | `Operation::YIELD`   | returns 0                       |
 //! | 35       | `nanosleep`   | `Operation::SLEEP`   | rounded up to 10 ms ticks       |
 //! | 39       | `getpid`      | `Operation::GET_PID` | the process id                  |
-//! | 60       | `exit`        | `Operation::EXIT`    | status & 0xFF                   |
-//! | 231      | `exit_group`  | `Operation::EXIT`    | same as `exit`                  |
+//! | 56       | `clone`       | `Operation::CLONE`   | threads only (`linux/thread.ign`) |
+//! | 60       | `exit`        | `Operation::EXIT_THREAD` | ends the calling thread, status & 0xFF; the process when it is the last |
+//! | 158      | `arch_prctl`  | `Operation::ARCH_CONTROL` | `ARCH_SET_FS`, `ARCH_GET_FS`  |
+//! | 186      | `gettid`      | `Operation::GET_TID` | the thread id                   |
+//! | 218      | `set_tid_address` | `Operation::SET_TID_ADDRESS` | records the address, returns the tid |
+//! | 231      | `exit_group`  | `Operation::EXIT`    | ends every thread, status & 0xFF |
 //!
 //! Every other number maps to `Operation::NONE` and fails with `-ENOSYS` (-38).
 //! The numbers come from the Linux x86_64 syscall table,
@@ -61,6 +65,9 @@ namespace Syscall::Linux {
   /// `getpid`, number 39.
   const NUMBER_GETPID: u64 = 39;
 
+  /// `clone`, number 56.
+  const NUMBER_CLONE: u64 = 56;
+
   /// `exit`, number 60.
   const NUMBER_EXIT: u64 = 60;
 
@@ -72,6 +79,15 @@ namespace Syscall::Linux {
 
   /// `chdir`, number 80.
   const NUMBER_CHDIR: u64 = 80;
+
+  /// `arch_prctl`, number 158.
+  const NUMBER_ARCH_PRCTL: u64 = 158;
+
+  /// `gettid`, number 186.
+  const NUMBER_GETTID: u64 = 186;
+
+  /// `set_tid_address`, number 218.
+  const NUMBER_SET_TID_ADDRESS: u64 = 218;
 
   /// `reboot`, number 169.
   const NUMBER_REBOOT: u64 = 169;
@@ -117,7 +133,11 @@ namespace Syscall::Linux {
     *(table + NUMBER_SCHED_YIELD) = Operation::YIELD;
     *(table + NUMBER_NANOSLEEP) = Operation::SLEEP;
     *(table + NUMBER_GETPID) = Operation::GET_PID;
-    *(table + NUMBER_EXIT) = Operation::EXIT;
+    *(table + NUMBER_EXIT) = Operation::EXIT_THREAD;
+    *(table + NUMBER_CLONE) = Operation::CLONE;
+    *(table + NUMBER_ARCH_PRCTL) = Operation::ARCH_CONTROL;
+    *(table + NUMBER_GETTID) = Operation::GET_TID;
+    *(table + NUMBER_SET_TID_ADDRESS) = Operation::SET_TID_ADDRESS;
     *(table + NUMBER_EXIT_GROUP) = Operation::EXIT;
   }
 

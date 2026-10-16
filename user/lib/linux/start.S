@@ -18,7 +18,8 @@
  *
  *   u64 ignis_main(u64 argc, u64 *argv)    System V: rdi, rsi, result in rax
  *
- * and passes the result to exit (Linux number 60). ignis_main is the program's
+ * and passes the result to exit_group (Linux number 231), which ends every
+ * thread of the process; exit (60) would end only the calling thread. ignis_main is the program's
  * `main`, exported with @externName("ignis_main"). */
 
 .intel_syntax noprefix
@@ -32,9 +33,9 @@ _start:
     lea rsi, [rsp + 8]      /* argv */
     and rsp, -16            /* already aligned by the kernel; kept for safety */
     call ignis_main
-    mov rdi, rax            /* exit(status) */
-    mov eax, 60
+    mov rdi, rax            /* exit_group(status) */
+    mov eax, 231
     syscall
-    ud2                     /* exit does not return */
+    ud2                     /* exit_group does not return */
 
 .section .note.GNU-stack,"",@progbits

@@ -64,7 +64,11 @@
 //!
 //! Every switch also saves the outgoing thread's x87 and SSE registers and
 //! loads the incoming one's (`Arch::Fpu`), so a user program's vector and
-//! floating point registers are its own.
+//! floating point registers are its own. A switch into a thread with an
+//! address space of its own loads its FS base into IA32_FS_BASE; a switch
+//! into a kernel thread leaves the register as it is. A new thread is
+//! always switched in before it first runs, so its first entry to ring 3
+//! has its FS base too.
 //!
 //! ## Preemption
 //!
@@ -98,7 +102,7 @@ import _ from "./thread";
 record SchedulerState {
   /// The run queue: a ring buffer of slot numbers, shared by every
   /// processor.
-  static mut queue: u64[80];
+  static mut queue: u64[128];
 
   /// Index in `queue` of the next thread to run.
   static mut queueHead: u64;
@@ -272,6 +276,12 @@ namespace Sched::Scheduler {
   /// holding it: the reap of the last of them destroys it. Nothing is
   /// destroyed when the thread cannot be created.
   function spawnMember(entry: u64, argument: u64, root: u64, processPlusOne: u64): u64 {
+    return spawnUser(entry, argument, root, processPlusOne, 0, 0);
+  }
+
+  /// `spawnMember` for a user thread with the Linux thread id `tid` and the
+  /// FS base `fsBase`, both set before the thread can run anywhere.
+  function spawnUser(entry: u64, argument: u64, root: u64, processPlusOne: u64, tid: u64, fsBase: u64): u64 {
     Arch::Spin::lockIrq(runQueueLock());
 
     let slot: u64 = Sched::Thread::findFreeSlot();
@@ -282,6 +292,8 @@ namespace Sched::Scheduler {
     }
 
     (*Sched::Thread::slotPointer(slot)).process = processPlusOne;
+    (*Sched::Thread::slotPointer(slot)).tid = tid;
+    (*Sched::Thread::slotPointer(slot)).fsBase = fsBase;
     enqueue(slot);
     kickIdleProcessor();
 
@@ -701,6 +713,35 @@ namespace Sched::Scheduler {
     (*Sched::Thread::slotPointer(Arch::CpuLocal::currentSlot())).process = slotPlusOne;
   }
 
+  /// The Linux thread id of the running thread, 0 for a kernel thread.
+  function currentTid(): u64 {
+    return (*Sched::Thread::slotPointer(Arch::CpuLocal::currentSlot())).tid;
+  }
+
+  /// The FS base of the running thread.
+  function currentFsBase(): u64 {
+    return (*Sched::Thread::slotPointer(Arch::CpuLocal::currentSlot())).fsBase;
+  }
+
+  /// Makes `base` the FS base of the running thread, now and after every
+  /// switch into it. A preemption between the two writes loads the new
+  /// value from the table, so the order needs no lock.
+  function setCurrentFsBase(base: u64): void {
+    (*Sched::Thread::slotPointer(Arch::CpuLocal::currentSlot())).fsBase = base;
+    Arch::UserMode::setFsBase(base);
+  }
+
+  /// The clear-child-tid address of the running thread, 0 for none.
+  function currentClearChildTid(): u64 {
+    return (*Sched::Thread::slotPointer(Arch::CpuLocal::currentSlot())).clearChildTid;
+  }
+
+  /// Records `address` as the clear-child-tid address of the running
+  /// thread (`set_tid_address`, `CLONE_CHILD_CLEARTID`).
+  function setCurrentClearChildTid(address: u64): void {
+    (*Sched::Thread::slotPointer(Arch::CpuLocal::currentSlot())).clearChildTid = address;
+  }
+
   /// What `setProcess` recorded for the running thread.
   function currentProcess(): u64 {
     return (*Sched::Thread::slotPointer(Arch::CpuLocal::currentSlot())).process;
@@ -850,7 +891,8 @@ namespace Sched::Scheduler {
   }
 
   /// Loads what the thread in `slot` runs on: its page tables, and, when it
-  /// owns an address space, its kernel stack as the one ring 3 enters on.
+  /// owns an address space, its kernel stack as the one ring 3 enters on and
+  /// its FS base. A kernel thread leaves FS as it is.
   function activateSpaceOf(slot: u64): void {
     let thread: *mut Sched::Thread::Control = Sched::Thread::slotPointer(slot);
     let mut root: u64 = (*thread).root;
@@ -859,6 +901,7 @@ namespace Sched::Scheduler {
       root = Mm::Vmm::rootTable();
     } else {
       Arch::UserMode::setKernelStack((*thread).stackBase + Sched::Thread::STACK_SPAN);
+      Arch::UserMode::setFsBase((*thread).fsBase);
     }
 
     if (Arch::Cpu::readCr3() != root) {

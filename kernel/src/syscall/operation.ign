@@ -91,4 +91,19 @@ namespace Syscall::Operation {
 
   /// End another process.
   const KILL: u8 = 24;
+
+  /// End the calling thread only.
+  const EXIT_THREAD: u8 = 25;
+
+  /// Make a thread of the calling process.
+  const CLONE: u8 = 26;
+
+  /// Return the thread id.
+  const GET_TID: u8 = 27;
+
+  /// Record the clear-child-tid address.
+  const SET_TID_ADDRESS: u8 = 28;
+
+  /// Set or read the FS base.
+  const ARCH_CONTROL: u8 = 29;
 }

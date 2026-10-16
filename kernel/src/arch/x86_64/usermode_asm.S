@@ -170,6 +170,7 @@ ignis_syscall_entry:
     call ignis_syscall_dispatch
     cli
 
+ignis_syscall_leave:
     /* Reload everything from the frame, so the result the dispatcher stored
      * in the rax slot becomes the return value. */
     pop rax
@@ -219,6 +220,20 @@ ignis_syscall_entry:
     and rsp, -16
     call ignis_syscall_bad_return
     ud2
+
+/* void ignis_resume_user(InterruptFrame *frame)
+ *
+ * The way out of a system call for a thread that did not make it: a clone
+ * child resumes in ring 3 with the registers of the frame at rdi, a copy of
+ * its parent's system call frame on its own kernel stack. Interrupts go off,
+ * the frame becomes the stack, and the system call exit path above pops it,
+ * checks the return address and returns by SYSRETQ. Whatever lies below
+ * the frame on the kernel stack is abandoned. */
+.global ignis_resume_user
+ignis_resume_user:
+    cli
+    mov rsp, rdi
+    jmp ignis_syscall_leave
 
 /* u64 ignis_syscall_entry_address(void): the value for IA32_LSTAR. */
 .global ignis_syscall_entry_address

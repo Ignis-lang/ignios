@@ -121,8 +121,29 @@ export namespace Sys {
   /// Linux system call number 39.
   const GETPID: u64 = 39;
 
-  /// Linux system call number 60.
+  /// Linux system call number 60: ends the calling thread only.
   const EXIT: u64 = 60;
+
+  /// Linux system call number 231: ends every thread of the process.
+  const EXIT_GROUP: u64 = 231;
+
+  /// Linux system call number 56.
+  const CLONE: u64 = 56;
+
+  /// Linux system call number 158.
+  const ARCH_PRCTL: u64 = 158;
+
+  /// Linux system call number 186.
+  const GETTID: u64 = 186;
+
+  /// Linux system call number 218.
+  const SET_TID_ADDRESS: u64 = 218;
+
+  /// `arch_prctl` code: set the FS base.
+  const ARCH_SET_FS: u64 = 0x1002;
+
+  /// `arch_prctl` code: read the FS base.
+  const ARCH_GET_FS: u64 = 0x1003;
 
   /// File descriptor 0, the console, which reads as empty.
   const STDIN: u64 = 0;
@@ -293,9 +314,10 @@ export namespace Sys {
     return call3(WRITE, descriptor, @integerFromPointer(buffer), count);
   }
 
-  /// Ends the process with the low 8 bits of `status`.
+  /// Ends the process, every thread of it, with the low 8 bits of `status`
+  /// (`exit_group`).
   function exit(status: u64): never {
-    call1(EXIT, status);
+    call1(EXIT_GROUP, status);
 
     while (true) {
     }
@@ -304,6 +326,29 @@ export namespace Sys {
   /// The process id of the caller (`getpid`).
   function getPid(): i64 {
     return call0(GETPID);
+  }
+
+  /// The thread id of the caller (`gettid`); the process id in the first
+  /// thread.
+  function getTid(): i64 {
+    return call0(GETTID);
+  }
+
+  /// Records `address` as the word the kernel clears when the calling
+  /// thread ends (`set_tid_address`). Returns the thread id.
+  function setTidAddress(address: u64): i64 {
+    return call1(SET_TID_ADDRESS, address);
+  }
+
+  /// Sets the calling thread's FS base (`arch_prctl(ARCH_SET_FS)`).
+  function setFsBase(base: u64): i64 {
+    return call2(ARCH_PRCTL, ARCH_SET_FS, base);
+  }
+
+  /// Reads the calling thread's FS base into `*base`
+  /// (`arch_prctl(ARCH_GET_FS)`).
+  function getFsBase(base: *mut u64): i64 {
+    return call2(ARCH_PRCTL, ARCH_GET_FS, @integerFromPointer(base));
   }
 
   /// Offers the processor to another thread. Returns 0.

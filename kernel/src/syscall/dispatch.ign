@@ -61,6 +61,7 @@ import _ from "./linux/memory";
 import _ from "./linux/nanosleep";
 import _ from "./linux/reboot";
 import _ from "./linux/table";
+import _ from "./linux/thread";
 import _ from "./native/calls";
 import _ from "./native/status";
 import _ from "./native/table";
@@ -105,6 +106,10 @@ namespace Syscall {
       Proc::Process::exitCurrent(first & 0xFF);
     }
 
+    if (operation == Operation::EXIT_THREAD) {
+      Proc::Process::exitThread(first & 0xFF);
+    }
+
     if (operation == Operation::WRITE) {
       (*frame).rax = Linux::write(first, second, third);
     } else if (operation == Operation::READ) {
@@ -137,6 +142,14 @@ namespace Syscall {
       (*frame).rax = Linux::currentDirectory(first, second);
     } else if (operation == Operation::KILL) {
       (*frame).rax = Linux::kill(first, second);
+    } else if (operation == Operation::CLONE) {
+      (*frame).rax = Linux::clone(first, second, third, fourth, fifth, frame as *Arch::InterruptFrame);
+    } else if (operation == Operation::GET_TID) {
+      (*frame).rax = Linux::getTid();
+    } else if (operation == Operation::SET_TID_ADDRESS) {
+      (*frame).rax = Linux::setTidAddress(first);
+    } else if (operation == Operation::ARCH_CONTROL) {
+      (*frame).rax = Linux::archPrctl(first, second);
     } else if (operation == Operation::GET_PID) {
       (*frame).rax = Proc::Process::currentId();
     } else if (operation == Operation::YIELD) {

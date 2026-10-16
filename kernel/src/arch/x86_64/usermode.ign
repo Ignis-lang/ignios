@@ -62,12 +62,18 @@
 import _ from "./cpu";
 import _ from "./cpu_local";
 import _ from "./gdt";
+import _ from "./interrupt_frame";
 
 /// Functions implemented in `usermode_asm.S`.
 extern UserModeAsm {
   /// Builds an `iretq` frame and drops to ring 3 at `rip` with stack `rsp`.
   /// Never returns.
   function ignis_enter_user(rip: u64, rsp: u64): void;
+
+  /// Reloads the registers from the system call frame at `frame`, on the
+  /// running thread's kernel stack, and returns to ring 3 the way a system
+  /// call does (`SYSRETQ`). Never returns.
+  function ignis_resume_user(frame: *Arch::InterruptFrame): void;
 
   /// Stores `top` in the slot the `SYSCALL` entry stub loads its stack from.
   function ignis_set_syscall_kernel_stack(top: u64): void;
@@ -89,6 +95,10 @@ namespace Arch::UserMode {
 
   /// MSR number of IA32_FMASK: the RFLAGS bits `SYSCALL` clears.
   const FMASK_MSR: u32 = 0xC0000084;
+
+  /// MSR number of IA32_FS_BASE: the base `%fs:` addresses add, the
+  /// thread-local storage of a user thread.
+  const FS_BASE_MSR: u32 = 0xC0000100;
 
   /// IA32_EFER bit 0 (SCE): `SYSCALL` and `SYSRET` are valid instructions.
   const EFER_SYSTEM_CALL_ENABLE: u64 = 1;
@@ -149,6 +159,27 @@ namespace Arch::UserMode {
   function setKernelStack(top: u64): void {
     Arch::Gdt::setKernelStack(top);
     UserModeAsm::ignis_set_syscall_kernel_stack(top);
+  }
+
+  /// Loads `base` into IA32_FS_BASE. The scheduler does it on every switch
+  /// into a user thread; the value must be canonical.
+  function setFsBase(base: u64): void {
+    Arch::Cpu::writeMsr(FS_BASE_MSR, base);
+  }
+
+  /// IA32_FS_BASE of the running processor.
+  function fsBase(): u64 {
+    return Arch::Cpu::readMsr(FS_BASE_MSR);
+  }
+
+  /// Returns to ring 3 with every register from the system call frame
+  /// `frame`, which lies on the running thread's kernel stack below its
+  /// top, as if that system call had just ended: a `clone` child starts
+  /// so. Never returns.
+  function resume(frame: *Arch::InterruptFrame): never {
+    UserModeAsm::ignis_resume_user(frame);
+
+    @panic("usermode: ignis_resume_user returned");
   }
 
   /// Drops to ring 3 at `rip` with the stack pointer `rsp`, interrupts on and

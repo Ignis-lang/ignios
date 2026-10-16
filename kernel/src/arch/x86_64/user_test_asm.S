@@ -30,7 +30,9 @@
  *   12   divide by zero        killed, SIGFPE (136)
  *   13   fpu                   exit status 0, run as two processes at once
  *   14   nap                   exit status 5 after sleeping 200 ms
- *   15   alignment check spin  exit status 0, timer ticks arrive with AC = 1 */
+ *   15   alignment check spin  exit status 0, timer ticks arrive with AC = 1
+ *   16   clone                 exit status 0; the child thread exits with 60
+ *   17   clone exit_group      exit status 77, from the child's exit_group */
 
 .intel_syntax noprefix
 
@@ -525,6 +527,356 @@ user_test_alignment_spin_lost:
     ud2
 user_test_alignment_spin_end:
 
+/* Index 16: a thread through clone, checked from both sides. Data lives in
+ * the lower of the two stack pages mapped at start (CLONE_BASE):
+ *
+ *   +0x00  the parent's TLS block, whose first word is its own address
+ *   +0x40  the child's TLS block, the same way
+ *   +0x80  parent_tid       +0x88  child_tid       +0x90  child result
+ *   +0xA0  ARCH_GET_FS out  +0xA8  set_tid_address target
+ *   +0xB0  the child tid the parent got            +0xB8  the child's GET_FS
+ *   +0x800 the child's stack top
+ *
+ * The parent checks arch_prctl and the refused clone flag sets, then clones
+ * with CLONE_SETTLS, CLONE_PARENT_SETTID, CLONE_CHILD_SETTID and
+ * CLONE_CHILD_CLEARTID and both threads sleep 10 ms twenty times, reading
+ * %fs:0 after each sleep, so each one resumes on whichever processor is
+ * free and must find its own FS base there. The child checks RAX, RSP,
+ * the callee-saved registers, FS, gettid and the tid words, stores 1 (or the
+ * number of the failed check) at +0x90 and ends with exit(99), which ends
+ * only the child. The parent then sleeps 300 ms, while the kernel test sees
+ * one thread left, and ends with exit_group(0). Any other status is the
+ * number of the failed check. */
+.equ CLONE_BASE, 0x7FFFFFFFD000
+.equ CLONE_THREAD_SET, 0x50F00
+.equ CLONE_ALL_OPTIONS, 0x1380000
+
+.macro CLONE_EXIT code
+    mov edi, \code
+    mov eax, 231
+    syscall
+.endm
+
+/* nanosleep 10 ms with a timespec on the stack; keeps rbx, rbp, r12-r15. */
+.macro CLONE_NAP
+    sub rsp, 16
+    mov qword ptr [rsp], 0
+    mov qword ptr [rsp + 8], 10000000
+    mov rdi, rsp
+    xor esi, esi
+    mov eax, 35
+    syscall
+    add rsp, 16
+.endm
+
+user_test_clone_start:
+    mov rdx, CLONE_BASE
+    mov [rdx], rdx
+    lea rax, [rdx + 0x40]
+    mov [rdx + 0x40], rax
+    xor eax, eax
+    mov [rdx + 0x80], rax
+    mov [rdx + 0x88], rax
+    mov [rdx + 0x90], rax
+
+    /* arch_prctl(ARCH_SET_FS, CLONE_BASE) and %fs:0 */
+    mov eax, 158
+    mov edi, 0x1002
+    mov rsi, CLONE_BASE
+    syscall
+    test rax, rax
+    jnz 10f
+    mov rax, fs:[0]
+    mov rdx, CLONE_BASE
+    cmp rax, rdx
+    jne 11f
+
+    /* ARCH_GET_FS into +0xA0 */
+    mov eax, 158
+    mov edi, 0x1003
+    lea rsi, [rdx + 0xA0]
+    syscall
+    test rax, rax
+    jnz 12f
+    mov rdx, CLONE_BASE
+    cmp [rdx + 0xA0], rdx
+    jne 12f
+
+    /* a kernel address and one past the user half: -EPERM */
+    mov eax, 158
+    mov edi, 0x1002
+    mov rsi, 0xFFFF800000000000
+    syscall
+    cmp rax, -1
+    jne 13f
+    mov eax, 158
+    mov edi, 0x1002
+    mov rsi, 0x0000800000000000
+    syscall
+    cmp rax, -1
+    jne 14f
+
+    /* an unknown code: -EINVAL; GET_FS to a kernel address: -EFAULT */
+    mov eax, 158
+    mov edi, 0x1001
+    xor esi, esi
+    syscall
+    cmp rax, -22
+    jne 15f
+    mov eax, 158
+    mov edi, 0x1003
+    mov rsi, 0xFFFF800000000000
+    syscall
+    cmp rax, -14
+    jne 16f
+
+    /* the main thread: gettid == getpid */
+    mov eax, 186
+    syscall
+    mov rbx, rax
+    mov eax, 39
+    syscall
+    cmp rax, rbx
+    jne 17f
+
+    /* no CLONE_VM: -ENOSYS */
+    mov eax, 56
+    mov edi, CLONE_THREAD_SET & ~0x100
+    xor esi, esi
+    xor edx, edx
+    xor r10d, r10d
+    xor r8d, r8d
+    syscall
+    cmp rax, -38
+    jne 18f
+
+    /* CLONE_FILES missing: -EINVAL */
+    mov eax, 56
+    mov edi, CLONE_THREAD_SET & ~0x400
+    syscall
+    cmp rax, -22
+    jne 19f
+
+    /* an exit signal in the low byte: -EINVAL */
+    mov eax, 56
+    mov edi, CLONE_THREAD_SET | 17
+    syscall
+    cmp rax, -22
+    jne 20f
+
+    /* CLONE_PARENT_SETTID to a kernel address: -EFAULT */
+    mov eax, 56
+    mov edi, CLONE_THREAD_SET | 0x100000
+    mov rdx, 0xFFFF800000000000
+    syscall
+    cmp rax, -14
+    jne 21f
+
+    /* set_tid_address returns the tid */
+    mov eax, 218
+    mov rdi, CLONE_BASE + 0xA8
+    syscall
+    cmp rax, rbx
+    jne 22f
+
+    /* the real clone, with a pattern in every callee-saved register */
+    mov rbx, 0x1111111111111111
+    mov rbp, 0x2222222222222222
+    mov r12, 0x3333333333333333
+    mov r13, 0x4444444444444444
+    mov r14, 0x5555555555555555
+    mov r15, 0x6666666666666666
+    mov eax, 56
+    mov edi, CLONE_THREAD_SET | CLONE_ALL_OPTIONS
+    mov rsi, CLONE_BASE + 0x800
+    mov rdx, CLONE_BASE + 0x80
+    mov r10, CLONE_BASE + 0x88
+    mov r8, CLONE_BASE + 0x40
+    syscall
+    test rax, rax
+    jz user_test_clone_child
+    js 23f
+
+    /* the parent: the tid came back and is in parent_tid */
+    mov rdx, CLONE_BASE
+    mov [rdx + 0xB0], rax
+    cmp [rdx + 0x80], rax
+    jne 24f
+    mov rbx, rax
+    mov eax, 39
+    syscall
+    cmp rax, rbx
+    je 25f
+
+    /* sleep alongside the child, then until it reports */
+    mov r12d, 20
+1:
+    CLONE_NAP
+    mov rax, fs:[0]
+    mov rdx, CLONE_BASE
+    cmp rax, rdx
+    jne 26f
+    dec r12d
+    jnz 1b
+    mov r12d, 500
+2:
+    mov rdx, CLONE_BASE
+    mov rax, [rdx + 0x90]
+    test rax, rax
+    jnz 3f
+    CLONE_NAP
+    dec r12d
+    jnz 2b
+    CLONE_EXIT 27
+3:
+    cmp rax, 1
+    jne 4f
+
+    /* the child is gone: sleep 300 ms on one thread, then end the process */
+    sub rsp, 16
+    mov qword ptr [rsp], 0
+    mov qword ptr [rsp + 8], 300000000
+    mov rdi, rsp
+    xor esi, esi
+    mov eax, 35
+    syscall
+    add rsp, 16
+    CLONE_EXIT 0
+4:
+    mov edi, eax
+    mov eax, 231
+    syscall
+
+10: CLONE_EXIT 10
+11: CLONE_EXIT 11
+12: CLONE_EXIT 12
+13: CLONE_EXIT 13
+14: CLONE_EXIT 14
+15: CLONE_EXIT 15
+16: CLONE_EXIT 16
+17: CLONE_EXIT 17
+18: CLONE_EXIT 18
+19: CLONE_EXIT 19
+20: CLONE_EXIT 20
+21: CLONE_EXIT 21
+22: CLONE_EXIT 22
+23: CLONE_EXIT 23
+24: CLONE_EXIT 24
+25: CLONE_EXIT 25
+26: CLONE_EXIT 26
+
+user_test_clone_child:
+    mov ecx, 40
+    mov rax, CLONE_BASE + 0x800
+    cmp rsp, rax
+    jne 5f
+    mov ecx, 41
+    mov rax, 0x1111111111111111
+    cmp rbx, rax
+    jne 5f
+    mov rax, 0x2222222222222222
+    cmp rbp, rax
+    jne 5f
+    mov rax, 0x3333333333333333
+    cmp r12, rax
+    jne 5f
+    mov rax, 0x4444444444444444
+    cmp r13, rax
+    jne 5f
+    mov rax, 0x5555555555555555
+    cmp r14, rax
+    jne 5f
+    mov rax, 0x6666666666666666
+    cmp r15, rax
+    jne 5f
+
+    /* its own FS base, as the MSR and as ARCH_GET_FS */
+    mov ecx, 42
+    mov rax, fs:[0]
+    mov rdx, CLONE_BASE + 0x40
+    cmp rax, rdx
+    jne 5f
+    mov eax, 158
+    mov edi, 0x1003
+    mov rsi, CLONE_BASE + 0xB8
+    syscall
+    mov ecx, 43
+    test rax, rax
+    jnz 5f
+    mov rdx, CLONE_BASE
+    mov rax, [rdx + 0xB8]
+    lea rsi, [rdx + 0x40]
+    cmp rax, rsi
+    jne 5f
+
+    /* gettid: not getpid, and in both tid words */
+    mov eax, 186
+    syscall
+    mov rbx, rax
+    mov eax, 39
+    syscall
+    mov ecx, 44
+    cmp rax, rbx
+    je 5f
+    mov rdx, CLONE_BASE
+    mov ecx, 45
+    cmp [rdx + 0x88], rbx
+    jne 5f
+    mov ecx, 46
+    cmp [rdx + 0x80], rbx
+    jne 5f
+
+    mov r12d, 20
+6:
+    CLONE_NAP
+    mov ecx, 47
+    mov rax, fs:[0]
+    mov rdx, CLONE_BASE + 0x40
+    cmp rax, rdx
+    jne 5f
+    dec r12d
+    jnz 6b
+    mov ecx, 1
+5:
+    mov rdx, CLONE_BASE
+    mov [rdx + 0x90], rcx
+    /* exit(99): only this thread */
+    mov edi, 99
+    mov eax, 60
+    syscall
+    ud2
+user_test_clone_end:
+
+/* Index 17: clone with stack 0, so the child runs on the parent's RSP; the
+ * child checks that and ends the whole process with exit_group(77) while
+ * the parent yields forever. 78: the child's RSP was not the parent's; 79:
+ * clone failed. */
+user_test_clone_group_start:
+    mov r12, rsp
+    mov eax, 56
+    mov edi, CLONE_THREAD_SET
+    xor esi, esi
+    xor edx, edx
+    xor r10d, r10d
+    xor r8d, r8d
+    syscall
+    test rax, rax
+    jz 2f
+    js 3f
+1:
+    mov eax, 24
+    syscall
+    jmp 1b
+2:
+    cmp rsp, r12
+    jne 4f
+    CLONE_EXIT 77
+3:
+    CLONE_EXIT 79
+4:
+    CLONE_EXIT 78
+user_test_clone_group_end:
+
 ignis_user_test_table:
     .quad user_test_exit_start, user_test_exit_end
     .quad user_test_registers_start, user_test_registers_end
@@ -542,5 +894,7 @@ ignis_user_test_table:
     .quad user_test_fpu_start, user_test_fpu_end
     .quad user_test_nap_start, user_test_nap_end
     .quad user_test_alignment_spin_start, user_test_alignment_spin_end
+    .quad user_test_clone_start, user_test_clone_end
+    .quad user_test_clone_group_start, user_test_clone_group_end
 
 .section .note.GNU-stack,"",@progbits

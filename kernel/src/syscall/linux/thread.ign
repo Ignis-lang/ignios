@@ -1,0 +1,225 @@
+//!
+//! # Linux Threads
+//!
+//! `clone` for threads, `gettid`, `set_tid_address` and `arch_prctl`.
+//!
+//! ## clone
+//!
+//! `clone(flags, stack, parent_tid, child_tid, tls)`, number 56, in the
+//! Linux x86_64 argument order, makes a thread of the calling process and
+//! nothing else (C4 D1):
+//!
+//! | `flags`                                            | Result      |
+//! |----------------------------------------------------|-------------|
+//! | `THREAD_SET`, plus any of `OPTIONS`                | the child's tid |
+//! | without `CLONE_VM` (a fork)                        | `-ENOSYS`   |
+//! | any other combination, an exit signal included     | `-EINVAL`   |
+//! | `CLONE_SETTLS` with `tls` outside the user half    | `-EPERM`    |
+//! | a tid word that is not writable user memory        | `-EFAULT`, no thread |
+//! | no free thread slot, or the process is ending      | `-EAGAIN`   |
+//!
+//! The child resumes at the parent's RIP, after the `syscall`, with every
+//! register of the parent but RAX, which is 0, and RSP, which is `stack`
+//! (the parent's RSP when `stack` is 0). It gets a copy of the parent's x87
+//! and SSE state and the FS base `tls` with `CLONE_SETTLS`, the parent's
+//! otherwise. Its tid comes from the process id counter
+//! (`Proc::Process::reserveThreadId`) and is written, as a 32-bit word, to
+//! `parent_tid` with `CLONE_PARENT_SETTID` and to `child_tid` with
+//! `CLONE_CHILD_SETTID` before the child exists. `CLONE_CHILD_CLEARTID`
+//! records `child_tid` as the child's clear-child-tid address.
+//!
+//! ```text
+//!   parent: clone ─► Fpu::save, copy of the frame (rax 0, rsp stack) ─► block
+//!                ─► Proc::Process::addThreadWith(cloneMain, block, tid, fs)
+//!   child:  cloneMain(block) ─► Fpu::restore, frame to its own stack, free
+//!                ─► Arch::UserMode::resume ─► the system call exit path, SYSRETQ
+//! ```
+//!
+//! ## The others
+//!
+//! | No  | Call              | Result                                             |
+//! |-----|-------------------|----------------------------------------------------|
+//! | 186 | `gettid`          | the Linux thread id; the process id in the first thread |
+//! | 218 | `set_tid_address` | records the clear-child-tid address, returns the tid |
+//! | 158 | `arch_prctl`      | `ARCH_SET_FS` (0x1002), `ARCH_GET_FS` (0x1003); an FS base outside the user half `-EPERM`, a bad output pointer `-EFAULT`, another code `-EINVAL` |
+//!
+//! The clear-child-tid address is only recorded: the write of 0 and the
+//! futex wake at the thread's exit are C4 T3.
+
+import Arch from "@arch";
+import Lib from "@lib";
+import Mm from "@mm";
+import Proc from "@proc";
+import Sched from "@sched";
+import _ from "./errno";
+
+/// The thread calls.
+namespace Syscall::Linux {
+  /// `CLONE_VM`: share the address space.
+  const CLONE_VM: u64 = 0x100;
+
+  /// `CLONE_SETTLS`: the child's FS base is `tls`.
+  const CLONE_SETTLS: u64 = 0x80000;
+
+  /// `CLONE_PARENT_SETTID`: write the child's tid to `parent_tid`.
+  const CLONE_PARENT_SETTID: u64 = 0x100000;
+
+  /// `CLONE_CHILD_CLEARTID`: `child_tid` is the child's clear-child-tid
+  /// address.
+  const CLONE_CHILD_CLEARTID: u64 = 0x200000;
+
+  /// `CLONE_CHILD_SETTID`: write the child's tid to `child_tid`.
+  const CLONE_CHILD_SETTID: u64 = 0x1000000;
+
+  /// The flags every accepted `clone` has: `CLONE_VM`, `CLONE_FS`,
+  /// `CLONE_FILES`, `CLONE_SIGHAND`, `CLONE_THREAD` and `CLONE_SYSVSEM`.
+  const CLONE_THREAD_SET: u64 = 0x50F00;
+
+  /// The flags an accepted `clone` may add.
+  const CLONE_OPTIONS: u64 = CLONE_SETTLS | CLONE_PARENT_SETTID | CLONE_CHILD_CLEARTID | CLONE_CHILD_SETTID;
+
+  /// `arch_prctl` code: set the FS base.
+  const ARCH_SET_FS: u64 = 0x1002;
+
+  /// `arch_prctl` code: read the FS base.
+  const ARCH_GET_FS: u64 = 0x1003;
+
+  /// Operation not permitted (1).
+  const EPERM: i64 = 1;
+
+  /// Try again (11): no thread slot.
+  const EAGAIN: i64 = 11;
+
+  /// The first address past the user half. An FS base must lie below it,
+  /// which also makes it canonical.
+  const USER_HALF_END: u64 = 0x0000800000000000;
+
+  /// What `clone` hands its child, on the heap: the parent's x87 and SSE
+  /// state (`FPU`, 16-byte aligned), its system call frame as the child
+  /// resumes with it (`FRAME`), and the clear-child-tid address (`CLEAR`).
+  const BLOCK_FPU: u64 = 0;
+  const BLOCK_FRAME: u64 = 512;
+  const BLOCK_CLEAR: u64 = 688;
+  const BLOCK_BYTES: u64 = 704;
+
+  /// Words of an `Arch::InterruptFrame`.
+  const FRAME_WORDS: u64 = 22;
+
+  /// `clone(flags, stack, parent_tid, child_tid, tls)` from the system call
+  /// frame `frame` of the parent; see "clone".
+  function clone(flags: u64, stack: u64, parentTid: u64, childTid: u64, tls: u64, frame: *Arch::InterruptFrame): u64 {
+    if ((flags & CLONE_VM) == 0) {
+      return Linux::failure(Linux::ENOSYS);
+    }
+
+    if ((flags & CLONE_THREAD_SET) != CLONE_THREAD_SET || (flags & ~(CLONE_THREAD_SET | CLONE_OPTIONS)) != 0) {
+      return Linux::failure(Linux::EINVAL);
+    }
+
+    if ((flags & CLONE_SETTLS) != 0 && tls >= USER_HALF_END) {
+      return Linux::failure(EPERM);
+    }
+
+    if (FRAME_WORDS * 8 != @sizeOf<Arch::InterruptFrame>() || BLOCK_FRAME + FRAME_WORDS * 8 > BLOCK_CLEAR) {
+      @panic("clone: the hand-over block does not fit the interrupt frame");
+    }
+
+    let root: u64 = Proc::Process::currentRoot();
+    let tid: u64 = Proc::Process::reserveThreadId();
+    let word: u32 = tid as u32;
+
+    if ((flags & CLONE_PARENT_SETTID) != 0 && !Proc::User::copyToUser(root, parentTid, &word as *u8, 4)) {
+      return Linux::failure(Linux::EFAULT);
+    }
+
+    if ((flags & CLONE_CHILD_SETTID) != 0 && !Proc::User::copyToUser(root, childTid, &word as *u8, 4)) {
+      return Linux::failure(Linux::EFAULT);
+    }
+
+    let block: *mut u8 = Mm::Heap::allocate(BLOCK_BYTES, 16);
+
+    if (block == null) {
+      return Linux::failure(Linux::ENOMEM);
+    }
+
+    // The kernel never touches the x87 and SSE registers, so they still
+    // hold the parent's user state.
+    Arch::Fpu::save(block + BLOCK_FPU);
+    Lib::Mem::copy(block + BLOCK_FRAME, frame as *u8, FRAME_WORDS * 8);
+
+    let childFrame: *mut Arch::InterruptFrame = (block + BLOCK_FRAME) as *mut Arch::InterruptFrame;
+
+    (*childFrame).rax = 0;
+
+    if (stack != 0) {
+      (*childFrame).rsp = stack;
+    }
+
+    *((block + BLOCK_CLEAR) as *mut u64) = (flags & CLONE_CHILD_CLEARTID) != 0 ? childTid : 0;
+
+    let fsBase: u64 = (flags & CLONE_SETTLS) != 0 ? tls : Sched::Scheduler::currentFsBase();
+    let entry: u64 = Arch::ContextAsm::ignis_function_address(cloneMain);
+    let thread: u64 = Proc::Process::addThreadWith(Proc::Process::currentSlot(), entry, @integerFromPointer(block), tid, fsBase);
+
+    if (thread == Sched::Thread::NO_THREAD) {
+      Mm::Heap::free(block);
+      return Linux::failure(EAGAIN);
+    }
+
+    return tid;
+  }
+
+  /// The first function of a `clone` child, in its own kernel thread:
+  /// takes the parent's x87 and SSE state, the clear-child-tid address and
+  /// the frame from `block`, frees it, and resumes in ring 3 with that
+  /// frame. A process killed before the child ran ends it here.
+  function cloneMain(block: u64): void {
+    let mut words: u64[22];
+    let source: *mut u8 = @pointerFromInteger<*mut u8>(block);
+
+    Arch::Fpu::restore((source + BLOCK_FPU) as *u8);
+    Sched::Scheduler::setCurrentClearChildTid(*((source + BLOCK_CLEAR) as *u64));
+    Lib::Mem::copy(&mut words as *mut u8, (source + BLOCK_FRAME) as *u8, FRAME_WORDS * 8);
+    Mm::Heap::free(source);
+
+    Proc::Process::checkKill();
+
+    Arch::UserMode::resume(&words as *Arch::InterruptFrame);
+  }
+
+  /// `gettid()`.
+  function getTid(): u64 {
+    return Sched::Scheduler::currentTid();
+  }
+
+  /// `set_tid_address(address)`: records the clear-child-tid address.
+  function setTidAddress(address: u64): u64 {
+    Sched::Scheduler::setCurrentClearChildTid(address);
+
+    return Sched::Scheduler::currentTid();
+  }
+
+  /// `arch_prctl(code, address)`.
+  function archPrctl(code: u64, address: u64): u64 {
+    if (code == ARCH_SET_FS) {
+      if (address >= USER_HALF_END) {
+        return Linux::failure(EPERM);
+      }
+
+      Sched::Scheduler::setCurrentFsBase(address);
+      return 0;
+    }
+
+    if (code == ARCH_GET_FS) {
+      let value: u64 = Sched::Scheduler::currentFsBase();
+
+      if (!Proc::User::copyToUser(Proc::Process::currentRoot(), address, &value as *u8, 8)) {
+        return Linux::failure(Linux::EFAULT);
+      }
+
+      return 0;
+    }
+
+    return Linux::failure(Linux::EINVAL);
+  }
+}

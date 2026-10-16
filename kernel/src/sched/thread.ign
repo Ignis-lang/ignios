@@ -61,6 +61,26 @@
 //! CR3, so switching between them flushes nothing); since the mapping never
 //! changes, such a stale entry is harmless, and no TLB shootdown is needed.
 //!
+//! ## Memory Cost of the Table
+//!
+//! `MAX_THREADS` is 128 (C4 D12: 64 processes with a few threads each, plus
+//! the boot thread, eight idle threads and the kernel threads). Every slot
+//! but the boot thread's maps its stack at boot: 127 * 16 KiB = 2032 KiB of
+//! frames, in 127 * 20 KiB = 2540 KiB of virtual space from `STACK_REGION`.
+//! The x87 and SSE areas take 128 * 512 = 64 KiB, the run queue 1 KiB, and
+//! each slot that ever ran a thread keeps its 5 KiB scratch area on the heap.
+//!
+//! ## User Threads
+//!
+//! A thread of a user process also holds what Linux gives each thread: its
+//! thread id (`tid`, which the process id counter hands out, so it never
+//! equals another process's id; the first thread's is the process id), its
+//! FS base for thread-local storage (`fsBase`), loaded into IA32_FS_BASE by
+//! every switch into a thread with an address space of its own, and the
+//! clear-child-tid address (`clearChildTid`) of `set_tid_address` and
+//! `CLONE_CHILD_CLEARTID`. Kernel threads have tid 0 and leave FS alone: the
+//! kernel never addresses through FS.
+//!
 //! See concept doc 13.
 
 import Arch from "@arch";
@@ -71,7 +91,7 @@ import Mm from "@mm";
 /// and has to be an integer literal.
 record ThreadState {
   /// The thread table, indexed by slot.
-  static mut threads: Sched::Thread::Control[80];
+  static mut threads: Sched::Thread::Control[128];
 
   /// The id the next created thread gets.
   static mut nextId: u64;
@@ -86,7 +106,7 @@ record ThreadState {
 /// attributed field.
 record FpuAreaState {
   @aligned(16)
-  static mut areas: u8[40960];
+  static mut areas: u8[65536];
 }
 
 /// The thread table and the thread stacks.
@@ -151,17 +171,31 @@ namespace Sched::Thread {
 
     /// The processor the thread ran on last.
     public cpu: u64;
+
+    /// The Linux thread id of a user thread, from the process id counter;
+    /// 0 for a kernel thread. Set before the thread first runs.
+    public tid: u64;
+
+    /// The FS base of a user thread, loaded into IA32_FS_BASE by every
+    /// switch into it (`Sched::Scheduler::activateSpaceOf`).
+    public fsBase: u64;
+
+    /// The user address the thread's exit clears (`set_tid_address`,
+    /// `CLONE_CHILD_CLEARTID`), or 0. Only the thread itself reads or
+    /// changes it.
+    public clearChildTid: u64;
   }
 
   /// Bytes of every thread's scratch area.
   const SCRATCH_BYTES: u64 = 5120;
 
   /// Size of the thread table, the boot thread and the eight idle threads
-  /// included: 64 processes and a few kernel threads fit in the rest.
-  const MAX_THREADS: u64 = 80;
+  /// included: 64 processes, some with several threads, and a few kernel
+  /// threads fit in the rest (see "Memory Cost of the Table").
+  const MAX_THREADS: u64 = 128;
 
   /// Size of `FpuAreaState::areas` in bytes.
-  const FPU_AREA_BYTES: u64 = 40960;
+  const FPU_AREA_BYTES: u64 = 65536;
 
   /// Slot of the boot thread.
   const BOOT_SLOT: u64 = 0;
@@ -376,6 +410,9 @@ namespace Sched::Thread {
     (*thread).wakePending = 0;
     (*thread).interrupted = 0;
     (*thread).cpu = 0;
+    (*thread).tid = 0;
+    (*thread).fsBase = 0;
+    (*thread).clearChildTid = 0;
     (*thread).root = root;
     (*thread).savedRsp = Arch::Context::prepareStack(base + STACK_SPAN, entry, argument);
     resetFpuArea(slot);
