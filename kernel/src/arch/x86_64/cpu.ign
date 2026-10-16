@@ -191,4 +191,24 @@ namespace Arch::Cpu {
   function invalidatePage(address: u64): void {
     asm (address in rax) clobber(memory) { invlpg [{address}] }
   }
+
+  /// A full memory fence (`mfence`): every load and store before it is
+  /// globally visible before any load after it. x86 may otherwise let a
+  /// load pass an earlier store to another address.
+  function fence(): void {
+    asm () clobber(memory) { mfence }
+  }
+
+  /// Adds `value` to the word at `address` atomically (`lock xadd`) and
+  /// returns the word as it was before. A locked instruction is also a full
+  /// fence.
+  function atomicAdd(address: u64, value: u64): u64 {
+    let mut old: u64 = value;
+
+    asm (address in rdi, old inout rax) clobber(memory) {
+      lock xadd qword ptr [{address}], {old}
+    }
+
+    return old;
+  }
 }

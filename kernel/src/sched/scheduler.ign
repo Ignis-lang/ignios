@@ -136,7 +136,8 @@ record SchedulerState {
   /// queue lock.
   static mut idleMask: u64;
 
-  /// The local APIC id of processor n, for the reschedule IPI.
+  /// The local APIC id of processor n, for the reschedule and shootdown
+  /// IPIs.
   static mut lapicIds: u64[8];
 
   /// Reschedule IPIs sent.
@@ -912,9 +913,9 @@ namespace Sched::Scheduler {
       Arch::UserMode::setFsBase((*thread).fsBase);
     }
 
-    if (Arch::Cpu::readCr3() != root) {
-      Arch::Cpu::writeCr3(root);
-    }
+    // Recorded even when CR3 already holds it, so `Sched::Shootdown` sees
+    // what this processor runs.
+    Mm::Vmm::loadRoot(root);
   }
 
   /// Picks the next thread, which is the head of the run queue or the idle
@@ -1063,6 +1064,11 @@ namespace Sched::Scheduler {
   /// Records the local APIC id of processor `cpu`, for the reschedule IPI.
   function setProcessorLapic(cpu: u64, lapicId: u64): void {
     *(&mut SchedulerState::lapicIds as *mut u64 + cpu) = lapicId;
+  }
+
+  /// The local APIC id of processor `cpu`, for an IPI to it.
+  function lapicOf(cpu: u64): u64 {
+    return *(&mut SchedulerState::lapicIds as *mut u64 + cpu);
   }
 
   /// Reschedule IPIs sent.

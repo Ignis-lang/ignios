@@ -222,6 +222,7 @@ function kmain(): void {
   Smp::releaseProcessors();
   Tests::Smp::run();
   Tests::Threads::run();
+  Tests::Shootdown::run();
 
   Tests::User::run();
   Tests::CpuLocal::run();

@@ -29,8 +29,25 @@
 //! upper-half PML4 entry a table, so an address space copies those entries
 //! once and shares the kernel half for good (see `AddressSpace`).
 //!
-//! Only 4 KiB and 2 MiB pages exist. Kernel tables are never freed, and the
-//! code is not synchronized: the kernel has one processor.
+//! Only 4 KiB and 2 MiB pages exist. Kernel tables are never freed. Every
+//! page table edit, kernel or user, holds the page table spinlock.
+//!
+//! ## TLB
+//!
+//! An edit drops the old translation from this processor's TLB (`flush`,
+//! `invlpg`). Other processors are not told here: no kernel mapping is
+//! removed while they run, and a user entry removed in a space that another
+//! processor may have loaded is the business of `Sched::Shootdown`, which
+//! the callers in `Proc::Memory` run after the edit. For it, each processor
+//! records the root it loads (`loadRoot`, `loadedRootOf`) before writing
+//! CR3, with a fence in between.
+//!
+//! Removing a user page in two steps lets the caller free its frame only
+//! once every processor dropped the translation: `detachIn` clears the
+//! present bit and keeps the frame address in the entry, `forgetIn` later
+//! clears the entry and returns it. A detached entry is not present, so no
+//! processor caches it, and the caller holds the address space lock in
+//! between, so nothing maps the page again meanwhile.
 //!
 //! ## Virtual Address Split
 //!
@@ -131,6 +148,11 @@ record VmmState {
   /// Taken with `lockIrq` around every page table edit, kernel or user, rank
   /// `Lib::Rank::PAGE_TABLES`. Lookups do not take it.
   static mut lock: Arch::SpinLock;
+
+  /// The root processor n loaded last through `loadRoot`, 0 before its
+  /// first. Written by that processor only, read by any. The size equals
+  /// `Arch::CpuLocal::MAX_CPUS`.
+  static mut loadedRoots: u64[8];
 }
 
 /// Boundaries defined by `kernel/linker.ld`. A symbol declared here has an
@@ -293,7 +315,7 @@ namespace Mm::Vmm {
     mapDirectMap();
     populateKernelHalf();
 
-    Arch::Cpu::writeCr3(VmmState::root);
+    loadRoot(VmmState::root);
   }
 
   /// Gives every upper-half PML4 entry a page directory pointer table now, so
@@ -334,6 +356,33 @@ namespace Mm::Vmm {
   /// The physical address of the PML4 in use.
   function rootTable(): u64 {
     return VmmState::root;
+  }
+
+  /// Loads `root` into CR3 unless it is there already, after recording it
+  /// as this processor's loaded root. The fence orders the record before
+  /// the page walks that follow the load: a processor that clears a user
+  /// entry and then, after a fence of its own, reads the records either
+  /// sees `root` here or its edit is seen by those walks
+  /// (`Sched::Shootdown`). Interrupts are off or the thread cannot move
+  /// to another processor (the scheduler's switch).
+  function loadRoot(root: u64): void {
+    @writeVolatile<u64>(loadedRootSlot(Arch::CpuLocal::index()), root);
+    Arch::Cpu::fence();
+
+    if (Arch::Cpu::readCr3() != root) {
+      Arch::Cpu::writeCr3(root);
+    }
+  }
+
+  /// The root processor `cpu` loaded last through `loadRoot`, 0 before its
+  /// first or for a processor that never started.
+  function loadedRootOf(cpu: u64): u64 {
+    return @readVolatile<u64>(loadedRootSlot(cpu));
+  }
+
+  /// Entry `cpu` of `VmmState::loadedRoots`.
+  function loadedRootSlot(cpu: u64): *mut u64 {
+    return &mut VmmState::loadedRoots as *mut u64 + cpu;
   }
 
   /// Prints the page-table switch: `vmm: cr3 switched, cr3 ..., pml4 ...`.
@@ -464,6 +513,46 @@ namespace Mm::Vmm {
     return true;
   }
 
+  /// Clears the present bit of the 4 KiB page at `virtualAddress` in the
+  /// space `root`, keeping the rest of the entry, drops the local TLB entry
+  /// and returns the entry as it was. Returns 0, changing nothing, when no
+  /// 4 KiB page is present there. `forgetIn` finishes the removal.
+  function detachIn(root: u64, virtualAddress: u64): u64 {
+    Arch::Spin::lockIrq(tableLock());
+
+    let entry: *mut u64 = findSmallEntry(root, virtualAddress);
+    let mut old: u64 = 0;
+
+    if (entry != null && (*entry & PRESENT) != 0) {
+      old = *entry;
+      *entry = old & ~PRESENT;
+      flush(virtualAddress);
+    }
+
+    Arch::Spin::unlockIrq(tableLock());
+
+    return old;
+  }
+
+  /// Clears the entry `detachIn` left at `virtualAddress` in the space
+  /// `root` and returns it, present bit clear. Returns 0, changing nothing,
+  /// when the entry is empty or present.
+  function forgetIn(root: u64, virtualAddress: u64): u64 {
+    Arch::Spin::lockIrq(tableLock());
+
+    let entry: *mut u64 = findSmallEntry(root, virtualAddress);
+    let mut old: u64 = 0;
+
+    if (entry != null && *entry != 0 && (*entry & PRESENT) == 0) {
+      old = *entry;
+      *entry = 0;
+    }
+
+    Arch::Spin::unlockIrq(tableLock());
+
+    return old;
+  }
+
   /// The physical address `virtualAddress` maps to, offset included, or
   /// `NOT_MAPPED`.
   function translate(virtualAddress: u64): u64 {
@@ -549,9 +638,10 @@ namespace Mm::Vmm {
 
   /// Drops the TLB entry of the page containing `virtualAddress`. A mapping
   /// change is not visible to the processor until its old translation is gone
-  /// from the TLB (`invlpg`), on this processor only. No shootdown is sent:
-  /// no kernel mapping is removed while other processors run, and a user
-  /// space is loaded on one processor at a time (concept doc 27).
+  /// from the TLB (`invlpg`), on this processor only. Other processors are
+  /// the caller's business (see TLB in the module header): no kernel
+  /// mapping is removed while they run, and a removed user entry goes
+  /// through `Sched::Shootdown` (concept doc 27).
   function flush(virtualAddress: u64): void {
     Arch::Cpu::invalidatePage(virtualAddress);
   }

@@ -19,7 +19,7 @@
 //! | isolation (9 programs) | a fault or a forbidden instruction kills only that process, no frame leaks |
 //! | hello             | a real static ELF64 from the initramfs, argc and argv  |
 //! | files             | `/bin/fstest` checks every file system call and error from ring 3; nothing leaks |
-//! | memory            | `/bin/mmtest` checks `mmap`, `munmap` and `std::alloc`; four forbidden accesses to mappings are killed; a double free panics; nothing leaks |
+//! | memory            | `/bin/mmtest` checks `mmap`, `munmap` and `std::alloc`; four forbidden accesses to mappings are killed; a double free panics; nothing leaks; no TLB shootdown is sent (one thread) |
 //! | native            | `/bin/nativetest` checks every native call and status code; the loader refuses an IgniOS note of another version and one that runs past the file |
 //! | stress            | `/bin/stress` runs four processes on the file tree and memory at once; a timer tick lands inside a system call; nothing leaks |
 //! | clone             | a thread through `clone`: registers, stack, FS base on several processors, tid words, refused flags; `exit` ends the thread, `exit_group` the process |
@@ -290,6 +290,7 @@ namespace Tests::User {
     let freeBefore: u64 = Mm::Pmm::freeFrameCount();
     let reservedBefore: u64 = Mm::Pmm::reservedFrameCount();
     let cachedBefore: u64 = cachedPages("/etc/motd") + cachedPages("/bin/hello");
+    let shootdowns: u64 = Sched::Shootdown::sentCount();
     let status: u64 = Proc::Programs::runNamed("mmtest");
 
     if (status != 0) {
@@ -311,13 +312,19 @@ namespace Tests::User {
 
     removeFile("/mmexec");
 
+    // Every mmtest process has one thread: its munmap and copy on write
+    // flush the local TLB only (`Sched::Shootdown`, single-thread spaces).
+    if (Sched::Shootdown::sentCount() != shootdowns) {
+      @panic("user test: a single-thread process sent a TLB shootdown");
+    }
+
     let cachedNow: u64 = cachedPages("/etc/motd") + cachedPages("/bin/hello") - cachedBefore;
 
     if (Mm::Pmm::freeFrameCount() + cachedNow != freeBefore || Mm::Pmm::reservedFrameCount() != reservedBefore) {
       @panic("user test: mappings leaked frames or reservations");
     }
 
-    Drivers::Console::writeLine("user: mmtest passed, writing read-only, using unmapped, executing non-exec, touching PROT_NONE memory and overflowing the 8 MiB stack were killed, a double free was caught, no frame leaked");
+    Drivers::Console::writeLine("user: mmtest passed, writing read-only, using unmapped, executing non-exec, touching PROT_NONE memory and overflowing the 8 MiB stack were killed, a double free was caught, no frame leaked, no TLB shootdown was sent");
   }
 
   /// Runs `/bin/stress`: four processes work on the file tree and on memory

@@ -28,6 +28,7 @@
 //! | `Tests::CpuLocal`     | `cpu_local.ign`     | the GS bases are balanced after every way in and out of ring 3 |
 //! | `Tests::Smp`          | `smp.ign`           | reschedule IPIs; the lock stress on every processor        |
 //! | `Tests::Threads`      | `threads.ign`       | threads of one process: shared space lifetime, process end, concurrent faults |
+//! | `Tests::Shootdown`    | `shootdown.ign`     | a sibling on another processor sees `munmap` and copy on write: TLB shootdown |
 //!
 //! ## Dependencies
 //!
@@ -53,6 +54,7 @@ import _ from "./pmm";
 import _ from "./program_image";
 import _ from "./protection";
 import _ from "./scheduler";
+import _ from "./shootdown";
 import _ from "./smp";
 import _ from "./threads";
 import _ from "./timer";

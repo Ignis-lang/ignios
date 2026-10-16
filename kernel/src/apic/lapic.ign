@@ -104,6 +104,10 @@ namespace Apic::Lapic {
   /// The IPI that makes an idle processor look at the run queue.
   const RESCHEDULE_VECTOR: u8 = 50;
 
+  /// The IPI that makes a processor drop its TLB entries of user spaces
+  /// (`Sched::Shootdown`).
+  const SHOOTDOWN_VECTOR: u8 = 51;
+
   /// Offset `0x20`: the APIC id in bits 31-24.
   const ID_REGISTER: u64 = 0x20;
 

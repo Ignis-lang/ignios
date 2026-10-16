@@ -1,0 +1,217 @@
+//!
+//! # TLB Shootdown
+//!
+//! Makes every other processor drop its translations of a user address
+//! space after an entry of it was removed or replaced.
+//!
+//! ## Overview
+//!
+//! The threads of one process share its address space and may run on
+//! several processors at once, each with the space's translations in its
+//! TLB. `invlpg` drops an entry on the processor that runs it only. When
+//! `Proc::Memory` removes a present user page (`munmap`) or replaces one
+//! (copy on write), a sibling on another processor could keep reading, or
+//! writing, the old frame through its stale entry after the frame went back
+//! to the PMM or the page cache. So, after the edit and before the frame is
+//! freed, `flush` interrupts every other processor that has the space loaded
+//! and waits until each one has reloaded CR3, which drops every translation
+//! that is not global (user pages never are):
+//!
+//! ```text
+//!   sender (address space mutex held)        target processor
+//!   detach entries, local invlpg
+//!   fence; for each other cpu:
+//!     loaded root == root?  ticket := ++requested[cpu]
+//!       send SHOOTDOWN_VECTOR ──────────────►  Trap::dispatch, interrupts off
+//!   wait done[cpu] >= ticket                   r := requested[me]; fence
+//!     (serving its own requests meanwhile)     reload CR3
+//!                            ◄──────────────── done[me] := r
+//!   free the frames
+//! ```
+//!
+//! Each processor records the root it loads (`Mm::Vmm::loadRoot`) before
+//! writing CR3, with a fence between; the sender fences between its edit and
+//! reading the records. Either the sender sees the space loaded on a
+//! processor, or that processor's page walks after its CR3 load see the
+//! edit: no processor is missed. A processor that loaded another root since
+//! gets an interrupt it did not need, which costs a CR3 reload and nothing
+//! else.
+//!
+//! One `flush` covers a whole operation: `munmap` detaches every page of its
+//! range first, sends one shootdown, then frees them all; copy on write
+//! sends one per page it copies. Interrupts of one vector that arrive while
+//! one is pending merge, so the handler reads how many requests there are
+//! before it reloads (`requested`), and each sender waits for its own ticket.
+//!
+//! ## Single-thread spaces
+//!
+//! A space whose process has one thread is loaded on at most one processor:
+//! the one running that thread, since a switch loads the incoming thread's
+//! root (the kernel's for a kernel or idle thread) and records it. When the
+//! process changes its own memory that processor is the sender, so `flush`
+//! finds no target and sends nothing; the local `invlpg` is all it needs
+//! (C3). The counters below prove it in `Tests::User`.
+//!
+//! ## Deadlock
+//!
+//! The sender holds the address space mutex, maybe the VFS mutex, and no
+//! spinlock (`flush` panics otherwise). The handler takes no lock at all. A
+//! target with interrupts off holds a spinlock or is on a short scheduler
+//! path; spinlock holders never wait for a mutex or a shootdown, so it turns
+//! interrupts back on and takes the interrupt. Two senders that target each
+//! other do not wait on each other: each serves the requests aimed at its
+//! own processor from its wait loop, so it does not need interrupts on.
+//!
+//! See concept doc 27.
+
+import Apic from "@apic";
+import Arch from "@arch";
+import Mm from "@mm";
+import _ from "./scheduler";
+
+/// The shootdown requests and acknowledgements of every processor. The
+/// array sizes equal `Arch::CpuLocal::MAX_CPUS`.
+record ShootdownState {
+  /// Requests ever made to processor n, raised atomically by the senders.
+  static mut requested: u64[8];
+
+  /// The requests processor n has served: every one up to this number
+  /// came before a CR3 reload of it. Written by processor n only.
+  static mut done: u64[8];
+
+  /// Shootdown interrupts sent, one per target processor.
+  static mut sent: u64;
+
+  /// Targets whose acknowledgement a sender saw.
+  static mut acknowledged: u64;
+
+  /// CR3 reloads done for a shootdown, from the interrupt or from a
+  /// sender's wait loop.
+  static mut served: u64;
+}
+
+/// The shootdown API.
+namespace Sched::Shootdown {
+  /// Drops every TLB entry of `root` on every other processor that has it
+  /// loaded, and returns once each has. The caller removed or replaced
+  /// present user entries of `root` (local TLB entry dropped), holds no
+  /// spinlock, and frees the old frames only after this returns. Sends
+  /// nothing when no other processor has `root` loaded, as with a process
+  /// of one thread.
+  function flush(root: u64): void {
+    let mut tickets: u64[8];
+    let ticketBase: *mut u64 = &mut tickets as *mut u64;
+
+    // The edits before reading the records (see the module header).
+    Arch::Cpu::fence();
+
+    let saved: u64 = Arch::Cpu::saveAndDisableInterrupts();
+    let local: u64 = Arch::CpuLocal::index();
+    let mut targets: u64 = 0;
+    let mut cpu: u64 = 0;
+
+    while (cpu < Arch::CpuLocal::MAX_CPUS) {
+      *(ticketBase + cpu) = 0;
+
+      if (cpu != local && Mm::Vmm::loadedRootOf(cpu) == root) {
+        *(ticketBase + cpu) = Arch::Cpu::atomicAdd(@integerFromPointer(requestedSlot(cpu)), 1) + 1;
+        targets = targets | (1 << cpu);
+      }
+
+      cpu += 1;
+    }
+
+    if (targets != 0 && Arch::Spin::holdsAny()) {
+      @panic("shootdown: a spinlock is held");
+    }
+
+    cpu = 0;
+
+    // Interrupts stay off while sending: the interrupt command register is
+    // written in two steps, and the reschedule IPI uses it too.
+    while (cpu < Arch::CpuLocal::MAX_CPUS) {
+      if ((targets & (1 << cpu)) != 0) {
+        Apic::Lapic::sendIpi(Sched::Scheduler::lapicOf(cpu), Apic::Lapic::SHOOTDOWN_VECTOR);
+        Arch::Cpu::atomicAdd(@integerFromPointer(&mut ShootdownState::sent as *mut u64), 1);
+      }
+
+      cpu += 1;
+    }
+
+    Arch::Cpu::restoreInterrupts(saved);
+    cpu = 0;
+
+    while (cpu < Arch::CpuLocal::MAX_CPUS) {
+      if ((targets & (1 << cpu)) != 0) {
+        while (@readVolatile<u64>(doneSlot(cpu)) < *(ticketBase + cpu)) {
+          serveOwn();
+          Arch::Cpu::pause();
+        }
+
+        Arch::Cpu::atomicAdd(@integerFromPointer(&mut ShootdownState::acknowledged as *mut u64), 1);
+      }
+
+      cpu += 1;
+    }
+  }
+
+  /// The shootdown interrupt handler, with interrupts off. Takes no lock.
+  function onInterrupt(): void {
+    serve(Arch::CpuLocal::index());
+  }
+
+  /// Serves the requests made to the running processor, from a sender's
+  /// wait loop: a sender that is itself a target does not wait on the
+  /// interrupt, which may be held back while interrupts are off.
+  function serveOwn(): void {
+    let saved: u64 = Arch::Cpu::saveAndDisableInterrupts();
+    let me: u64 = Arch::CpuLocal::index();
+
+    if (@readVolatile<u64>(doneSlot(me)) < @readVolatile<u64>(requestedSlot(me))) {
+      serve(me);
+    }
+
+    Arch::Cpu::restoreInterrupts(saved);
+  }
+
+  /// Reloads CR3 on processor `me`, the running one, and marks every
+  /// request made before the reload served. Interrupts are off.
+  function serve(me: u64): void {
+    let requests: u64 = @readVolatile<u64>(requestedSlot(me));
+
+    Arch::Cpu::fence();
+    Arch::Cpu::writeCr3(Arch::Cpu::readCr3());
+    @writeVolatile<u64>(doneSlot(me), requests);
+    Arch::Cpu::atomicAdd(@integerFromPointer(&mut ShootdownState::served as *mut u64), 1);
+  }
+
+  /// True while a request made to processor `cpu` is not served yet.
+  function isPending(cpu: u64): boolean {
+    return @readVolatile<u64>(doneSlot(cpu)) < @readVolatile<u64>(requestedSlot(cpu));
+  }
+
+  /// Shootdown interrupts sent since boot.
+  function sentCount(): u64 {
+    return @readVolatile<u64>(&mut ShootdownState::sent as *mut u64);
+  }
+
+  /// Acknowledgements senders saw since boot.
+  function acknowledgedCount(): u64 {
+    return @readVolatile<u64>(&mut ShootdownState::acknowledged as *mut u64);
+  }
+
+  /// CR3 reloads done for a shootdown since boot.
+  function servedCount(): u64 {
+    return @readVolatile<u64>(&mut ShootdownState::served as *mut u64);
+  }
+
+  /// Entry `cpu` of `requested`.
+  function requestedSlot(cpu: u64): *mut u64 {
+    return &mut ShootdownState::requested as *mut u64 + cpu;
+  }
+
+  /// Entry `cpu` of `done`.
+  function doneSlot(cpu: u64): *mut u64 {
+    return &mut ShootdownState::done as *mut u64 + cpu;
+  }
+}

@@ -59,7 +59,8 @@
 //! thread in the slot reuses it. A processor may still hold a translation of
 //! a stack in its TLB after the thread moved away (kernel threads share one
 //! CR3, so switching between them flushes nothing); since the mapping never
-//! changes, such a stale entry is harmless, and no TLB shootdown is needed.
+//! changes, such a stale entry is harmless, and no TLB shootdown is needed
+//! (`Sched::Shootdown` is for user pages that are removed or replaced).
 //!
 //! ## Memory Cost of the Table
 //!

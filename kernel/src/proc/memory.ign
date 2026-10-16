@@ -56,9 +56,9 @@
 //! | shared file       | any          | any           | the cache frame, writable when the region is   |
 //!
 //! A write to a present read-only page of a writable private region (copy
-//! on write) copies the cache page, maps the copy writable in place of the
-//! cache frame, drops the reference on the cache frame and flushes the
-//! local TLB entry: a process has one thread. M4 always copies, even when
+//! on write) copies the cache page, takes the cache frame out of the page
+//! table, drops it from every TLB (see TLB), then drops the reference on it
+//! and maps the copy writable in its place. M4 always copies, even when
 //! the cache frame has one mapping. A `write` to the file changes the cache
 //! frame, so an untouched or read-only page sees it and a copied page does
 //! not, as on Linux. A shared region writes the cache frame itself, which
@@ -165,6 +165,29 @@
 //! covers a whole region removes it, one at an end shortens it, one in the
 //! middle splits it in two (which needs a free table entry, and holds the
 //! node once more). Pages outside every region are left alone.
+//!
+//! ## TLB
+//!
+//! The threads of a process may run on several processors at once, each
+//! with translations of the space in its TLB. A page `unmap` removes or copy
+//! on write replaces is taken out in three steps, all under the address
+//! space lock:
+//!
+//! ```text
+//!   detach   Mm::AddressSpace::detachPage   not present, local invlpg,
+//!                                           the frame stays in the entry
+//!   flush    Sched::Shootdown::flush        every other processor with the
+//!                                           space loaded reloads CR3
+//!   release  Mm::AddressSpace::releaseDetached   entry cleared, frame freed
+//!                                           (a cache frame loses a reference)
+//! ```
+//!
+//! `unmap` detaches every page of its range before one flush; copy on write
+//! flushes once for its page. A sibling that touches a detached page faults
+//! and waits for the lock in `resolve`, then finds no region (unmap) or the
+//! copy (copy on write). With one thread the flush sends nothing (see
+//! `Sched::Shootdown`). `teardown` removes no page: the space is destroyed
+//! after the last thread is gone, when no processor has it loaded.
 //!
 //! The functions take the process slot, the address space and ABI-neutral
 //! arguments; `Syscall::Linux::mmap` translates the Linux flags.
@@ -531,6 +554,12 @@ namespace Proc::Memory {
       }
     }
 
+    // Every page of the range leaves the page tables first, so one
+    // shootdown covers the whole range before any frame is freed.
+    if (detachCut(slot, root, address, end) > 0) {
+      Sched::Shootdown::flush(root);
+    }
+
     let mut index: u64 = 0;
 
     while (index < *capacityOf(slot)) {
@@ -559,6 +588,37 @@ namespace Proc::Memory {
     }
 
     return OK;
+  }
+
+  /// Detaches every present page of `[address, end)` that lies in a region
+  /// of `slot` with pages (`Mm::AddressSpace::detachPage`) and returns how
+  /// many. `releaseRange` frees them after the shootdown.
+  function detachCut(slot: u64, root: u64, address: u64, end: u64): u64 {
+    let mut detached: u64 = 0;
+    let mut index: u64 = 0;
+
+    while (index < *capacityOf(slot)) {
+      let region: *mut Proc::Region = regionAt(slot, index);
+      let regionStart: u64 = (*region).start;
+      let regionEnd: u64 = regionStart + (*region).length;
+
+      if (regionStart != 0 && regionStart < end && address < regionEnd && (*region).protection != 0) {
+        let mut page: u64 = address > regionStart ? address : regionStart;
+        let cutEnd: u64 = end < regionEnd ? end : regionEnd;
+
+        while (page < cutEnd) {
+          if (Mm::AddressSpace::detachPage(root, page) != 0) {
+            detached += 1;
+          }
+
+          page += PAGE_SIZE;
+        }
+      }
+
+      index += 1;
+    }
+
+    return detached;
   }
 
   /// Takes `[cutStart, cutEnd)` out of `region`: removes it, shortens it
@@ -945,12 +1005,13 @@ namespace Proc::Memory {
       Fs::Vfs::unlockIfTaken(taken);
     }
 
-    // Copy on write: the copy takes the place of the cache frame, whose
-    // reference goes back; `freePage` drops the local TLB entry. Another
-    // processor running a sibling thread may still hold it until the TLB
-    // shootdown exists (C4 T4).
+    // Copy on write: the copy takes the place of the cache frame. Every
+    // processor drops the old translation before the reference goes back,
+    // so no sibling keeps reading the cache frame (see TLB).
     if (present) {
-      Mm::AddressSpace::freePage(root, page);
+      Mm::AddressSpace::detachPage(root, page);
+      Sched::Shootdown::flush(root);
+      Mm::AddressSpace::releaseDetached(root, page);
     }
 
     Mm::AddressSpace::mapPrepared(root, page, frame, flags);
@@ -1024,17 +1085,18 @@ namespace Proc::Memory {
     return (*region).node == null || (entry & Mm::Vmm::WRITABLE) != 0 || !isBacked(region, within);
   }
 
-  /// Unmaps every present page of `[firstByte, endByte)` in `region`, dropping its
-  /// frame or its reference on a cache frame, and returns how many held a
-  /// private frame.
+  /// Clears every page of `[firstByte, endByte)` in `region` that
+  /// `detachCut` detached, dropping its frame or its reference on a cache
+  /// frame, and returns how many held a private frame. The shootdown is
+  /// done.
   function releaseRange(region: *mut Proc::Region, root: u64, firstByte: u64, endByte: u64): u64 {
     let mut page: u64 = firstByte;
     let mut privateFrames: u64 = 0;
 
     while (page < endByte) {
-      let entry: u64 = Mm::Vmm::leafEntryIn(root, page);
+      let entry: u64 = Mm::AddressSpace::releaseDetached(root, page);
 
-      if ((entry & Mm::Vmm::PRESENT) != 0 && Mm::AddressSpace::freePage(root, page) && isPrivateFrame(region, page - (*region).start, entry)) {
+      if (entry != 0 && isPrivateFrame(region, page - (*region).start, entry)) {
         privateFrames += 1;
       }
 

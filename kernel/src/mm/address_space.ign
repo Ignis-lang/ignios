@@ -100,7 +100,9 @@ namespace Mm::AddressSpace {
   }
 
   /// Frees every user page and page table of the space and its PML4. The
-  /// space must not be the one the processor is running in.
+  /// space must not be the one the processor is running in, nor loaded on
+  /// another: it is destroyed after the last thread of its process is gone,
+  /// so no TLB shootdown is needed.
   function destroy(root: u64): void {
     if (Arch::Cpu::readCr3() == root) {
       @panic("address space: destroying the active space");
@@ -122,9 +124,10 @@ namespace Mm::AddressSpace {
     Mm::Pmm::freeFrame(root);
   }
 
-  /// Loads the space into CR3.
+  /// Loads the space into CR3 and records it as this processor's loaded
+  /// root (`Mm::Vmm::loadRoot`).
   function activate(root: u64): void {
-    Arch::Cpu::writeCr3(root);
+    Mm::Vmm::loadRoot(root);
   }
 
   /// Maps the page at `virtualAddress` in the space to the frame `frame`
@@ -188,10 +191,12 @@ namespace Mm::AddressSpace {
     return frame;
   }
 
-  /// Unmaps the 4 KiB user page at `virtualAddress` and frees its frame.
-  /// Returns false and changes nothing when no 4 KiB user page is mapped
-  /// there. The address must be in the running space or a space that is not
-  /// running: the TLB entry is dropped only for the current one.
+  /// Unmaps the 4 KiB user page at `virtualAddress` and frees its frame at
+  /// once. Returns false and changes nothing when no 4 KiB user page is
+  /// mapped there. The TLB entry is dropped on this processor only, so the
+  /// space must be loaded on no other processor; a space the threads of a
+  /// process share uses `detachPage`, `Sched::Shootdown::flush` and
+  /// `releaseDetached` instead.
   function freePage(root: u64, virtualAddress: u64): boolean {
     if (virtualAddress >= USER_LIMIT) {
       return false;
@@ -210,6 +215,40 @@ namespace Mm::AddressSpace {
     Mm::Pmm::freeFrame(entry & Mm::Vmm::ADDRESS_MASK);
 
     return true;
+  }
+
+  /// First step of removing the 4 KiB user page at `virtualAddress`: the
+  /// page stops being present, on this processor's TLB too, and its frame
+  /// stays in the entry. Returns the old entry, or 0 when no 4 KiB user page
+  /// is present there. The caller holds the address space lock until
+  /// `releaseDetached`, and sends the shootdown in between.
+  function detachPage(root: u64, virtualAddress: u64): u64 {
+    if (virtualAddress >= USER_LIMIT) {
+      return 0;
+    }
+
+    if ((Mm::Vmm::leafEntryIn(root, virtualAddress) & Mm::Vmm::USER) == 0) {
+      return 0;
+    }
+
+    return Mm::Vmm::detachIn(root, virtualAddress);
+  }
+
+  /// Last step: clears the entry `detachPage` left at `virtualAddress`,
+  /// frees its frame (a cache frame loses one reference) and returns the
+  /// entry, or 0 when no page was detached there.
+  function releaseDetached(root: u64, virtualAddress: u64): u64 {
+    if (virtualAddress >= USER_LIMIT) {
+      return 0;
+    }
+
+    let entry: u64 = Mm::Vmm::forgetIn(root, virtualAddress);
+
+    if (entry != 0) {
+      Mm::Pmm::freeFrame(entry & Mm::Vmm::ADDRESS_MASK);
+    }
+
+    return entry;
   }
 
   /// True when the byte range lies entirely below `USER_LIMIT`.

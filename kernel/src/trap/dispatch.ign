@@ -16,6 +16,10 @@
 //!   │                                             Fs::Tty::keysArrived (wakes readers)
 //!   ├─ vector 0x30  local APIC timer ............ Time::Timer::handleTick, Apic EOI,
 //!   │                                             Sched::Scheduler::onTick (may switch threads)
+//!   ├─ vector 0x31  stop IPI .................... halt for good
+//!   ├─ vector 0x32  reschedule IPI .............. Apic EOI, Sched::Scheduler::onReschedule
+//!   ├─ vector 0x33  shootdown IPI ............... Sched::Shootdown::onInterrupt (CR3 reload,
+//!   │                                             no lock), Apic EOI
 //!   ├─ vectors 0x20-0x2F (the rest)  8259 ....... acknowledge or absorb a spurious one
 //!   ├─ page fault from ring 3 ................... Proc::User::resolveFault with interrupts
 //!   │                                             on: a missing page or copy on write, retry
@@ -125,6 +129,12 @@ namespace Trap {
 
     if (vector == Apic::Lapic::STOP_VECTOR as u64) {
       Arch::Cpu::haltForever();
+    }
+
+    if (vector == Apic::Lapic::SHOOTDOWN_VECTOR as u64) {
+      Sched::Shootdown::onInterrupt();
+      Apic::Lapic::endOfInterrupt();
+      return;
     }
 
     if (vector == Apic::Lapic::RESCHEDULE_VECTOR as u64) {

@@ -40,16 +40,17 @@
 //! | 0-31         | CPU exceptions (see `trap/exception.ign`)           |
 //! | 32-47        | the 8259 range `0x20-0x2F`, which includes the keyboard at `0x21` through the IOAPIC |
 //! | 48 (`0x30`)  | local APIC timer                                    |
+//! | 49-51        | the stop, reschedule and TLB shootdown IPIs         |
 //! | 255 (`0xFF`) | local APIC spurious interrupt                       |
 //!
-//! These 52 vectors (51 contiguous plus the spurious one) are the gates
+//! These 53 vectors (52 contiguous plus the spurious one) are the gates
 //! `initialize` fills, and the boot log prints `idt: 50 gates loaded`. See
 //! concept doc 04.
 
 import _ from "./gdt";
 
 /// Implemented in `interrupt_asm.S`: returns the entry address of the thunk
-/// for `vector`, which must be 0 to 48 or 255.
+/// for `vector`, which must be 0 to 51 or 255.
 extern IdtAsm {
   /// The entry address of the thunk for `vector`. Implemented in `interrupt_asm.S`.
   function ignis_interrupt_thunk(vector: u64): u64;
@@ -83,10 +84,10 @@ namespace Arch::Idt {
   const GATE_SIZE: u64 = 16;
 
   /// Vectors 0-31 are exceptions, 32-47 the remapped PIC lines and the IOAPIC
-  /// keyboard, 48 the local APIC timer, 49 and 50 the stop and reschedule
-  /// IPIs. Those and the local APIC spurious
+  /// keyboard, 48 the local APIC timer, 49, 50 and 51 the stop, reschedule
+  /// and shootdown IPIs. Those and the local APIC spurious
   /// vector are the only vectors that have a thunk.
-  const THUNK_COUNT: u64 = 51;
+  const THUNK_COUNT: u64 = 52;
 
   /// Vector 8, the double fault, the only gate that uses an IST stack.
   const DOUBLE_FAULT: u64 = 8;
@@ -105,7 +106,7 @@ namespace Arch::Idt {
     let selector: u64 = Arch::Gdt::kernelCode() as u64;
     let ist: u64 = Arch::Gdt::doubleFaultIst() as u64;
 
-    // Vectors 0 to 48 are contiguous. The double fault gate alone uses IST1.
+    // Vectors 0 to 51 are contiguous. The double fault gate alone uses IST1.
     let mut vector: u64 = 0;
 
     while (vector < THUNK_COUNT) {

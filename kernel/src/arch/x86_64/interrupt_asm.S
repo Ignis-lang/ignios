@@ -33,8 +33,8 @@
  * RFLAGS and with it the interrupted code's interrupt flag.
  *
  * Vectors that get a thunk: 0-31 (exceptions), 32-47 (8259 range, also the
- * IOAPIC keyboard at 33), 48 (APIC timer), 49 and 50 (the stop and
- * reschedule IPIs) and 255 (APIC spurious). Intel SDM
+ * IOAPIC keyboard at 33), 48 (APIC timer), 49, 50 and 51 (the stop,
+ * reschedule and shootdown IPIs) and 255 (APIC spurious). Intel SDM
  * Vol. 3A, "Interrupt and Exception Handling". */
 
 .intel_syntax noprefix
@@ -68,11 +68,13 @@ ignis_interrupt_thunk_\vector:
     THUNK \vector
 .endr
 
-/* The local APIC timer, then the two inter-processor interrupts: 49 stops
- * a processor, 50 asks an idle one to look at the run queue. */
+/* The local APIC timer, then the three inter-processor interrupts: 49 stops
+ * a processor, 50 asks an idle one to look at the run queue, 51 makes one
+ * drop its user TLB entries. */
     THUNK 48
     THUNK 49
     THUNK 50
+    THUNK 51
 
 /* The local APIC spurious interrupt vector. */
     THUNK 255
@@ -142,8 +144,8 @@ ignis_interrupt_common:
 2:
     iretq
 
-/* u64 ignis_interrupt_thunk(u64 vector): the entry address of a vector 0-50
- * (48 is the APIC timer, 49 and 50 the IPIs) or of vector 255, the local APIC spurious vector.
+/* u64 ignis_interrupt_thunk(u64 vector): the entry address of a vector 0-51
+ * (48 is the APIC timer, 49 to 51 the IPIs) or of vector 255, the local APIC spurious vector.
  * The vector comes in rdi and the address goes out in rax. Any other value
  * indexes past the table, so the caller (Arch::Idt::initialize) only passes valid
  * ones. */
@@ -160,7 +162,7 @@ ignis_interrupt_thunk:
 
 .section .rodata
 
-/* One 8-byte entry address per vector 0-50, indexed by vector. */
+/* One 8-byte entry address per vector 0-51, indexed by vector. */
 .balign 8
 ignis_interrupt_thunk_table:
 .irp vector, 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31
@@ -172,5 +174,6 @@ ignis_interrupt_thunk_table:
     .quad ignis_interrupt_thunk_48
     .quad ignis_interrupt_thunk_49
     .quad ignis_interrupt_thunk_50
+    .quad ignis_interrupt_thunk_51
 
 .section .note.GNU-stack,"",@progbits
