@@ -19,6 +19,7 @@
 //! | `Tests::AddressSpace` | `address_space.ign` | private user half, shared kernel half, no leaked frames    |
 //! | `Tests::Memory`       | `memory.ign`        | lazy regions: reservations, touches, refusals, release     |
 //! | `Tests::FileMapping`  | `file_mapping.ign`  | file regions: cache frames, private copy on write, shared writes, reservations |
+//! | `Tests::ProgramImage` | `program_image.ign` | ELF segments from the page cache: shared text, private data copies, BUSY files |
 //! | `Tests::Protection`   | `protection.ign`    | SMAP and SMEP stop ring 0 at user pages                    |
 //! | `Tests::Timer`        | `timer.ign`         | ticks arrive                                               |
 //! | `Tests::Context`      | `context.ign`       | the stack switch, the argument, alignment, registers       |
@@ -48,6 +49,7 @@ import _ from "./locks";
 import _ from "./memory";
 import _ from "./page_cache";
 import _ from "./pmm";
+import _ from "./program_image";
 import _ from "./protection";
 import _ from "./scheduler";
 import _ from "./smp";

@@ -1,0 +1,401 @@
+//!
+//! # Program Image Self-Test
+//!
+//! Checks that `Proc::Elf::load` makes the segments of a program file
+//! regions of its page cache, in two spaces of its own adopted into the
+//! free process slots 62 and 63, before any process runs. It loads
+//! `/bin/sh` twice, and twice a small ELF file `/pit` that the test writes:
+//! a text page and a data segment of two full pages, 16 bytes of a third
+//! and a bss page.
+//!
+//! | Check        | What it proves                                                          |
+//! |--------------|-------------------------------------------------------------------------|
+//! | lazy         | `load` maps no page: the entry page is unmapped until resolved          |
+//! | shared text  | two `sh` spaces map the same frame at the entry, the cache frame of the file |
+//! | bss          | the bss of `sh` reads zero                                              |
+//! | private data | a write to a data page copies only that page; the other space, the other data page and the file keep the cache frame and its bytes |
+//! | data tail    | the page holding the end of the data file bytes is private, zero-tailed; the bss page past it is zero |
+//! | busy         | a write, a truncate and a removal of a file an image region names are `BUSY`; a write works again after teardown |
+//! | release      | the free frames and the reservations return to their start, less the cache pages of `/bin/sh`, which stay |
+
+import Boot from "@boot";
+import Drivers from "@drivers";
+import Fs from "@fs";
+import Lib from "@lib";
+import Mm from "@mm";
+import Proc from "@proc";
+
+/// The checks.
+namespace Tests::ProgramImage {
+  /// The process slots the test uses, free while the boot self-tests run.
+  const SLOT_A: u64 = 62;
+  const SLOT_B: u64 = 63;
+
+  /// 4 KiB.
+  const PAGE: u64 = 4096;
+
+  /// The test program: where its segments start in the file and in memory.
+  const TEXT_OFFSET: u64 = 0x1000;
+  const TEXT_ADDRESS: u64 = 0x400000;
+  const DATA_OFFSET: u64 = 0x3000;
+  const DATA_ADDRESS: u64 = 0x402000;
+
+  /// The data segment: two full pages and 16 bytes from the file, four
+  /// pages in memory.
+  const DATA_FILE_BYTES: u64 = 0x2010;
+  const DATA_MEMORY_BYTES: u64 = 0x3800;
+
+  /// The size of `/pit`.
+  const FILE_SIZE: u64 = 0x5010;
+
+  /// The bytes of the test program.
+  const BYTE_TEXT: u8 = 0xC3;
+  const BYTE_D: u8 = 0x44;
+  const BYTE_E: u8 = 0x45;
+  const BYTE_F: u8 = 0x46;
+
+  /// The byte a private write stores.
+  const BYTE_PRIVATE: u8 = 0x50;
+
+  function run(): void {
+    // The region tables, the staging and the cache tables come from the
+    // heap; make it big enough first so it does not grow inside a count.
+    Mm::Heap::free(Mm::Heap::allocate(65536, 16));
+    Proc::Memory::reset(SLOT_A);
+    Proc::Memory::reset(SLOT_B);
+
+    let shell: *mut Fs::Node = lookupOrPanic("/bin/sh", 7);
+    let program: *mut Fs::Node = createProgram();
+    let shellCachedBefore: u64 = cachedPages(shell);
+    let freeBefore: u64 = Mm::Pmm::freeFrameCount();
+    let reservedBefore: u64 = Mm::Pmm::reservedFrameCount();
+
+    checkSharedText(shell);
+    checkPrivateData(program);
+
+    if (Fs::Vfs::remove(program) != Fs::Vfs::OK) {
+      @panic("program image self-test: the test program could not be removed after teardown");
+    }
+
+    let shellCached: u64 = cachedPages(shell) - shellCachedBefore;
+
+    if (Mm::Pmm::freeFrameCount() + shellCached != freeBefore || Mm::Pmm::reservedFrameCount() != reservedBefore) {
+      @panic("program image self-test: frames or reservations leaked");
+    }
+
+    Drivers::Console::writeLine("proc: program image self-test ok, two sh spaces share text frames, a private write copies one page");
+  }
+
+  /// Two spaces of `/bin/sh`: the entry page maps the same cache frame in
+  /// both, the bss reads zero, the file is busy while they hold it.
+  function checkSharedText(shell: *mut Fs::Node): void {
+    let rootA: u64 = createSpace();
+    let rootB: u64 = createSpace();
+    let entry: u64 = loadInto(shell, rootA, SLOT_A);
+
+    if (loadInto(shell, rootB, SLOT_B) != entry) {
+      @panic("program image self-test: two loads of sh disagree on the entry");
+    }
+
+    if (physical(rootA, entry) != Mm::AddressSpace::NOT_MAPPED) {
+      @panic("program image self-test: load mapped the entry page");
+    }
+
+    resolveOrPanic(SLOT_A, rootA, entry, Proc::Memory::EXECUTE);
+    resolveOrPanic(SLOT_B, rootB, entry, Proc::Memory::EXECUTE);
+
+    let region: *mut Proc::Region = Proc::Memory::regionContaining(SLOT_A, entry);
+    let entryPage: u64 = entry / PAGE * PAGE;
+    let cached: u64 = Fs::Vfs::cachedFrame(shell, ((*region).offset + entryPage - (*region).start) / PAGE);
+
+    if (cached == 0 || physical(rootA, entry) != cached || physical(rootB, entry) != cached || isWritable(rootA, entry)) {
+      @panic("program image self-test: two sh spaces do not share the cache frame of their text");
+    }
+
+    let bss: *mut Proc::Region = writableRegion(SLOT_A);
+
+    resolveOrPanic(SLOT_A, rootA, (*bss).start + (*bss).length - 1, Proc::Memory::READ);
+
+    if (byteAt(rootA, (*bss).start + (*bss).length - 1) != 0) {
+      @panic("program image self-test: the bss of sh does not read zero");
+    }
+
+    expectBusy(shell);
+    endSpace(SLOT_A, rootA);
+    endSpace(SLOT_B, rootB);
+
+    if ((*shell).images != 0 || (*shell).mappings != 0) {
+      @panic("program image self-test: teardown kept the counts on sh");
+    }
+  }
+
+  /// Two spaces of `/pit`: a private write to a data page copies only it,
+  /// the page holding the end of the data file bytes is zero-tailed, and a
+  /// write to the file works again once the spaces end.
+  function checkPrivateData(program: *mut Fs::Node): void {
+    let reserved: u64 = Mm::Pmm::reservedFrameCount();
+    let rootA: u64 = createSpace();
+    let rootB: u64 = createSpace();
+
+    loadInto(program, rootA, SLOT_A);
+    loadInto(program, rootB, SLOT_B);
+
+    // Every page of a writable segment is reserved; the text none.
+    if (Mm::Pmm::reservedFrameCount() != reserved + 8) {
+      @panic("program image self-test: the image did not reserve exactly its data pages");
+    }
+
+    resolveOrPanic(SLOT_A, rootA, TEXT_ADDRESS, Proc::Memory::EXECUTE);
+    resolveOrPanic(SLOT_B, rootB, TEXT_ADDRESS, Proc::Memory::EXECUTE);
+
+    if (physical(rootA, TEXT_ADDRESS) != Fs::Vfs::cachedFrame(program, 1) || physical(rootB, TEXT_ADDRESS) != Fs::Vfs::cachedFrame(program, 1)) {
+      @panic("program image self-test: the text of the test program is not the cache frame");
+    }
+
+    resolveOrPanic(SLOT_A, rootA, DATA_ADDRESS, Proc::Memory::READ);
+    resolveOrPanic(SLOT_A, rootA, DATA_ADDRESS + PAGE, Proc::Memory::READ);
+    resolveOrPanic(SLOT_B, rootB, DATA_ADDRESS, Proc::Memory::READ);
+
+    let cacheD: u64 = Fs::Vfs::cachedFrame(program, 3);
+    let cacheE: u64 = Fs::Vfs::cachedFrame(program, 4);
+
+    if (cacheD == 0 || physical(rootA, DATA_ADDRESS) != cacheD || physical(rootB, DATA_ADDRESS) != cacheD || physical(rootA, DATA_ADDRESS + PAGE) != cacheE || isWritable(rootA, DATA_ADDRESS)) {
+      @panic("program image self-test: a read of a data page did not map the cache frame read-only");
+    }
+
+    resolveOrPanic(SLOT_A, rootA, DATA_ADDRESS, Proc::Memory::WRITE);
+    storeByte(rootA, DATA_ADDRESS, BYTE_PRIVATE);
+
+    if (physical(rootA, DATA_ADDRESS) == cacheD || physical(rootB, DATA_ADDRESS) != cacheD || Fs::Vfs::cachedFrame(program, 3) != cacheD || physical(rootA, DATA_ADDRESS + PAGE) != cacheE) {
+      @panic("program image self-test: a private write did not copy exactly its page");
+    }
+
+    if (byteAt(rootA, DATA_ADDRESS + 1) != BYTE_D || byteAt(rootB, DATA_ADDRESS) != BYTE_D || fileByte(program, DATA_OFFSET) != BYTE_D || byteAt(rootA, DATA_ADDRESS + PAGE) != BYTE_E) {
+      @panic("program image self-test: a private write lost the file bytes or reached another space or the file");
+    }
+
+    // The third data page holds the last 16 file bytes, the fourth is bss.
+    resolveOrPanic(SLOT_A, rootA, DATA_ADDRESS + 2 * PAGE, Proc::Memory::READ);
+    resolveOrPanic(SLOT_A, rootA, DATA_ADDRESS + 3 * PAGE, Proc::Memory::READ);
+
+    if (physical(rootA, DATA_ADDRESS + 2 * PAGE) == Fs::Vfs::cachedFrame(program, 5) || byteAt(rootA, DATA_ADDRESS + 2 * PAGE + 15) != BYTE_F || byteAt(rootA, DATA_ADDRESS + 2 * PAGE + 16) != 0 || byteAt(rootA, DATA_ADDRESS + 3 * PAGE) != 0) {
+      @panic("program image self-test: the end of the data file bytes is not a private zero-tailed page");
+    }
+
+    expectBusy(program);
+    endSpace(SLOT_A, rootA);
+    endSpace(SLOT_B, rootB);
+
+    let mut byte: u8 = BYTE_TEXT;
+
+    if (Fs::Vfs::write(program, TEXT_OFFSET, &mut byte as *u8, 1) != Fs::Vfs::OK || Mm::Pmm::reservedFrameCount() != reserved) {
+      @panic("program image self-test: the program file stayed busy, or a reservation stayed, after teardown");
+    }
+  }
+
+  /// Panics unless a write, a truncate and a removal of `node` are `BUSY`.
+  function expectBusy(node: *mut Fs::Node): void {
+    let mut byte: u8 = 0;
+
+    if (Fs::Vfs::write(node, 0, &mut byte as *u8, 1) != Fs::Vfs::BUSY || Fs::Vfs::truncate(node, 0) != Fs::Vfs::BUSY || Fs::Vfs::remove(node) != Fs::Vfs::BUSY) {
+      @panic("program image self-test: a running program's file was written, truncated or removed");
+    }
+  }
+
+  /// Loads `node` into `root`, adopts its regions into `slot`, and returns
+  /// the entry point.
+  function loadInto(node: *mut Fs::Node, root: u64, slot: u64): u64 {
+    let mut loaded: Proc::LoadedImage = Proc::LoadedImage { entry: 0, segments: 0, pages: 0, abi: 0 };
+    let mut staged: Proc::StagedImage = Proc::StagedImage { table: 0, count: 0 };
+
+    if (Proc::Elf::load(node, root, &mut staged as *mut Proc::StagedImage, &mut loaded as *mut Proc::LoadedImage) != Proc::Elf::OK) {
+      @panic("program image self-test: a program did not load");
+    }
+
+    if (!Proc::Memory::adoptImage(slot, &mut staged as *mut Proc::StagedImage)) {
+      @panic("program image self-test: the image regions were not adopted");
+    }
+
+    Proc::Memory::discardStaged(&mut staged as *mut Proc::StagedImage);
+
+    return loaded.entry;
+  }
+
+  /// Ends the regions of `slot` and destroys `root`, as a process end does.
+  function endSpace(slot: u64, root: u64): void {
+    Proc::Memory::teardown(slot, root);
+    Proc::Memory::reset(slot);
+    Mm::AddressSpace::destroy(root);
+  }
+
+  /// A new address space.
+  function createSpace(): u64 {
+    let root: u64 = Mm::AddressSpace::create();
+
+    if (root == Mm::Pmm::NO_FRAME) {
+      @panic("program image self-test: no address space");
+    }
+
+    return root;
+  }
+
+  /// The writable region of `slot` (the data and bss of the image).
+  function writableRegion(slot: u64): *mut Proc::Region {
+    let mut index: u64 = 0;
+
+    while (index < Proc::Memory::regionCount(slot)) {
+      let region: *mut Proc::Region = Proc::Memory::regionAt(slot, index);
+
+      if ((*region).start != 0 && ((*region).protection & Proc::Memory::WRITE) != 0) {
+        return region;
+      }
+
+      index += 1;
+    }
+
+    @panic("program image self-test: the image has no writable region");
+  }
+
+  /// Creates `/pit`: an ELF header, two program headers, a text page of
+  /// `ret` at file page 1, the data `D`, `E` pages and 16 bytes of `F` from
+  /// file page 3.
+  function createProgram(): *mut Fs::Node {
+    let image: *mut u8 = Mm::Heap::allocate(FILE_SIZE, 16);
+
+    if (image == null) {
+      @panic("program image self-test: no heap for the test program");
+    }
+
+    Lib::Mem::fill(image, 0, FILE_SIZE);
+    Lib::Mem::fill(image + TEXT_OFFSET, BYTE_TEXT as i32, PAGE);
+    Lib::Mem::fill(image + DATA_OFFSET, BYTE_D as i32, PAGE);
+    Lib::Mem::fill(image + DATA_OFFSET + PAGE, BYTE_E as i32, PAGE);
+    Lib::Mem::fill(image + DATA_OFFSET + 2 * PAGE, BYTE_F as i32, DATA_FILE_BYTES - 2 * PAGE);
+
+    // e_ident, e_type ET_EXEC, e_machine x86-64, e_version, e_entry,
+    // e_phoff, e_ehsize, e_phentsize, e_phnum.
+    put(image, 0, 0x464C457F, 4);
+    put(image, 4, 0x010102, 3);
+    put(image, 16, 2, 2);
+    put(image, 18, 62, 2);
+    put(image, 20, 1, 4);
+    put(image, 24, TEXT_ADDRESS, 8);
+    put(image, 32, 64, 8);
+    put(image, 52, 64, 2);
+    put(image, 54, 56, 2);
+    put(image, 56, 2, 2);
+    putSegment(image, 64, 5, TEXT_OFFSET, TEXT_ADDRESS, PAGE, PAGE);
+    putSegment(image, 120, 6, DATA_OFFSET, DATA_ADDRESS, DATA_FILE_BYTES, DATA_MEMORY_BYTES);
+
+    let mut node: *mut Fs::Node = null;
+
+    if (Fs::Vfs::create(Fs::Vfs::root(), "pit" as *u8, 3, Fs::Vfs::FILE, Fs::Vfs::FILE_MODE, &mut node as *mut *mut Fs::Node) != Fs::Vfs::OK || Fs::Vfs::write(node, 0, image as *u8, FILE_SIZE) != Fs::Vfs::OK) {
+      @panic("program image self-test: cannot write the test program");
+    }
+
+    Mm::Heap::free(image);
+
+    return node;
+  }
+
+  /// A `PT_LOAD` program header at `at`.
+  function putSegment(image: *mut u8, at: u64, flags: u64, offset: u64, address: u64, fileBytes: u64, memoryBytes: u64): void {
+    put(image, at, 1, 4);
+    put(image, at + 4, flags, 4);
+    put(image, at + 8, offset, 8);
+    put(image, at + 16, address, 8);
+    put(image, at + 24, address, 8);
+    put(image, at + 32, fileBytes, 8);
+    put(image, at + 40, memoryBytes, 8);
+    put(image, at + 48, PAGE, 8);
+  }
+
+  /// Stores the low `bytes` bytes of `value` at `at`, little endian.
+  function put(image: *mut u8, at: u64, value: u64, bytes: u64): void {
+    let mut index: u64 = 0;
+
+    while (index < bytes) {
+      *(image + at + index) = ((value >> (index * 8)) & 0xFF) as u8;
+      index += 1;
+    }
+  }
+
+  /// The node at the absolute `path`.
+  function lookupOrPanic(path: str, length: u64): *mut Fs::Node {
+    let mut node: *mut Fs::Node = null;
+
+    if (Fs::Vfs::lookup(Fs::Vfs::root(), path as *u8, length, &mut node as *mut *mut Fs::Node) != Fs::Vfs::OK) {
+      @panic("program image self-test: a program file is missing");
+    }
+
+    return node;
+  }
+
+  /// The cache pages of `node` that are filled.
+  function cachedPages(node: *mut Fs::Node): u64 {
+    let mut count: u64 = 0;
+    let mut page: u64 = 0;
+
+    while (page < (*node).cachePages) {
+      if (Fs::Vfs::cachedFrame(node, page) != 0) {
+        count += 1;
+      }
+
+      page += 1;
+    }
+
+    return count;
+  }
+
+  /// The byte of the file at `offset`, through `read`.
+  function fileByte(node: *mut Fs::Node, offset: u64): u8 {
+    let mut byte: u8 = 0;
+    let mut copied: u64 = 0;
+
+    if (Fs::Vfs::read(node, offset, &mut byte as *mut u8, 1, &mut copied as *mut u64) != Fs::Vfs::OK || copied != 1) {
+      @panic("program image self-test: a read of the test program failed");
+    }
+
+    return byte;
+  }
+
+  /// The frame the page at `address` maps to, or `NOT_MAPPED`.
+  function physical(root: u64, address: u64): u64 {
+    let translated: u64 = Mm::AddressSpace::translateUser(root, address, false);
+
+    return translated == Mm::AddressSpace::NOT_MAPPED ? translated : translated / PAGE * PAGE;
+  }
+
+  /// True when the page at `address` is mapped writable.
+  function isWritable(root: u64, address: u64): boolean {
+    return Mm::AddressSpace::translateUser(root, address, true) != Mm::AddressSpace::NOT_MAPPED;
+  }
+
+  /// The byte at the user address `address`.
+  function byteAt(root: u64, address: u64): u8 {
+    let translated: u64 = Mm::AddressSpace::translateUser(root, address, false);
+
+    if (translated == Mm::AddressSpace::NOT_MAPPED) {
+      @panic("program image self-test: a resolved page is not mapped");
+    }
+
+    return *(Boot::Hhdm::toVirtual(translated) as *mut u8);
+  }
+
+  /// Stores a byte at the user address `address`, which must be mapped
+  /// writable.
+  function storeByte(root: u64, address: u64, value: u8): void {
+    let mut byte: u8 = value;
+
+    if (!Mm::AddressSpace::copyToUser(root, address, &mut byte as *u8, 1)) {
+      @panic("program image self-test: a store to a resolved page failed");
+    }
+  }
+
+  /// Resolves `access` at `address` in `slot` and panics when it is refused.
+  function resolveOrPanic(slot: u64, root: u64, address: u64, access: u64): void {
+    if (!Proc::Memory::resolve(slot, root, address, access)) {
+      @panic("program image self-test: an allowed access was refused");
+    }
+  }
+}

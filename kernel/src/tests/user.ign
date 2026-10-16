@@ -26,6 +26,11 @@
 //!
 //! `main.ign` calls `Tests::User::run` once, after the scheduler tests and before
 //! it enables the keyboard.
+//!
+//! A program's pages come from the page cache of its file, which keeps them
+//! until the file is removed. `run` fills the cache of every file in `/bin`
+//! first (`fillProgramCaches`), so the leak checks around each program
+//! compare counts that the first run of a program does not move.
 
 import Arch from "@arch";
 import Drivers from "@drivers";
@@ -126,6 +131,8 @@ namespace Tests::User {
 
   /// Runs the programs one after the other and reports on the console.
   function run(): void {
+    fillProgramCaches();
+
     let exitStatus: u64 = runProgram(EXIT);
 
     if (exitStatus != 42) {
@@ -365,7 +372,7 @@ namespace Tests::User {
 
     // The file is copied under the VFS lock; the loader runs without it,
     // since starting a process takes the process table lock, which ranks
-    // below the VFS.
+    // below the VFS. Each broken copy is a file of its own, `/elfbad`.
     Fs::Vfs::lock();
 
     if (Fs::Vfs::lookup(Fs::Vfs::root(), "/bin/nativetest" as *u8, 15, &mut node as *mut *mut Fs::Node) != Fs::Vfs::OK) {
@@ -380,7 +387,12 @@ namespace Tests::User {
       @panic("user test: no heap for copies of /bin/nativetest");
     }
 
-    Lib::Mem::copy(original, (*node).data as *u8, size);
+    let mut copied: u64 = 0;
+
+    if (Fs::Vfs::read(node, 0, original, size, &mut copied as *mut u64) != Fs::Vfs::OK || copied != size) {
+      @panic("user test: cannot read /bin/nativetest");
+    }
+
     Fs::Vfs::unlock();
 
     let name: u64 = findNoteName(original as *u8, size);
@@ -426,11 +438,30 @@ namespace Tests::User {
     return 0;
   }
 
-  /// Panics unless `startElf` refuses the `size` bytes at `image`.
+  /// Panics unless `startElf` refuses a file `/elfbad` that holds the
+  /// `size` bytes at `image`, and unless the file can be removed after.
   function expectElfRefused(image: *mut u8, size: u64): void {
-    if (Proc::Process::startElf(image as *u8, size, "nativetest" as *u8, 11, 1, Fs::Vfs::root()) != Proc::Process::NO_PROCESS) {
+    let mut node: *mut Fs::Node = null;
+
+    Fs::Vfs::lock();
+
+    if (Fs::Vfs::create(Fs::Vfs::root(), "elfbad" as *u8, 6, Fs::Vfs::FILE, Fs::Vfs::FILE_MODE, &mut node as *mut *mut Fs::Node) != Fs::Vfs::OK || Fs::Vfs::write(node, 0, image as *u8, size) != Fs::Vfs::OK) {
+      @panic("user test: cannot write /elfbad");
+    }
+
+    Fs::Vfs::unlock();
+
+    if (Proc::Process::startElf(node, "nativetest" as *u8, 11, 1, Fs::Vfs::root()) != Proc::Process::NO_PROCESS) {
       @panic("user test: the loader started a program with a broken IgniOS note");
     }
+
+    Fs::Vfs::lock();
+
+    if (Fs::Vfs::remove(node) != Fs::Vfs::OK) {
+      @panic("user test: a refused program kept its file busy");
+    }
+
+    Fs::Vfs::unlock();
   }
 
   /// Removes the directory at the absolute `path` that a test program left,
@@ -471,6 +502,37 @@ namespace Tests::User {
 
     if (Fs::Vfs::lookup(Fs::Vfs::root(), path as *u8, length, &mut node as *mut *mut Fs::Node) != Fs::Vfs::OK || Fs::Vfs::remove(node) != Fs::Vfs::OK) {
       @panic("user test: a file a test program made is missing");
+    }
+
+    Fs::Vfs::unlock();
+  }
+
+  /// Fills every page of the page cache of every file in `/bin`.
+  function fillProgramCaches(): void {
+    let mut directory: *mut Fs::Node = null;
+
+    Fs::Vfs::lock();
+
+    if (Fs::Vfs::lookup(Fs::Vfs::root(), "/bin" as *u8, 4, &mut directory as *mut *mut Fs::Node) != Fs::Vfs::OK) {
+      @panic("user test: no /bin");
+    }
+
+    let mut index: u64 = 0;
+    let mut node: *mut Fs::Node = Fs::Vfs::child(directory, 0);
+
+    while (node != null) {
+      let mut page: u64 = 0;
+
+      while ((*node).kind == Fs::Vfs::FILE && page * Fs::Vfs::PAGE_SIZE < (*node).size) {
+        if (Fs::Vfs::pageFrame(node, page) == Mm::Pmm::NO_FRAME) {
+          @panic("user test: no frame for the page cache of a program");
+        }
+
+        page += 1;
+      }
+
+      index += 1;
+      node = Fs::Vfs::child(directory, index);
     }
 
     Fs::Vfs::unlock();

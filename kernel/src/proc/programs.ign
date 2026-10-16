@@ -14,8 +14,9 @@
 //!     ├─ split            words separated by spaces -> "cat\0/etc/motd\0", 2 arguments
 //!     ├─ program path     a word without `/` is looked up in /bin: /bin/cat
 //!     ├─ Fs::Vfs::lookup  must be a regular file
-//!     ├─ Proc::Process::startElf(file data, arguments)
-//!     │                   build the address space, load, write argc and argv, launch
+//!     ├─ Proc::Process::startElf(file node, arguments)
+//!     │                   build the address space, stage the image regions,
+//!     │                   write argc and argv, launch
 //!     └─ Proc::Process::wait   block until the process is gone, return its status
 //! ```
 //!
@@ -23,7 +24,9 @@
 //! it. The lookup runs under the VFS lock and pins the file; the start runs
 //! with the lock let go (starting a process takes the process table lock,
 //! which ranks below it), and the pin keeps the file from being removed or
-//! written while it is loaded.
+//! written while it is loaded. Once the process runs, its image regions
+//! keep the file from being removed, written or truncated (`BUSY`) until it
+//! ends: the program's text pages are the file's page cache frames.
 
 import Drivers from "@drivers";
 import Fs from "@fs";
@@ -163,7 +166,7 @@ namespace Proc::Programs {
     } else {
       // Loaded with the VFS lock let go, as `spawn` does: starting the
       // process takes the process table lock, which ranks below it.
-      id = Proc::Process::startElf((*node).data as *u8, (*node).size, strings, stringBytes, count, Fs::Vfs::root());
+      id = Proc::Process::startElf(node, strings, stringBytes, count, Fs::Vfs::root());
 
       Fs::Vfs::lock();
       Fs::Vfs::unpin(node);

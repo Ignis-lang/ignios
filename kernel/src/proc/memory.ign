@@ -13,9 +13,10 @@
 //! `map` builds its page tables and reserves the frames its private pages
 //! may need (`Mm::Pmm::reserve`), and a page gets its frame on first access,
 //! from a page fault or a system call copy (`resolve`). `unmap` frees the
-//! touched pages and gives back the reservation of the others. The ELF
-//! image and the stack are not regions: `unmap` never touches them. The
-//! stack grows on demand too: a fault anywhere in the 8 MiB below
+//! touched pages and gives back the reservation of the others. The
+//! segments of the ELF image are file regions too, flagged as image (see
+//! Program images); the stack is not a region: `unmap` never touches it.
+//! The stack grows on demand: a fault anywhere in the 8 MiB below
 //! `STACK_TOP` gets a zeroed page (`growStack`), and the unmapped gap below
 //! `STACK_BOTTOM` ends a runaway recursion with SIGSEGV.
 //!
@@ -63,6 +64,32 @@
 //! not, as on Linux. A shared region writes the cache frame itself, which
 //! `read` sees; past the end of the file it reaches zeroed cache pages that
 //! `read` never shows.
+//!
+//! ## Program images
+//!
+//! `Proc::Elf::load` makes each `PT_LOAD` segment a private file region of
+//! the executable, flagged `image`: text and rodata read-only, so their
+//! backed pages map the cache frames that every process of the program
+//! shares, data writable, so a write copies its page, and the bss inside
+//! the same region past its file bytes. An image region holds the node
+//! twice: `Fs::Vfs::addMapping` (no removal) and `Fs::Vfs::addImage` (no
+//! `write` or `truncate`, Linux `ETXTBSY`), both given back by `unmap` and
+//! `teardown`.
+//!
+//! The loader runs before the process has a slot, so it stages the regions
+//! (`stageImage`, a `Proc::StagedImage`) with their node counts,
+//! reservations and page tables taken; `Proc::Process::launch` adopts them
+//! into the slot after `reset` (`adoptImage`), and every failure before
+//! that gives them back once (`dropStaged`).
+//!
+//! ```text
+//!   Proc::Elf::load ── stageImage per PT_LOAD ──► StagedImage { regions }
+//!   Proc::Process::launch
+//!     ├─ reset(slot)
+//!     ├─ adoptImage(slot, staged)        regions copied into the slot
+//!     ├─ spawnIn ok:   discardStaged     the slot owns the counts now
+//!     └─ any failure:  reset, dropStaged  counts and reservations back
+//! ```
 //!
 //! ## Accounting
 //!
@@ -136,6 +163,24 @@ namespace Proc {
 
     /// 1 for a shared file region (`MAP_SHARED`), 0 otherwise.
     public shared: u64;
+
+    /// 1 for a segment of the program image, which also holds one
+    /// `Fs::Vfs::addImage` on `node`; 0 otherwise.
+    public image: u64;
+  }
+
+  /// The image regions `Proc::Elf::load` made for a process that has no
+  /// slot yet. Each region holds its node counts, its reservation and its
+  /// page tables; `Proc::Memory::adoptImage` hands them to a slot and
+  /// `Proc::Memory::dropStaged` gives them back.
+  @cLayout
+  record StagedImage {
+    /// The address of a heap array of `Proc::Memory::MAX_IMAGE_REGIONS`
+    /// regions, 0 before the first `stageImage`.
+    public table: u64;
+
+    /// The regions staged.
+    public count: u64;
   }
 }
 
@@ -162,6 +207,11 @@ record MemoryState {
 namespace Proc::Memory {
   /// The most regions a process can have.
   const MAX_REGIONS: u64 = 1024;
+
+  /// The most image regions a program can have: one per `PT_LOAD`, which
+  /// `Proc::Elf::MAX_PROGRAM_HEADERS` bounds. At most `INITIAL_REGIONS`, so
+  /// adopting them grows the table of a fresh slot once.
+  const MAX_IMAGE_REGIONS: u64 = 32;
 
   /// The regions a table starts with; it doubles when full.
   const INITIAL_REGIONS: u64 = 32;
@@ -294,6 +344,7 @@ namespace Proc::Memory {
     (*region).offset = offset;
     (*region).fileBytes = fileBytes;
     (*region).shared = shared ? 1 : 0;
+    (*region).image = 0;
 
     if (protection != 0) {
       let reserved: u64 = reservedPages(region, 0, rounded);
@@ -405,6 +456,11 @@ namespace Proc::Memory {
         let taken: boolean = Fs::Vfs::lockUnlessHeld();
 
         Fs::Vfs::addMapping((*tail).node);
+
+        if ((*tail).image != 0) {
+          Fs::Vfs::addImage((*tail).node);
+        }
+
         Fs::Vfs::unlockIfTaken(taken);
       }
     }
@@ -433,8 +489,168 @@ namespace Proc::Memory {
     let taken: boolean = Fs::Vfs::lockUnlessHeld();
 
     Fs::Vfs::removeMapping((*region).node);
+
+    if ((*region).image != 0) {
+      Fs::Vfs::removeImage((*region).node);
+    }
+
     Fs::Vfs::unlockIfTaken(taken);
     (*region).node = null;
+  }
+
+  /// Stages an image region of `length` bytes (a page multiple) at `start`
+  /// in `root` for the program file `node`: `fileBytes` bytes from the page
+  /// aligned file `offset`, then zeros, with `protection` (private). Takes
+  /// the reservation of the pages that may get a private frame, builds the
+  /// page tables and counts the region on the node; the VFS lock is held.
+  /// Returns `NO_MEMORY` when no frame, table or heap is left, and
+  /// `TOO_MANY` past `MAX_IMAGE_REGIONS`; nothing is taken then.
+  function stageImage(
+    staged: *mut Proc::StagedImage,
+    root: u64,
+    start: u64,
+    length: u64,
+    protection: u64,
+    node: *mut Fs::Node,
+    offset: u64,
+    fileBytes: u64
+  ): u64 {
+    if ((*staged).count >= MAX_IMAGE_REGIONS) {
+      return TOO_MANY;
+    }
+
+    if ((*staged).table == 0) {
+      let table: *mut u8 = Mm::Heap::allocate(MAX_IMAGE_REGIONS * @sizeOf<Proc::Region>(), 8);
+
+      if (table == null) {
+        return NO_MEMORY;
+      }
+
+      (*staged).table = @integerFromPointer(table);
+    }
+
+    let region: *mut Proc::Region = stagedAt(staged, (*staged).count);
+
+    (*region).start = start;
+    (*region).length = length;
+    (*region).protection = protection;
+    (*region).node = node;
+    (*region).offset = offset;
+    (*region).fileBytes = fileBytes;
+    (*region).shared = 0;
+    (*region).image = 1;
+
+    let reserved: u64 = reservedPages(region, 0, length);
+
+    if (!Mm::Pmm::reserve(reserved)) {
+      return NO_MEMORY;
+    }
+
+    if (!Mm::AddressSpace::prepareRange(root, start, length)) {
+      Mm::Pmm::unreserve(reserved);
+      return NO_MEMORY;
+    }
+
+    Fs::Vfs::addMapping(node);
+    Fs::Vfs::addImage(node);
+    (*staged).count += 1;
+
+    return OK;
+  }
+
+  /// True when a staged region shares a page with `[start, end)`.
+  function overlapsStaged(staged: *mut Proc::StagedImage, start: u64, end: u64): boolean {
+    let mut index: u64 = 0;
+
+    while (index < (*staged).count) {
+      let region: *mut Proc::Region = stagedAt(staged, index);
+
+      if ((*region).start < end && start < (*region).start + (*region).length) {
+        return true;
+      }
+
+      index += 1;
+    }
+
+    return false;
+  }
+
+  /// True when a staged region holds `address` and can be executed.
+  function isStagedExecutable(staged: *mut Proc::StagedImage, address: u64): boolean {
+    let mut index: u64 = 0;
+
+    while (index < (*staged).count) {
+      let region: *mut Proc::Region = stagedAt(staged, index);
+
+      if ((*region).start <= address && address - (*region).start < (*region).length) {
+        return ((*region).protection & EXECUTE) != 0;
+      }
+
+      index += 1;
+    }
+
+    return false;
+  }
+
+  /// Copies the staged regions into `slot`, freshly `reset`, so its
+  /// process resolves them. The staging still owns the counts: the caller
+  /// ends it with `discardStaged` once the process exists, or with `reset`
+  /// and `dropStaged` when it fails. Returns false when the heap cannot
+  /// hold the region table; `slot` is unchanged then.
+  function adoptImage(slot: u64, staged: *mut Proc::StagedImage): boolean {
+    if (slot >= MAX_SLOTS) {
+      return false;
+    }
+
+    let mut index: u64 = 0;
+
+    while (index < (*staged).count) {
+      let entry: u64 = reserveEntry(slot);
+
+      if (entry == MAX_REGIONS || entry == NO_ROOM) {
+        reset(slot);
+        return false;
+      }
+
+      Lib::Mem::copy(regionAt(slot, entry) as *mut u8, stagedAt(staged, index) as *u8, @sizeOf<Proc::Region>());
+      index += 1;
+    }
+
+    return true;
+  }
+
+  /// Frees the staging table once a slot owns its regions (`adoptImage`
+  /// and the process exists).
+  function discardStaged(staged: *mut Proc::StagedImage): void {
+    if ((*staged).table != 0) {
+      Mm::Heap::free(@pointerFromInteger<*mut u8>((*staged).table));
+    }
+
+    (*staged).table = 0;
+    (*staged).count = 0;
+  }
+
+  /// Gives back what the staged regions hold, once: their reservation (no
+  /// page of a staged region is present yet) and their node counts. Takes
+  /// the VFS lock unless the caller holds it. The page tables go with the
+  /// address space.
+  function dropStaged(staged: *mut Proc::StagedImage): void {
+    let mut index: u64 = 0;
+
+    while (index < (*staged).count) {
+      let region: *mut Proc::Region = stagedAt(staged, index);
+
+      Mm::Pmm::unreserve(reservedPages(region, 0, (*region).length));
+      dropNode(region);
+      index += 1;
+    }
+
+    discardStaged(staged);
+  }
+
+  /// Entry `index` of the staging table.
+  function stagedAt(staged: *mut Proc::StagedImage, index: u64): *mut Proc::Region {
+    return @pointerFromInteger<*mut Proc::Region>((*staged).table + index * @sizeOf<Proc::Region>());
   }
 
   /// Gives the page holding `address` its frame when a region of `slot`

@@ -8,13 +8,18 @@
 //! The accepted file is what the user linker script produces: a 64-bit
 //! little-endian `ET_EXEC` for x86-64 that needs no relocation, with its
 //! program headers inside the file. Only `PT_LOAD` headers matter. For each
-//! one the loader maps `p_memsz` bytes at `p_vaddr` in the process's address
-//! space, rounded out to whole pages, copies the first `p_filesz` bytes from
-//! the file and leaves the rest zero, which is how `.bss` appears. A page is
-//! writable when the segment has `PF_W` and executable when it has `PF_X`; a
-//! segment with both is refused, so no user page is ever writable and
-//! executable at once. Two segments may not share a page, and nothing may be
-//! mapped below one page or at or above `Mm::AddressSpace::USER_LIMIT`.
+//! one the loader stages a private file region of the executable
+//! (`Proc::Memory::stageImage`) covering `p_memsz` bytes at `p_vaddr`,
+//! rounded out to whole pages: nothing is copied or mapped at load, and
+//! every page comes from the page cache of the file on first access. The
+//! first `p_filesz` bytes are the file's and the rest is zero, which is how
+//! `.bss` appears. A region is writable when the segment has `PF_W` and
+//! executable when it has `PF_X`; a segment with both is refused, so no
+//! user page is ever writable and executable at once. Two segments may not
+//! share a page, and nothing may be mapped below one page or at or above
+//! `Proc::Memory::MAP_BOTTOM`, where the `mmap` regions and the stack live.
+//! The headers and notes are read through `Fs::Vfs::read` under the VFS
+//! lock, never from the node's `data`, which a cached page supersedes.
 //!
 //! The loader trusts nothing in the file: every offset, size and address is
 //! checked against the file size and the user range before it is used, with
@@ -25,24 +30,38 @@
 //! The `hello` program as `user.ld` lays it out (`readelf -l build/user/hello.elf`):
 //!
 //! ```text
-//!   ELF file (hello.elf)                      user address space of the process
+//!   ELF file (hello.elf), its page cache      user address space of the process
 //!   ┌─────────────────────┐ 0x0000
 //!   │ ELF header (64 B)   │
 //!   │ program headers     │ 3 x 56 B
-//!   ├─────────────────────┤ 0x1000            0x400000 ┌─────────────────────┐
-//!   │ .text   0x692 bytes │ ─ PT_LOAD R+X ──────────►  │ r-x  1 page        │
-//!   ├─────────────────────┤ 0x2000            0x401000 ├─────────────────────┤
-//!   │ .rodata 0xA7 bytes  │ ─ PT_LOAD R ────────────►  │ r--  1 page        │
-//!   ├─────────────────────┤ 0x3000            0x402000 ├─────────────────────┤
-//!   │ .data   8 bytes     │ ─ PT_LOAD R+W ──────────►  │ rw-  1 page        │
-//!   │ (.bss 8 bytes is    │   filesz 8, memsz 16       │ 8 bytes from file,  │
-//!   │  not in the file)   │                            │ 8 bytes zero (.bss) │
-//!   ├─────────────────────┤                            └─────────────────────┘
+//!   ├─────────────────────┤ 0x1000 page 1        0x400000 ┌────────────────────────┐
+//!   │ .text   0x692 bytes │ ─ PT_LOAD R+X ───────────────► │ r-x  cache frame,      │
+//!   │                     │   region, file bytes to the    │ shared by every process │
+//!   │                     │   end of the page              │                        │
+//!   ├─────────────────────┤ 0x2000 page 2        0x401000 ├────────────────────────┤
+//!   │ .rodata 0xA7 bytes  │ ─ PT_LOAD R ─────────────────► │ r--  cache frame       │
+//!   ├─────────────────────┤ 0x3000 page 3        0x402000 ├────────────────────────┤
+//!   │ .data   8 bytes     │ ─ PT_LOAD R+W ───────────────► │ rw-  private copy:     │
+//!   │ (.bss 8 bytes is    │   filesz 8, memsz 16,          │ 8 bytes from the file, │
+//!   │  not in the file)   │   file bytes end at 8          │ zeros after (.bss)     │
+//!   ├─────────────────────┤                                └────────────────────────┘
 //!   │ symbols, sections   │ not loaded
 //!   └─────────────────────┘
 //!
-//!   entry point 0x400000 must lie in an executable user page (checkEntry)
+//!   page states on first access (Proc::Memory::resolve):
+//!     backed page, read or fetch   the cache frame, read-only, shared
+//!     backed page, write           a private copy (data, copy on write)
+//!     page holding the end of the  a private frame: the file bytes, then
+//!     file bytes, or past them     zeros (the reservation pays for it)
+//!
+//!   entry point 0x400000 must lie in an executable region (checkEntry)
 //! ```
+//!
+//! A read-only segment with nothing past its file bytes (`p_memsz` equals
+//! `p_filesz`) takes its last page whole from the file, as Linux maps it, so
+//! even a text of 0x692 bytes is a shared cache frame. The image regions
+//! keep the file from being removed, written or truncated (`BUSY`, Linux
+//! `ETXTBSY`) while the process lives.
 //!
 //! A segment's file offset and virtual address must agree modulo the page size
 //! (`offset % 4096 == address % 4096`), which the linker script guarantees by
@@ -74,7 +93,9 @@
 //! See concept doc 15 and the System V ABI, "ELF-64 Object File Format".
 
 import Drivers from "@drivers";
+import Fs from "@fs";
 import Mm from "@mm";
+import _ from "./memory";
 
 /// `Elf64_Ehdr`, 64 bytes. The field names follow the Ignis convention; each
 /// matches the `e_*` field of the same meaning.
@@ -161,10 +182,10 @@ namespace Proc {
     /// The entry point, taken from the header.
     public entry: u64;
 
-    /// Loadable segments mapped.
+    /// Loadable segments staged.
     public segments: u64;
 
-    /// Pages mapped across all segments.
+    /// Pages the segments span, mapped on first access.
     public pages: u64;
 
     /// The system call ABI the program asks for: `Proc::Elf::ABI_LINUX`, or
@@ -274,26 +295,87 @@ namespace Proc::Elf {
   /// The fixed part of a note: `namesz`, `descsz`, `type`, 4 bytes each.
   const NOTE_HEADER: u64 = 12;
 
-  /// Loads the executable in the `size` bytes at `image` into the address
-  /// space `root` and fills `result`. On failure the pages mapped so far
-  /// stay in the space, which the caller destroys.
-  function load(image: *u8, size: u64, root: u64, result: *mut Proc::LoadedImage): u64 {
-    let problem: u64 = checkHeader(image, size);
+  /// Loads the executable file `node` into the address space `root`:
+  /// checks it, stages one image region per `PT_LOAD` segment in `staged`
+  /// (`Proc::Memory::stageImage`, nothing is copied or mapped yet) and fills
+  /// `result`. The headers and notes are read through `Fs::Vfs::read`,
+  /// under the VFS lock, which this function takes unless the caller holds
+  /// it. On failure the regions staged so far stay in `staged` for the
+  /// caller's `Proc::Memory::dropStaged`, and their page tables in `root`.
+  function load(node: *mut Fs::Node, root: u64, staged: *mut Proc::StagedImage, result: *mut Proc::LoadedImage): u64 {
+    let taken: boolean = Fs::Vfs::lockUnlessHeld();
+    let error: u64 = loadLocked(node, root, staged, result);
+
+    Fs::Vfs::unlockIfTaken(taken);
+
+    return error;
+  }
+
+  /// `load` with the VFS lock held.
+  function loadLocked(node: *mut Fs::Node, root: u64, staged: *mut Proc::StagedImage, result: *mut Proc::LoadedImage): u64 {
+    let size: u64 = (*node).size;
+    let header: *mut ElfHeader = Mm::Heap::allocate(HEADER_SIZE, 16) as *mut ElfHeader;
+
+    if (header == null) {
+      return ERR_MEMORY;
+    }
+
+    let mut problem: u64 = size < HEADER_SIZE ? ERR_TOO_SMALL : OK;
+
+    if (problem == OK && !readFile(node, 0, header as *mut u8, HEADER_SIZE)) {
+      problem = ERR_TOO_SMALL;
+    }
+
+    if (problem == OK) {
+      problem = checkHeader(header as *ElfHeader, size);
+    }
 
     if (problem != OK) {
+      Mm::Heap::free(header as *mut u8);
       return problem;
     }
 
-    let header: *ElfHeader = image as *ElfHeader;
-    let first: u64 = (*header).programHeaderOffset;
     let count: u64 = (*header).programHeaderCount as u64;
+    let tableBytes: u64 = count * PROGRAM_HEADER_SIZE;
+    let headers: *mut u8 = Mm::Heap::allocate(tableBytes, 16);
 
     (*result).entry = (*header).entry;
     (*result).segments = 0;
     (*result).pages = 0;
     (*result).abi = ABI_LINUX;
 
-    let abiProblem: u64 = findAbi(image, size, &mut (*result).abi as *mut u64);
+    let first: u64 = (*header).programHeaderOffset;
+
+    Mm::Heap::free(header as *mut u8);
+
+    if (headers == null) {
+      return ERR_MEMORY;
+    }
+
+    if (!readFile(node, first, headers, tableBytes)) {
+      Mm::Heap::free(headers);
+      return ERR_PROGRAM_HEADERS;
+    }
+
+    let error: u64 = loadSegments(node, size, root, staged, headers as *u8, count, result);
+
+    Mm::Heap::free(headers);
+
+    return error;
+  }
+
+  /// Reads the ABI note and stages every `PT_LOAD` of the `count` program
+  /// headers at `headers`, then checks the entry point.
+  function loadSegments(
+    node: *mut Fs::Node,
+    size: u64,
+    root: u64,
+    staged: *mut Proc::StagedImage,
+    headers: *u8,
+    count: u64,
+    result: *mut Proc::LoadedImage
+  ): u64 {
+    let abiProblem: u64 = findAbi(node, size, headers, count, &mut (*result).abi as *mut u64);
 
     if (abiProblem != OK) {
       return abiProblem;
@@ -302,10 +384,10 @@ namespace Proc::Elf {
     let mut index: u64 = 0;
 
     while (index < count) {
-      let segment: *ProgramHeader = (image + first + index * PROGRAM_HEADER_SIZE) as *ProgramHeader;
+      let segment: *ProgramHeader = (headers + index * PROGRAM_HEADER_SIZE) as *ProgramHeader;
 
       if ((*segment).kind == SEGMENT_LOAD) {
-        let error: u64 = loadSegment(image, size, root, segment, result);
+        let error: u64 = loadSegment(node, size, root, staged, segment, result);
 
         if (error != OK) {
           return error;
@@ -319,7 +401,16 @@ namespace Proc::Elf {
       return ERR_NO_SEGMENTS;
     }
 
-    return checkEntry(root, (*result).entry);
+    return checkEntry(staged, (*result).entry);
+  }
+
+  /// Copies exactly `count` bytes of file `node` from `offset` to `buffer`
+  /// through the page cache; false when the file is shorter. The VFS lock
+  /// is held.
+  function readFile(node: *mut Fs::Node, offset: u64, buffer: *mut u8, count: u64): boolean {
+    let mut copied: u64 = 0;
+
+    return Fs::Vfs::read(node, offset, buffer, count, &mut copied as *mut u64) == Fs::Vfs::OK && copied == count;
   }
 
   /// A short description of an error from `load`.
@@ -343,13 +434,12 @@ namespace Proc::Elf {
     };
   }
 
-  /// Checks the ELF header and that the program header table fits the file.
-  function checkHeader(image: *u8, size: u64): u64 {
+  /// Checks the ELF header, read from a file of `size` bytes, and that the
+  /// program header table fits the file.
+  function checkHeader(header: *ElfHeader, size: u64): u64 {
     if (size < HEADER_SIZE) {
       return ERR_TOO_SMALL;
     }
-
-    let header: *ElfHeader = image as *ElfHeader;
 
     if ((*header).ident[0] != 0x7F || (*header).ident[1] != 0x45 || (*header).ident[2] != 0x4C || (*header).ident[3] != 0x46) {
       return ERR_MAGIC;
@@ -377,9 +467,9 @@ namespace Proc::Elf {
     return OK;
   }
 
-  /// Looks for the IgniOS ABI note in the `PT_NOTE` segments of the
-  /// executable in the `size` bytes at `image`, whose header `checkHeader`
-  /// accepted. Writes `ABI_NATIVE` to `abi` when a note named `IgniOS` of
+  /// Looks for the IgniOS ABI note in the `PT_NOTE` segments among the
+  /// `count` program headers at `headers` of the executable file `node` of
+  /// `size` bytes, whose header `checkHeader` accepted. Writes `ABI_NATIVE` to `abi` when a note named `IgniOS` of
   /// type `NOTE_ABI` says version `NATIVE_VERSION`, and leaves it alone
   /// otherwise (a Linux program). Notes of other names, such as `GNU`, are
   /// skipped. Returns `ERR_NOTE` for a segment or note that runs past the
@@ -392,14 +482,13 @@ namespace Proc::Elf {
   ///         12   "IgniOS\0" + 1 pad   name, padded to 4
   ///         20   version = 1         desc, padded to 4
   /// ```
-  function findAbi(image: *u8, size: u64, abi: *mut u64): u64 {
-    let header: *ElfHeader = image as *ElfHeader;
-    let first: u64 = (*header).programHeaderOffset;
-    let count: u64 = (*header).programHeaderCount as u64;
+  /// A note segment is copied out of the file through the cache to be
+  /// read; `ERR_MEMORY` when the heap cannot hold it.
+  function findAbi(node: *mut Fs::Node, size: u64, headers: *u8, count: u64, abi: *mut u64): u64 {
     let mut index: u64 = 0;
 
     while (index < count) {
-      let segment: *ProgramHeader = (image + first + index * PROGRAM_HEADER_SIZE) as *ProgramHeader;
+      let segment: *ProgramHeader = (headers + index * PROGRAM_HEADER_SIZE) as *ProgramHeader;
 
       if ((*segment).kind == SEGMENT_NOTE) {
         let offset: u64 = (*segment).offset;
@@ -409,7 +498,18 @@ namespace Proc::Elf {
           return ERR_NOTE;
         }
 
-        let problem: u64 = scanNotes(image + offset, length, abi);
+        let mut problem: u64 = OK;
+
+        if (length > 0) {
+          let notes: *mut u8 = Mm::Heap::allocate(length, 16);
+
+          if (notes == null) {
+            return ERR_MEMORY;
+          }
+
+          problem = readFile(node, offset, notes, length) ? scanNotes(notes as *u8, length, abi) : ERR_NOTE;
+          Mm::Heap::free(notes);
+        }
 
         if (problem != OK) {
           return problem;
@@ -464,12 +564,18 @@ namespace Proc::Elf {
     return (*bytes as u32) | ((*(bytes + 1) as u32) << 8) | ((*(bytes + 2) as u32) << 16) | ((*(bytes + 3) as u32) << 24);
   }
 
-  /// Maps and fills the pages of one `PT_LOAD` header, and prints a line
-  /// about it.
+  /// Stages the image region of one `PT_LOAD` header and prints a line
+  /// about it. The region covers the segment's pages; its file bytes end at
+  /// `p_filesz`, so a page past them is a private zeroed page and the page
+  /// holding their end a private copy with a zeroed tail, except for a
+  /// read-only segment with nothing past its file bytes (`p_memsz` equal to
+  /// `p_filesz`), whose last page takes the rest of the file page, as Linux
+  /// maps it, so that page is a shared cache frame too.
   function loadSegment(
-    image: *u8,
+    node: *mut Fs::Node,
     size: u64,
     root: u64,
+    staged: *mut Proc::StagedImage,
     segment: *ProgramHeader,
     result: *mut Proc::LoadedImage
   ): u64 {
@@ -483,6 +589,15 @@ namespace Proc::Elf {
       return ERR_SEGMENT_RANGE;
     }
 
+    let first: u64 = address / PAGE_SIZE * PAGE_SIZE;
+    let end: u64 = (address + memorySize + PAGE_SIZE - 1) / PAGE_SIZE * PAGE_SIZE;
+
+    // The regions of `mmap` and the stack live above `MAP_BOTTOM`; a
+    // segment there would hide behind them in `Proc::Memory::resolve`.
+    if (end > Proc::Memory::MAP_BOTTOM) {
+      return ERR_SEGMENT_RANGE;
+    }
+
     if (fileSize > memorySize || offset > size || fileSize > size - offset || offset % PAGE_SIZE != address % PAGE_SIZE) {
       return ERR_SEGMENT_FILE;
     }
@@ -491,35 +606,33 @@ namespace Proc::Elf {
       return ERR_WRITE_EXECUTE;
     }
 
-    let mut pageFlags: u64 = 0;
+    let mut protection: u64 = Proc::Memory::READ;
 
     if ((flags & FLAG_WRITE) != 0) {
-      pageFlags = Mm::Vmm::WRITABLE;
+      protection = protection | Proc::Memory::WRITE;
     }
 
-    if ((flags & FLAG_EXECUTE) == 0) {
-      pageFlags = pageFlags | Mm::Vmm::NO_EXECUTE;
+    if ((flags & FLAG_EXECUTE) != 0) {
+      protection = protection | Proc::Memory::EXECUTE;
     }
 
-    let first: u64 = address / PAGE_SIZE * PAGE_SIZE;
-    let end: u64 = (address + memorySize + PAGE_SIZE - 1) / PAGE_SIZE * PAGE_SIZE;
-
-    let mut page: u64 = first;
-
-    while (page < end) {
-      if (Mm::Vmm::translateIn(root, page) != Mm::Vmm::NOT_MAPPED) {
-        return ERR_OVERLAP;
-      }
-
-      if (Mm::AddressSpace::allocatePage(root, page, pageFlags) == Mm::Pmm::NO_FRAME) {
-        return ERR_MEMORY;
-      }
-
-      page += PAGE_SIZE;
+    if (Proc::Memory::overlapsStaged(staged, first, end)) {
+      return ERR_OVERLAP;
     }
 
-    if (!Mm::AddressSpace::loadBytes(root, address, image + offset, fileSize)) {
-      return ERR_SEGMENT_FILE;
+    let fileStart: u64 = offset - (address - first);
+    let mut fileBytes: u64 = address - first + fileSize;
+
+    if ((flags & FLAG_WRITE) == 0 && memorySize == fileSize) {
+      let wholePages: u64 = (fileBytes + PAGE_SIZE - 1) / PAGE_SIZE * PAGE_SIZE;
+
+      fileBytes = size - fileStart < wholePages ? size - fileStart : wholePages;
+    }
+
+    let staging: u64 = Proc::Memory::stageImage(staged, root, first, end - first, protection, node, fileStart, fileBytes);
+
+    if (staging != Proc::Memory::OK) {
+      return ERR_MEMORY;
     }
 
     (*result).segments += 1;
@@ -539,15 +652,10 @@ namespace Proc::Elf {
     return OK;
   }
 
-  /// The entry point must sit in a mapped, user accessible, executable page.
-  function checkEntry(root: u64, entry: u64): u64 {
-    if (!Mm::AddressSpace::isUserRange(entry, 1)) {
-      return ERR_ENTRY;
-    }
-
-    let leaf: u64 = Mm::Vmm::leafEntryIn(root, entry);
-
-    if ((leaf & Mm::Vmm::PRESENT) == 0 || (leaf & Mm::Vmm::USER) == 0 || (leaf & Mm::Vmm::NO_EXECUTE) != 0) {
+  /// The entry point must sit in an executable staged region. Its page is
+  /// not mapped yet: the first fetch resolves it.
+  function checkEntry(staged: *mut Proc::StagedImage, entry: u64): u64 {
+    if (!Mm::AddressSpace::isUserRange(entry, 1) || !Proc::Memory::isStagedExecutable(staged, entry)) {
       return ERR_ENTRY;
     }
 

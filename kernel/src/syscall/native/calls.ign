@@ -480,7 +480,7 @@ namespace Syscall::Native {
       return Fs::Vfs::INVALID;
     }
 
-    let started: u64 = Proc::Process::startElf((*node).data as *u8, (*node).size, strings as *u8, argumentBytes, argumentCount, Fs::Files::currentDirectory(table));
+    let started: u64 = Proc::Process::startElf(node, strings as *u8, argumentBytes, argumentCount, Fs::Files::currentDirectory(table));
 
     Mm::Heap::free(strings);
 
