@@ -106,4 +106,7 @@ namespace Syscall::Operation {
 
   /// Set or read the FS base.
   const ARCH_CONTROL: u8 = 29;
+
+  /// Wait on or wake a user word.
+  const FUTEX: u8 = 30;
 }

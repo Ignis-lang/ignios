@@ -27,8 +27,15 @@ namespace Syscall::Linux {
   /// No such process (3).
   const ESRCH: i64 = 3;
 
+  /// Interrupted system call (4): a futex WAIT ended by a kill.
+  const EINTR: i64 = 4;
+
   /// Bad file descriptor (9): the descriptor is not open, or not for this.
   const EBADF: i64 = 9;
+
+  /// Connection timed out (110), placed here with the low values: a futex
+  /// WAIT whose timeout passed.
+  const ETIMEDOUT: i64 = 110;
 
   /// No child processes (10).
   const ECHILD: i64 = 10;

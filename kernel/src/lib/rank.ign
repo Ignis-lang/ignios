@@ -20,7 +20,8 @@
 //!   anything ──► console (90) ──► serial (91)        printing
 //!
 //!   mutexes
-//!   process table (10) ──► VFS (30) ──► address space (40)
+//!   process table (10) ──► futex bucket (25) ──► VFS (30) ──► address space (40)
+//!     futex WAIT: the bucket, then the user word read (VFS, the space)
 //!     launch: table, then the slot's regions (reset, adoptImage)
 //!     a copy to user memory under VFS faults: VFS, then the space
 //!     resolve of a file page without VFS: drop the space, take VFS, retake
@@ -59,6 +60,12 @@ namespace Lib::Rank {
 namespace Lib::MutexRank {
   /// The process table.
   const PROCESS_TABLE: u64 = 10;
+
+  /// One futex bucket of `Proc::Futex`. WAIT reads the user word under it
+  /// through `Proc::User`, which may take the VFS lock (a file page) and
+  /// the address space lock, so it ranks below both. Nothing takes it with
+  /// the process table, VFS or address space lock held.
+  const FUTEX_BUCKET: u64 = 25;
 
   /// The whole VFS tree, every descriptor table and every current directory.
   /// A per-process descriptor lock would rank between the two once processes

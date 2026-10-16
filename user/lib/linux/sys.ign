@@ -139,6 +139,18 @@ export namespace Sys {
   /// Linux system call number 218.
   const SET_TID_ADDRESS: u64 = 218;
 
+  /// Linux system call number 202.
+  const FUTEX: u64 = 202;
+
+  /// `futex` operation: sleep while the word holds a value.
+  const FUTEX_WAIT: u64 = 0;
+
+  /// `futex` operation: wake sleepers on the word.
+  const FUTEX_WAKE: u64 = 1;
+
+  /// `futex` flag: the word is private to the process.
+  const FUTEX_PRIVATE_FLAG: u64 = 128;
+
   /// `arch_prctl` code: set the FS base.
   const ARCH_SET_FS: u64 = 0x1002;
 
@@ -269,6 +281,15 @@ export namespace Sys {
   /// Function not implemented (38).
   const ENOSYS: i64 = 38;
 
+  /// Interrupted (4): a futex wait ended by a kill.
+  const EINTR: i64 = 4;
+
+  /// Try again (11): the futex word did not hold the expected value.
+  const EAGAIN: i64 = 11;
+
+  /// Timed out (110): a futex wait reached its timeout.
+  const ETIMEDOUT: i64 = 110;
+
   /// A system call with no arguments. Returns the raw result in RAX.
   function call0(number: u64): i64 {
     return asm (number in rax) -> (result: i64 in rax) clobber(rcx, r11, memory) { syscall };
@@ -349,6 +370,22 @@ export namespace Sys {
   /// (`arch_prctl(ARCH_GET_FS)`).
   function getFsBase(base: *mut u64): i64 {
     return call2(ARCH_PRCTL, ARCH_GET_FS, @integerFromPointer(base));
+  }
+
+  /// Sleeps while the 32-bit word at `address` holds `expected`, until a
+  /// `futexWake` on it (`futex(FUTEX_WAIT | FUTEX_PRIVATE_FLAG)`).
+  /// `timeout` is relative to now; null waits without a limit. Returns 0
+  /// once woken, or -EAGAIN (the word differed), -ETIMEDOUT, -EINTR,
+  /// -EINVAL or -EFAULT.
+  function futexWait(address: *u32, expected: u32, timeout: *Timespec): i64 {
+    return call4(FUTEX, @integerFromPointer(address), FUTEX_WAIT | FUTEX_PRIVATE_FLAG, expected as u64, @integerFromPointer(timeout));
+  }
+
+  /// Wakes up to `count` threads sleeping on the word at `address`
+  /// (`futex(FUTEX_WAKE | FUTEX_PRIVATE_FLAG)`). Returns how many it woke,
+  /// or -EINVAL.
+  function futexWake(address: *u32, count: u32): i64 {
+    return call4(FUTEX, @integerFromPointer(address), FUTEX_WAKE | FUTEX_PRIVATE_FLAG, count as u64, 0);
   }
 
   /// Offers the processor to another thread. Returns 0.

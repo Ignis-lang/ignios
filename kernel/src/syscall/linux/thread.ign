@@ -43,8 +43,8 @@
 //! | 218 | `set_tid_address` | records the clear-child-tid address, returns the tid |
 //! | 158 | `arch_prctl`      | `ARCH_SET_FS` (0x1002), `ARCH_GET_FS` (0x1003); an FS base outside the user half `-EPERM`, a bad output pointer `-EFAULT`, another code `-EINVAL` |
 //!
-//! The clear-child-tid address is only recorded: the write of 0 and the
-//! futex wake at the thread's exit are C4 T3.
+//! At the thread's exit the kernel writes a 32-bit 0 to the clear-child-tid
+//! address and wakes one futex waiter on it (`Proc::Process::finishThread`).
 
 import Arch from "@arch";
 import Lib from "@lib";

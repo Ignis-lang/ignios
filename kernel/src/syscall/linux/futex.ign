@@ -1,0 +1,126 @@
+//!
+//! # Linux futex
+//!
+//! `futex(uaddr, op, val, timeout, uaddr2, val3)`, number 202: WAIT and
+//! WAKE on a 32-bit user word (C4 D3). The waiting itself is
+//! `Proc::Futex`; this file checks the arguments and maps the results.
+//!
+//! ## Operations
+//!
+//! `op & 127` is the command; `FUTEX_PRIVATE_FLAG` (128) is accepted and
+//! changes nothing, since every wait is private to its address space
+//! anyway. Any other bit, `FUTEX_CLOCK_REALTIME` included, or any other
+//! command is `-ENOSYS`. `uaddr2` and `val3` are not used.
+//!
+//! | Command          | Result                                               |
+//! |------------------|------------------------------------------------------|
+//! | `FUTEX_WAIT` (0) | 0 once woken; `-EAGAIN` when `*uaddr != val`; `-ETIMEDOUT` after `timeout`; `-EINTR` when the process is killed |
+//! | `FUTEX_WAKE` (1) | the number of waiters woken, at most `val`, oldest first |
+//!
+//! Errors of both: `uaddr` not 4-byte aligned `-EINVAL`; a word or a
+//! timeout that is not readable user memory `-EFAULT`; a timeout with
+//! negative seconds or nanoseconds outside 0 to 999999999 `-EINVAL`.
+//!
+//! The timeout of WAIT is a `struct timespec` relative to now, null for no
+//! limit, rounded up to whole ticks (10 ms) as in `nanosleep`; a zero
+//! timeout still compares and then times out at once. `val` of WAKE is a
+//! signed 32-bit count: 0 or less wakes nobody.
+//!
+//! A futex shared between processes through `MAP_SHARED` does not work:
+//! waits are keyed by (address space, user address), so the two processes
+//! never meet.
+
+import Proc from "@proc";
+import Time from "@time";
+import _ from "./errno";
+import _ from "./nanosleep";
+import _ from "./thread";
+
+/// The `futex` handler.
+namespace Syscall::Linux {
+  /// `FUTEX_WAIT`.
+  const FUTEX_WAIT: u64 = 0;
+
+  /// `FUTEX_WAKE`.
+  const FUTEX_WAKE: u64 = 1;
+
+  /// `FUTEX_PRIVATE_FLAG`: the word is private to the process.
+  const FUTEX_PRIVATE_FLAG: u64 = 128;
+
+  /// The command bits of `op`.
+  const FUTEX_COMMAND_MASK: u64 = 127;
+
+  /// `futex(uaddr, op, val, timeout, uaddr2, val3)`; see the table above.
+  function futex(address: u64, operation: u64, value: u64, timeout: u64, address2: u64, value3: u64): u64 {
+    let command: u64 = operation & FUTEX_COMMAND_MASK;
+
+    if ((operation & ~(FUTEX_COMMAND_MASK | FUTEX_PRIVATE_FLAG)) != 0 || (command != FUTEX_WAIT && command != FUTEX_WAKE)) {
+      return Linux::failure(Linux::ENOSYS);
+    }
+
+    let root: u64 = Proc::Process::currentRoot();
+
+    if (command == FUTEX_WAKE) {
+      if ((address & 3) != 0) {
+        return Linux::failure(Linux::EINVAL);
+      }
+
+      let count: i32 = (value as u32) as i32;
+
+      if (count <= 0) {
+        return 0;
+      }
+
+      return Proc::Futex::wake(root, address, count as u64);
+    }
+
+    let timed: boolean = timeout != 0;
+    let mut deadline: u64 = 0;
+
+    if (timed) {
+      let mut time: Timespec = Timespec { seconds: 0, nanoseconds: 0 };
+
+      if (!Proc::User::copyFromUser(root, &mut time as *mut u8, timeout, 16)) {
+        return Linux::failure(Linux::EFAULT);
+      }
+
+      if (time.seconds < 0 || time.nanoseconds < 0 || (time.nanoseconds as u64) >= Linux::NANOSECONDS_PER_SECOND) {
+        return Linux::failure(Linux::EINVAL);
+      }
+
+      let mut seconds: u64 = time.seconds as u64;
+
+      if (seconds > Linux::MAX_SLEEP_SECONDS) {
+        seconds = Linux::MAX_SLEEP_SECONDS;
+      }
+
+      let ticks: u64 = seconds * Time::Timer::FREQUENCY + ((time.nanoseconds as u64) + Linux::NANOSECONDS_PER_TICK - 1) / Linux::NANOSECONDS_PER_TICK;
+
+      deadline = Time::Timer::ticks() + ticks;
+    }
+
+    if ((address & 3) != 0) {
+      return Linux::failure(Linux::EINVAL);
+    }
+
+    let result: u64 = Proc::Futex::wait(root, address, value as u32, timed, deadline);
+
+    if (result == Proc::Futex::WAIT_WOKEN) {
+      return 0;
+    }
+
+    if (result == Proc::Futex::WAIT_AGAIN) {
+      return Linux::failure(Linux::EAGAIN);
+    }
+
+    if (result == Proc::Futex::WAIT_TIMED_OUT) {
+      return Linux::failure(Linux::ETIMEDOUT);
+    }
+
+    if (result == Proc::Futex::WAIT_INTERRUPTED) {
+      return Linux::failure(Linux::EINTR);
+    }
+
+    return Linux::failure(Linux::EFAULT);
+  }
+}

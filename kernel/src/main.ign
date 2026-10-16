@@ -166,6 +166,7 @@ function kmain(): void {
 
   Sched::Scheduler::initialize();
   Proc::Process::initialize();
+  Proc::Futex::initialize();
   Syscall::initialize();
 
   Trap::Setup::initializeUserMode();

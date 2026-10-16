@@ -13,6 +13,7 @@
 //! | `Proc::Programs`    | `programs.ign` | run a program from the file tree with its arguments       |
 //! | `Proc::Memory`      | `memory.ign`   | the regions `mmap` adds and `munmap` removes             |
 //! | `Proc::User`        | `user.ign`     | copies to and from user memory that resolve its pages     |
+//! | `Proc::Futex`       | `futex.ign`    | futex WAIT and WAKE, the clear-child-tid wake at exit     |
 //! | `Proc::LoadedImage` | `elf.ign`      | what the loader reports: entry point, segments, pages     |
 //!
 //! ## Dependencies
@@ -30,6 +31,7 @@
 //! process, and a fault in ring 3 kills it.
 
 import _ from "./elf";
+import _ from "./futex";
 import _ from "./memory";
 import _ from "./process";
 import _ from "./programs";

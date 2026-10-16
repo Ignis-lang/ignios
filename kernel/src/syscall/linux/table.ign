@@ -16,6 +16,7 @@
 //! | 60       | `exit`        | `Operation::EXIT_THREAD` | ends the calling thread, status & 0xFF; the process when it is the last |
 //! | 158      | `arch_prctl`  | `Operation::ARCH_CONTROL` | `ARCH_SET_FS`, `ARCH_GET_FS`  |
 //! | 186      | `gettid`      | `Operation::GET_TID` | the thread id                   |
+//! | 202      | `futex`       | `Operation::FUTEX`   | WAIT and WAKE (`linux/futex.ign`) |
 //! | 218      | `set_tid_address` | `Operation::SET_TID_ADDRESS` | records the address, returns the tid |
 //! | 231      | `exit_group`  | `Operation::EXIT`    | ends every thread, status & 0xFF |
 //!
@@ -86,6 +87,9 @@ namespace Syscall::Linux {
   /// `gettid`, number 186.
   const NUMBER_GETTID: u64 = 186;
 
+  /// `futex`, number 202.
+  const NUMBER_FUTEX: u64 = 202;
+
   /// `set_tid_address`, number 218.
   const NUMBER_SET_TID_ADDRESS: u64 = 218;
 
@@ -138,6 +142,7 @@ namespace Syscall::Linux {
     *(table + NUMBER_ARCH_PRCTL) = Operation::ARCH_CONTROL;
     *(table + NUMBER_GETTID) = Operation::GET_TID;
     *(table + NUMBER_SET_TID_ADDRESS) = Operation::SET_TID_ADDRESS;
+    *(table + NUMBER_FUTEX) = Operation::FUTEX;
     *(table + NUMBER_EXIT_GROUP) = Operation::EXIT;
   }
 

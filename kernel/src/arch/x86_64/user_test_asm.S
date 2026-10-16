@@ -32,7 +32,10 @@
  *   14   nap                   exit status 5 after sleeping 200 ms
  *   15   alignment check spin  exit status 0, timer ticks arrive with AC = 1
  *   16   clone                 exit status 0; the child thread exits with 60
- *   17   clone exit_group      exit status 77, from the child's exit_group */
+ *   17   clone exit_group      exit status 77, from the child's exit_group
+ *   18   futex                 exit status 0; errors, wake, join, turn stress
+ *   19   futex timeout         exit status 0 after a 20 ms WAIT timed out
+ *   20   futex kill            two threads asleep in WAIT; the kernel kills it */
 
 .intel_syntax noprefix
 
@@ -877,6 +880,375 @@ user_test_clone_group_start:
     CLONE_EXIT 78
 user_test_clone_group_end:
 
+/* Index 18: futex, from two threads. Data lives at FUTEX_BASE, the lower
+ * of the two stack pages mapped at start:
+ *
+ *   +0x00  the word the first child waits on   +0x08  the child's tid word
+ *   +0x10  the turn word of the stress          +0x18  the child's result
+ *   +0x20  the join timeout (1 s)               +0x30  the turn timeout (2 s)
+ *   +0x800 the children's stack top
+ *
+ * The parent checks the errors on one thread (10 to 18). A child made with
+ * CLONE_CHILD_SETTID and CLONE_CHILD_CLEARTID waits on +0x00; the parent
+ * wakes it, retrying every 10 ms until WAKE returns 1 (19 to 21). The child
+ * records that its WAIT returned 0, stays 100 ms and ends with exit, while
+ * the parent waits on the tid word until the kernel clears it (the join,
+ * 30 to 32: a timeout there means the exit did not wake it). A second
+ * child and the parent then take FUTEX_ROUNDS turns on +0x10, each storing
+ * the other's turn and waking it, each waiting with a 2 s timeout while it
+ * is not its turn: a timeout is a lost wake-up (26, or 28 from the child).
+ * Status 0 when everything held. */
+.equ FUTEX_BASE, 0x7FFFFFFFD000
+.equ FUTEX_ROUNDS, 1000
+.equ FUTEX_CLONE, CLONE_THREAD_SET | 0x1200000
+
+user_test_futex_start:
+    mov rbx, FUTEX_BASE
+    xor eax, eax
+    mov [rbx], rax
+    mov [rbx + 0x08], rax
+    mov [rbx + 0x10], rax
+    mov [rbx + 0x18], rax
+    mov qword ptr [rbx + 0x20], 1
+    mov [rbx + 0x28], rax
+    mov qword ptr [rbx + 0x30], 2
+    mov [rbx + 0x38], rax
+
+    /* an unaligned word: -EINVAL */
+    lea rdi, [rbx + 1]
+    xor esi, esi
+    xor edx, edx
+    xor r10d, r10d
+    mov eax, 202
+    syscall
+    cmp rax, -22
+    jne 10f
+
+    /* a kernel address and an unmapped user address: -EFAULT */
+    mov rdi, 0xFFFF800000000000
+    xor esi, esi
+    xor edx, edx
+    xor r10d, r10d
+    mov eax, 202
+    syscall
+    cmp rax, -14
+    jne 11f
+    mov edi, 0x10000000
+    xor esi, esi
+    xor edx, edx
+    xor r10d, r10d
+    mov eax, 202
+    syscall
+    cmp rax, -14
+    jne 12f
+
+    /* an op the kernel does not have (FUTEX_FD, private): -ENOSYS */
+    mov rdi, rbx
+    mov esi, 130
+    xor edx, edx
+    xor r10d, r10d
+    mov eax, 202
+    syscall
+    cmp rax, -38
+    jne 13f
+
+    /* WAKE with nobody waiting: 0 */
+    mov rdi, rbx
+    mov esi, 129
+    mov edx, 1
+    xor r10d, r10d
+    mov eax, 202
+    syscall
+    test rax, rax
+    jnz 14f
+
+    /* WAIT for 1 while the word is 0: -EAGAIN at once */
+    mov rdi, rbx
+    mov esi, 128
+    mov edx, 1
+    xor r10d, r10d
+    mov eax, 202
+    syscall
+    cmp rax, -11
+    jne 15f
+
+    /* timeouts with 10^9 ns and with negative seconds: -EINVAL */
+    mov qword ptr [rbx + 0x40], 0
+    mov qword ptr [rbx + 0x48], 1000000000
+    mov rdi, rbx
+    xor esi, esi
+    xor edx, edx
+    lea r10, [rbx + 0x40]
+    mov eax, 202
+    syscall
+    cmp rax, -22
+    jne 16f
+    mov qword ptr [rbx + 0x40], -1
+    mov qword ptr [rbx + 0x48], 0
+    mov rdi, rbx
+    xor esi, esi
+    xor edx, edx
+    lea r10, [rbx + 0x40]
+    mov eax, 202
+    syscall
+    cmp rax, -22
+    jne 17f
+
+    /* a timeout at a kernel address: -EFAULT */
+    mov rdi, rbx
+    xor esi, esi
+    xor edx, edx
+    mov r10, 0xFFFF800000000000
+    mov eax, 202
+    syscall
+    cmp rax, -14
+    jne 18f
+
+    /* the first child waits on +0x00 */
+    mov eax, 56
+    mov edi, FUTEX_CLONE
+    lea rsi, [rbx + 0x800]
+    xor edx, edx
+    lea r10, [rbx + 0x08]
+    xor r8d, r8d
+    syscall
+    test rax, rax
+    jz user_test_futex_waiter
+    js 19f
+
+    /* WAKE until it finds the child asleep */
+    mov r12d, 200
+1:
+    mov rdi, rbx
+    mov esi, 1
+    mov edx, 1
+    xor r10d, r10d
+    mov eax, 202
+    syscall
+    cmp rax, 1
+    je 2f
+    test rax, rax
+    jnz 20f
+    CLONE_NAP
+    dec r12d
+    jnz 1b
+    CLONE_EXIT 21
+2:
+    call user_test_futex_join
+    test eax, eax
+    jnz 9f
+    cmp qword ptr [rbx + 0x18], 1
+    jne 23f
+
+    /* the turn stress with a second child */
+    mov qword ptr [rbx + 0x18], 0
+    mov eax, 56
+    mov edi, FUTEX_CLONE
+    lea rsi, [rbx + 0x800]
+    xor edx, edx
+    lea r10, [rbx + 0x08]
+    xor r8d, r8d
+    syscall
+    test rax, rax
+    jz user_test_futex_turner
+    js 24f
+    mov r13d, FUTEX_ROUNDS
+3:
+    mov edx, [rbx + 0x10]
+    test edx, edx
+    jz 4f
+    lea rdi, [rbx + 0x10]
+    mov esi, 128
+    lea r10, [rbx + 0x30]
+    mov eax, 202
+    syscall
+    cmp rax, -110
+    je 26f
+    jmp 3b
+4:
+    mov dword ptr [rbx + 0x10], 1
+    lea rdi, [rbx + 0x10]
+    mov esi, 129
+    mov edx, 1
+    xor r10d, r10d
+    mov eax, 202
+    syscall
+    test rax, rax
+    js 27f
+    dec r13d
+    jnz 3b
+    call user_test_futex_join
+    test eax, eax
+    jnz 9f
+    cmp qword ptr [rbx + 0x18], 1
+    jne 28f
+    CLONE_EXIT 0
+9:
+    mov edi, eax
+    mov eax, 231
+    syscall
+
+10: CLONE_EXIT 10
+11: CLONE_EXIT 11
+12: CLONE_EXIT 12
+13: CLONE_EXIT 13
+14: CLONE_EXIT 14
+15: CLONE_EXIT 15
+16: CLONE_EXIT 16
+17: CLONE_EXIT 17
+18: CLONE_EXIT 18
+19: CLONE_EXIT 19
+20: CLONE_EXIT 20
+23: CLONE_EXIT 23
+24: CLONE_EXIT 24
+26: CLONE_EXIT 26
+27: CLONE_EXIT 27
+28: CLONE_EXIT 28
+
+/* Waits until the tid word at +0x08 reads 0, 1 s at most per WAIT. Returns
+ * 0, 30 when a WAIT timed out, 31 for another result, 32 when it never
+ * cleared. Uses r12. */
+user_test_futex_join:
+    mov r12d, 1000
+1:
+    mov edx, [rbx + 0x08]
+    test edx, edx
+    jz 2f
+    dec r12d
+    jz 3f
+    lea rdi, [rbx + 0x08]
+    xor esi, esi
+    lea r10, [rbx + 0x20]
+    mov eax, 202
+    syscall
+    cmp rax, -110
+    je 4f
+    test rax, rax
+    jz 1b
+    cmp rax, -11
+    je 1b
+    mov eax, 31
+    ret
+2:
+    xor eax, eax
+    ret
+3:
+    mov eax, 32
+    ret
+4:
+    mov eax, 30
+    ret
+
+/* The first child: WAIT on +0x00 must return 0 (result 1; 2 otherwise),
+ * then 100 ms before exit, so the parent is asleep on the tid word. */
+user_test_futex_waiter:
+    mov rdi, rbx
+    xor esi, esi
+    xor edx, edx
+    xor r10d, r10d
+    mov eax, 202
+    syscall
+    mov ecx, 2
+    test rax, rax
+    jnz 1f
+    mov ecx, 1
+1:
+    mov [rbx + 0x18], rcx
+    mov r12d, 10
+2:
+    CLONE_NAP
+    dec r12d
+    jnz 2b
+    xor edi, edi
+    mov eax, 60
+    syscall
+    ud2
+
+/* The second child: FUTEX_ROUNDS turns, waiting while the word is 0, then
+ * storing 0 and waking the parent. Result 1, or 2 after a timeout. */
+user_test_futex_turner:
+    mov r13d, FUTEX_ROUNDS
+1:
+    mov edx, [rbx + 0x10]
+    cmp edx, 1
+    je 2f
+    lea rdi, [rbx + 0x10]
+    mov esi, 128
+    lea r10, [rbx + 0x30]
+    mov eax, 202
+    syscall
+    cmp rax, -110
+    je 3f
+    jmp 1b
+2:
+    mov dword ptr [rbx + 0x10], 0
+    lea rdi, [rbx + 0x10]
+    mov esi, 129
+    mov edx, 1
+    xor r10d, r10d
+    mov eax, 202
+    syscall
+    dec r13d
+    jnz 1b
+    mov qword ptr [rbx + 0x18], 1
+    xor edi, edi
+    mov eax, 60
+    syscall
+    ud2
+3:
+    mov qword ptr [rbx + 0x18], 2
+    xor edi, edi
+    mov eax, 60
+    syscall
+    ud2
+user_test_futex_end:
+
+/* Index 19: WAIT for 0 on a 0 word with a 20 ms timeout: -ETIMEDOUT, exit
+ * 0; any other result, exit 1. The kernel test times it. */
+user_test_futex_timeout_start:
+    sub rsp, 32
+    mov qword ptr [rsp], 0
+    mov qword ptr [rsp + 8], 0
+    mov qword ptr [rsp + 16], 20000000
+    mov rdi, rsp
+    xor esi, esi
+    xor edx, edx
+    lea r10, [rsp + 8]
+    mov eax, 202
+    syscall
+    cmp rax, -110
+    jne 1f
+    CLONE_EXIT 0
+1:
+    CLONE_EXIT 1
+user_test_futex_timeout_end:
+
+/* Index 20: a child and the parent both WAIT forever on a 0 word. Only a
+ * kill ends the process (137); status 1 means clone failed. */
+user_test_futex_kill_start:
+    mov rbx, FUTEX_BASE
+    mov qword ptr [rbx], 0
+    mov eax, 56
+    mov edi, CLONE_THREAD_SET
+    lea rsi, [rbx + 0x800]
+    xor edx, edx
+    xor r10d, r10d
+    xor r8d, r8d
+    syscall
+    test rax, rax
+    js 2f
+1:
+    mov rdi, rbx
+    xor esi, esi
+    xor edx, edx
+    xor r10d, r10d
+    mov eax, 202
+    syscall
+    jmp 1b
+2:
+    CLONE_EXIT 1
+user_test_futex_kill_end:
+
 ignis_user_test_table:
     .quad user_test_exit_start, user_test_exit_end
     .quad user_test_registers_start, user_test_registers_end
@@ -896,5 +1268,8 @@ ignis_user_test_table:
     .quad user_test_alignment_spin_start, user_test_alignment_spin_end
     .quad user_test_clone_start, user_test_clone_end
     .quad user_test_clone_group_start, user_test_clone_group_end
+    .quad user_test_futex_start, user_test_futex_end
+    .quad user_test_futex_timeout_start, user_test_futex_timeout_end
+    .quad user_test_futex_kill_start, user_test_futex_kill_end
 
 .section .note.GNU-stack,"",@progbits

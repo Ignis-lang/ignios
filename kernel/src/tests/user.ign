@@ -116,11 +116,28 @@ namespace Tests::User {
   /// `exit_group(77)`.
   const CLONE_GROUP: u64 = 17;
 
+  /// Index 18: futex errors, a WAKE of a sibling's WAIT, a join on the
+  /// cleared tid word and a turn stress between two threads; 0 or the
+  /// number of the failed check.
+  const FUTEX: u64 = 18;
+
+  /// Index 19: a WAIT with a 20 ms timeout; 0 when it timed out.
+  const FUTEX_TIMEOUT: u64 = 19;
+
+  /// Index 20: two threads asleep in WAIT forever, until killed.
+  const FUTEX_KILL: u64 = 20;
+
   /// The most thread switches a wait for `NAP` may cost: the waiter blocks
   /// once and is woken once, plus the switches of `NAP`, of the `EXIT`
   /// program that runs first and of the idle thread. Polling once per tick
   /// would cost about 40.
   const WAIT_SWITCH_LIMIT: u64 = 12;
+
+  /// The 20 ms timeout of `FUTEX_TIMEOUT` is two ticks.
+  const FUTEX_TIMEOUT_TICKS: u64 = 2;
+
+  /// Ticks `runFutex` waits for `FUTEX_KILL` to have two threads.
+  const FUTEX_KILL_WAIT_TICKS: u64 = 100;
 
   /// What the shell shows for a process that died of SIGSEGV, SIGILL and
   /// SIGFPE: 128 plus 11, 4 and 8.
@@ -177,6 +194,7 @@ namespace Tests::User {
     runFpu();
     runWait();
     runClone();
+    runFutex();
     runIsolation();
     runHello();
     runRefused();
@@ -817,6 +835,58 @@ namespace Tests::User {
     }
 
     Drivers::Console::writeLine("user: clone made a thread with the parent's registers, its own stack, tid and FS base on every processor; exit ended the thread, exit_group the process");
+  }
+
+  /// Runs `FUTEX`, then `FUTEX_TIMEOUT`, which must take at least the two
+  /// ticks of its 20 ms timeout, then `FUTEX_KILL`, killed once both of its
+  /// threads sleep in WAIT: it must end with `KILLED` instead of hanging.
+  function runFutex(): void {
+    let slotsBefore: u64 = Proc::Process::usedSlots();
+    let status: u64 = runProgram(FUTEX);
+
+    if (status != 0) {
+      Drivers::Console::write("user test: futex check ");
+      Drivers::Console::writeDecimal(status);
+      Drivers::Console::writeLine(" failed");
+      @panic("user test: a futex call returned the wrong value");
+    }
+
+    let ticksBefore: u64 = Time::Timer::ticks();
+
+    if (runProgram(FUTEX_TIMEOUT) != 0) {
+      @panic("user test: a futex WAIT with a timeout did not return -ETIMEDOUT");
+    }
+
+    if (Time::Timer::ticks() - ticksBefore < FUTEX_TIMEOUT_TICKS) {
+      @panic("user test: a futex WAIT timed out too early");
+    }
+
+    let id: u64 = startProgram(FUTEX_KILL);
+    let mut waited: u64 = 0;
+
+    while (Proc::Process::threadCountOf(id) != 2 && waited < FUTEX_KILL_WAIT_TICKS) {
+      Sched::Scheduler::sleep(1);
+      waited += 1;
+    }
+
+    // Both threads reach their WAIT right after the clone.
+    Sched::Scheduler::sleep(5);
+    Proc::Process::kill(id);
+
+    let killedStatus: u64 = Proc::Process::wait(id);
+
+    if (killedStatus != Proc::Process::KILLED) {
+      Drivers::Console::write("user test: a process killed in futex WAIT ended with ");
+      Drivers::Console::writeDecimal(killedStatus);
+      Drivers::Console::writeLine("");
+      @panic("user test: a kill did not end threads asleep in futex WAIT");
+    }
+
+    if (Proc::Process::usedSlots() != slotsBefore) {
+      @panic("user test: the futex programs left a process slot taken");
+    }
+
+    Drivers::Console::writeLine("user: futex WAIT and WAKE between threads, -EAGAIN, -ETIMEDOUT, -EINVAL, -EFAULT, -ENOSYS, join on the cleared tid, 1000 turns without a lost wake-up and a kill of two waiters behave as on Linux");
   }
 
   /// Starts program `index` as a process and returns its id.

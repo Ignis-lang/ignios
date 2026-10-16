@@ -27,7 +27,8 @@
 //!
 //! The Linux files: `table.ign` (numbers and the table), `errno.ign` (errno
 //! values, `failure` and `errorFor`), `files.ign` (the file calls),
-//! `memory.ign` (`mmap` and `munmap`), `nanosleep.ign` and `reboot.ign`.
+//! `memory.ign` (`mmap` and `munmap`), `nanosleep.ign`, `reboot.ign`,
+//! `thread.ign` (`clone` and the thread calls) and `futex.ign`.
 //!
 //! ## Dependencies
 //!
@@ -52,6 +53,7 @@ import _ from "./core";
 import _ from "./dispatch";
 import _ from "./linux/errno";
 import _ from "./linux/files";
+import _ from "./linux/futex";
 import _ from "./linux/kill";
 import _ from "./linux/memory";
 import _ from "./linux/nanosleep";

@@ -125,6 +125,14 @@ import Sched from "@sched";
 import _ from "./elf";
 import _ from "./memory";
 
+/// `Proc::Futex::clearChildTid`, by its symbol: `futex.ign` reads user
+/// memory through `Proc::User`, which imports this file, so this file
+/// cannot import it back.
+extern FutexHook {
+  /// Writes a 32-bit 0 at `address` in `root` and wakes one waiter on it.
+  function ignis_futex_clear_child_tid(root: u64, address: u64): void;
+}
+
 /// One entry of the process table.
 @cLayout
 record ProcessEntry {
@@ -815,11 +823,26 @@ namespace Proc::Process {
   /// releases the descriptors and regions, makes the slot `EXITED` (or
   /// `FREE` for an orphan), reports the end and ends; the reap that follows
   /// destroys the address space.
+  ///
+  /// First of all, while the thread is still a member and the space is
+  /// whole, a clear-child-tid address (`set_tid_address`,
+  /// `CLONE_CHILD_CLEARTID`) gets a 32-bit 0 and one futex waiter on it is
+  /// woken (C4 D4), so a sibling joining on the tid word returns. The last
+  /// thread does it too: nobody else can wait on the word then, since
+  /// waits are keyed by the space, but one path for every thread keeps the
+  /// rule simple and the write costs one copy.
   function finishThread(status: u64): never {
     let slot: u64 = currentSlot();
 
     if (slot == NO_PROCESS) {
       @panic("process: a kernel thread tried to end a process");
+    }
+
+    let clearAddress: u64 = Sched::Scheduler::currentClearChildTid();
+
+    if (clearAddress != 0) {
+      Sched::Scheduler::setCurrentClearChildTid(0);
+      FutexHook::ignis_futex_clear_child_tid(currentRoot(), clearAddress);
     }
 
     let process: *mut ProcessEntry = slotPointer(slot);

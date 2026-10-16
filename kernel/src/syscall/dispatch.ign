@@ -56,6 +56,7 @@ import Proc from "@proc";
 import Sched from "@sched";
 import _ from "./linux/errno";
 import _ from "./linux/files";
+import _ from "./linux/futex";
 import _ from "./linux/kill";
 import _ from "./linux/memory";
 import _ from "./linux/nanosleep";
@@ -148,6 +149,8 @@ namespace Syscall {
       (*frame).rax = Linux::getTid();
     } else if (operation == Operation::SET_TID_ADDRESS) {
       (*frame).rax = Linux::setTidAddress(first);
+    } else if (operation == Operation::FUTEX) {
+      (*frame).rax = Linux::futex(first, second, third, fourth, fifth, sixth);
     } else if (operation == Operation::ARCH_CONTROL) {
       (*frame).rax = Linux::archPrctl(first, second);
     } else if (operation == Operation::GET_PID) {

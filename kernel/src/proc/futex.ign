@@ -1,0 +1,327 @@
+//!
+//! # Futex Waits
+//!
+//! The kernel side of Linux `futex` WAIT and WAKE: threads sleeping until
+//! another thread of the process wakes them on a 32-bit user word.
+//!
+//! ## Overview
+//!
+//! A wait is keyed by the address space root and the user address (C4 D3),
+//! so the threads of one process meet on a word and two processes never
+//! do, even on a page they share through `MAP_SHARED` (not supported, a
+//! documented limit). Keys hash into `BUCKETS` buckets; each bucket is a
+//! FIFO list of waiting threads under one mutex.
+//!
+//! Storage is bounded: the wait record of a thread lives in arrays indexed
+//! by its scheduler slot (`MAX_THREADS` of them), and a thread waits on one
+//! word at a time, so no call allocates.
+//!
+//! ```text
+//!   WAIT(root, address, expected, deadline)
+//!     lock bucket
+//!       read the u32 at address (Proc::User) ... fault: EFAULT
+//!       value != expected ...................... AGAIN
+//!       queue the record (QUEUED)
+//!     unlock bucket
+//!     loop: lock bucket
+//!             WOKEN ............................. OK
+//!             process killed .................... unqueue, INTERRUPTED
+//!             deadline passed ................... unqueue, TIMED_OUT
+//!           unlock bucket, Sched::Scheduler::parkUntil(deadline)
+//!
+//!   WAKE(root, address, count)
+//!     lock bucket
+//!       up to count records of the key, oldest first:
+//!         unqueue, WOKEN, Sched::Scheduler::wake(thread)
+//!     unlock bucket
+//! ```
+//!
+//! ## Why the compare cannot miss a wake
+//!
+//! A waker stores the word in user memory and then calls WAKE, which takes
+//! the bucket mutex. WAIT reads the word and queues itself under that same
+//! mutex. So either WAIT read the old value and queued before WAKE took the
+//! mutex, and WAKE finds it, or WAIT took the mutex after WAKE released it
+//! and reads the new value, which no longer matches. Once queued, the
+//! thread parks; a WAKE between the unlock and the park leaves a wake token
+//! (`Sched::Scheduler::wake`), so the park returns at once.
+//!
+//! ## Lock order
+//!
+//! The word is read with the bucket held, and `Proc::User` takes the
+//! process's address space mutex (rank 40) and, for a page of a file
+//! region, the VFS mutex (rank 30). The bucket is therefore a mutex, not a
+//! spinlock (the read may sleep), ranked `Lib::MutexRank::FUTEX_BUCKET`
+//! (25): above the process table, below VFS. Nobody calls WAIT or WAKE with
+//! the VFS, address space or process table mutex held: system calls start
+//! with none, and `Proc::Process::finishThread` clears the tid word before
+//! it takes the table.
+//!
+//! ## Interruption
+//!
+//! `Proc::Process::requestEnd` sets `killPending` and then interrupts every
+//! thread of the process, which makes a parked thread ready or leaves it a
+//! token. A waiter checks `killPending` under the bucket before each park,
+//! so a kill is never slept through; the system call returns `-EINTR` and
+//! the thread ends at its `checkKill`.
+
+import Lib from "@lib";
+import Sched from "@sched";
+import Time from "@time";
+import _ from "./process";
+import _ from "./user";
+
+/// The buckets and the per-thread wait records. Bucket arrays have
+/// `Proc::Futex::BUCKETS` entries, record arrays `Sched::Thread::MAX_THREADS`.
+record FutexState {
+  /// The mutex of each bucket, rank `Lib::MutexRank::FUTEX_BUCKET`.
+  static mut locks: Sched::Mutex[32];
+
+  /// The first waiter of each bucket, its slot plus 1; 0 when empty.
+  static mut heads: u64[32];
+
+  /// The last waiter of each bucket, its slot plus 1.
+  static mut tails: u64[32];
+
+  /// The address space root a thread waits in.
+  static mut roots: u64[128];
+
+  /// The user address a thread waits on.
+  static mut addresses: u64[128];
+
+  /// The next waiter in the same bucket, slot plus 1; 0 at the end.
+  static mut next: u64[128];
+
+  /// `IDLE`, `QUEUED` or `WOKEN`.
+  static mut states: u64[128];
+}
+
+/// The futex API.
+namespace Proc::Futex {
+  /// The number of buckets; the bucket arrays have this size.
+  const BUCKETS: u64 = 32;
+
+  /// The record sizes, which must equal `Sched::Thread::MAX_THREADS`.
+  const RECORDS: u64 = 128;
+
+  /// Record states: not waiting, in a bucket list, taken off it by WAKE.
+  const IDLE: u64 = 0;
+  const QUEUED: u64 = 1;
+  const WOKEN: u64 = 2;
+
+  /// `wait` results.
+  const WAIT_WOKEN: u64 = 0;
+  const WAIT_AGAIN: u64 = 1;
+  const WAIT_TIMED_OUT: u64 = 2;
+  const WAIT_INTERRUPTED: u64 = 3;
+  const WAIT_FAULT: u64 = 4;
+
+  /// Sets up the bucket mutexes. `main` calls it after the process table.
+  function initialize(): void {
+    if (RECORDS != Sched::Thread::MAX_THREADS) {
+      @panic("futex: the wait records do not match MAX_THREADS");
+    }
+
+    let mut bucket: u64 = 0;
+
+    while (bucket < BUCKETS) {
+      Sched::Mutex::initialize(lockOf(bucket), Lib::MutexRank::FUTEX_BUCKET);
+      *(headsBase() + bucket) = 0;
+      *(tailsBase() + bucket) = 0;
+      bucket += 1;
+    }
+  }
+
+  /// Blocks the running thread on the 4-byte aligned user word `address`
+  /// of the space `root` while it holds `expected`, until a `wake` of the
+  /// same key, the tick count `deadline` when `timed`, or a kill. Returns a
+  /// `WAIT_*` result; `WAIT_AGAIN` and `WAIT_FAULT` without sleeping.
+  function wait(root: u64, address: u64, expected: u32, timed: boolean, deadline: u64): u64 {
+    let slot: u64 = Sched::Scheduler::currentSlot();
+    let bucket: u64 = bucketOf(root, address);
+    let lock: *mut Sched::Mutex = lockOf(bucket);
+    let mut value: u32 = 0;
+
+    Sched::Mutex::lock(lock);
+
+    if (!Proc::User::copyFromUser(root, &mut value as *mut u8, address, 4)) {
+      Sched::Mutex::unlock(lock);
+      return WAIT_FAULT;
+    }
+
+    if (value != expected) {
+      Sched::Mutex::unlock(lock);
+      return WAIT_AGAIN;
+    }
+
+    *(rootsBase() + slot) = root;
+    *(addressesBase() + slot) = address;
+    *(statesBase() + slot) = QUEUED;
+    append(bucket, slot);
+    Sched::Mutex::unlock(lock);
+
+    // `parkUntil` takes 0 as no deadline; a deadline of tick 0 has passed.
+    let parkDeadline: u64 = timed ? (deadline == 0 ? 1 : deadline) : 0;
+    let mut result: u64 = WAIT_WOKEN;
+
+    while (true) {
+      Sched::Mutex::lock(lock);
+
+      if (*(statesBase() + slot) == WOKEN) {
+        result = WAIT_WOKEN;
+        break;
+      }
+
+      if (Proc::Process::killRequested()) {
+        unlink(bucket, slot);
+        result = WAIT_INTERRUPTED;
+        break;
+      }
+
+      if (timed && Time::Timer::ticks() >= deadline) {
+        unlink(bucket, slot);
+        result = WAIT_TIMED_OUT;
+        break;
+      }
+
+      Sched::Mutex::unlock(lock);
+      Sched::Scheduler::parkUntil(parkDeadline);
+    }
+
+    *(statesBase() + slot) = IDLE;
+    Sched::Mutex::unlock(lock);
+
+    return result;
+  }
+
+  /// Wakes up to `count` threads waiting on `address` in `root`, oldest
+  /// first, and returns how many.
+  function wake(root: u64, address: u64, count: u64): u64 {
+    let bucket: u64 = bucketOf(root, address);
+    let lock: *mut Sched::Mutex = lockOf(bucket);
+    let mut woken: u64 = 0;
+
+    Sched::Mutex::lock(lock);
+
+    let mut cursor: u64 = *(headsBase() + bucket);
+
+    while (cursor != 0 && woken < count) {
+      let slot: u64 = cursor - 1;
+
+      cursor = *(nextBase() + slot);
+
+      if (*(rootsBase() + slot) == root && *(addressesBase() + slot) == address) {
+        unlink(bucket, slot);
+        *(statesBase() + slot) = WOKEN;
+
+        // The waiter cannot leave before it sees WOKEN under this mutex,
+        // so its slot still holds it.
+        Sched::Scheduler::wake((*Sched::Thread::slotPointer(slot)).id);
+        woken += 1;
+      }
+    }
+
+    Sched::Mutex::unlock(lock);
+
+    return woken;
+  }
+
+  /// The clear-child-tid step of a thread's exit (C4 D4): writes a 32-bit
+  /// 0 to `address` in `root`, ignoring a fault, and wakes one waiter on
+  /// it, so a thread joining on the tid word returns.
+  /// `Proc::Process::finishThread` calls it by its symbol.
+  @externName("ignis_futex_clear_child_tid")
+  function clearChildTid(root: u64, address: u64): void {
+    let zero: u32 = 0;
+
+    Proc::User::copyToUser(root, address, &zero as *u8, 4);
+
+    if ((address & 3) == 0) {
+      wake(root, address, 1);
+    }
+  }
+
+  /// The bucket of the key (`root`, `address`).
+  function bucketOf(root: u64, address: u64): u64 {
+    return ((address >> 2) ^ (address >> 12) ^ (root >> 12)) % BUCKETS;
+  }
+
+  /// Adds `slot` at the end of `bucket`. The bucket mutex is held.
+  function append(bucket: u64, slot: u64): void {
+    *(nextBase() + slot) = 0;
+
+    let tail: u64 = *(tailsBase() + bucket);
+
+    if (tail == 0) {
+      *(headsBase() + bucket) = slot + 1;
+    } else {
+      *(nextBase() + tail - 1) = slot + 1;
+    }
+
+    *(tailsBase() + bucket) = slot + 1;
+  }
+
+  /// Removes `slot` from `bucket`. The bucket mutex is held.
+  function unlink(bucket: u64, slot: u64): void {
+    let mut previous: u64 = 0;
+    let mut cursor: u64 = *(headsBase() + bucket);
+
+    while (cursor != 0 && cursor != slot + 1) {
+      previous = cursor;
+      cursor = *(nextBase() + cursor - 1);
+    }
+
+    if (cursor == 0) {
+      return;
+    }
+
+    let after: u64 = *(nextBase() + slot);
+
+    if (previous == 0) {
+      *(headsBase() + bucket) = after;
+    } else {
+      *(nextBase() + previous - 1) = after;
+    }
+
+    if (*(tailsBase() + bucket) == slot + 1) {
+      *(tailsBase() + bucket) = previous;
+    }
+
+    *(nextBase() + slot) = 0;
+  }
+
+  /// The mutex of `bucket`.
+  function lockOf(bucket: u64): *mut Sched::Mutex {
+    return &mut FutexState::locks as *mut Sched::Mutex + bucket;
+  }
+
+  /// The first waiter array (`FutexState::heads`).
+  function headsBase(): *mut u64 {
+    return &mut FutexState::heads as *mut u64;
+  }
+
+  /// The last waiter array (`FutexState::tails`).
+  function tailsBase(): *mut u64 {
+    return &mut FutexState::tails as *mut u64;
+  }
+
+  /// The root array (`FutexState::roots`).
+  function rootsBase(): *mut u64 {
+    return &mut FutexState::roots as *mut u64;
+  }
+
+  /// The address array (`FutexState::addresses`).
+  function addressesBase(): *mut u64 {
+    return &mut FutexState::addresses as *mut u64;
+  }
+
+  /// The next waiter array (`FutexState::next`).
+  function nextBase(): *mut u64 {
+    return &mut FutexState::next as *mut u64;
+  }
+
+  /// The state array (`FutexState::states`).
+  function statesBase(): *mut u64 {
+    return &mut FutexState::states as *mut u64;
+  }
+}
