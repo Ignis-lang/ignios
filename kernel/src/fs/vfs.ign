@@ -306,6 +306,28 @@ namespace Fs::Vfs {
     Sched::Mutex::unlock(vfsLock());
   }
 
+  /// Takes the VFS lock unless the running thread holds it already or the
+  /// scheduler has not started (the boot self-tests run alone). Returns
+  /// true when it took the lock; pass the result to `unlockIfTaken`. For a
+  /// page fault resolved inside a system call that already holds the lock,
+  /// such as a `stat` into a file mapping.
+  function lockUnlessHeld(): boolean {
+    if (!Sched::Scheduler::isStarted() || Sched::Mutex::isHeldByCaller(vfsLock())) {
+      return false;
+    }
+
+    lock();
+
+    return true;
+  }
+
+  /// Ends a `lockUnlessHeld` that returned `taken`.
+  function unlockIfTaken(taken: boolean): void {
+    if (taken) {
+      unlock();
+    }
+  }
+
   /// Panics when the running thread does not hold the VFS lock, once the
   /// scheduler runs: a missing lock then fails the first call that lacks it,
   /// on every boot, instead of a race that shows once in a while. The

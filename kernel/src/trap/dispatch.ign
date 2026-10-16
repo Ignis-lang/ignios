@@ -17,6 +17,8 @@
 //!   ├─ vector 0x30  local APIC timer ............ Time::Timer::handleTick, Apic EOI,
 //!   │                                             Sched::Scheduler::onTick (may switch threads)
 //!   ├─ vectors 0x20-0x2F (the rest)  8259 ....... acknowledge or absorb a spurious one
+//!   ├─ page fault from ring 3 ................... Proc::User::resolveFault with interrupts
+//!   │                                             on: a missing page or copy on write, retry
 //!   ├─ exception from ring 3 (cs & 3 == 3) ..... report, kill the process
 //!   └─ any other exception ...................... report on COM1 and the
 //!                                                 console, halt the machine
@@ -153,9 +155,22 @@ namespace Trap {
 
     if (Exception::isUserFault(frame)) {
       // A page of a region the process never touched yet gets its frame
-      // here, and the instruction runs again.
-      if (vector == Exception::PAGE_FAULT && Proc::User::resolveFault(Exception::readCr2(), (*frame).errorCode)) {
-        return;
+      // here, a write to a copy-on-write page its copy, and the instruction
+      // runs again. A file page takes the VFS mutex, which may sleep, so
+      // interrupts are on while it resolves, as in a system call; CR2 is
+      // read first.
+      if (vector == Exception::PAGE_FAULT) {
+        let address: u64 = Exception::readCr2();
+
+        Arch::Cpu::enableInterrupts();
+
+        let resolved: boolean = Proc::User::resolveFault(address, (*frame).errorCode);
+
+        Arch::Cpu::disableInterrupts();
+
+        if (resolved) {
+          return;
+        }
       }
 
       Exception::killUserProcess(frame);

@@ -231,11 +231,17 @@ export namespace Sys {
   /// Execute.
   const PROT_EXEC: u64 = 4;
 
-  /// Map flag: every native mapping is private, so this is 0.
+  /// Map flag: a private mapping is the default, so this is 0. A write to
+  /// a private file mapping copies the page and never reaches the file.
   const MAP_PRIVATE: u64 = 0;
 
-  /// Map flag: zeroed memory, not a file.
+  /// Map flag: zeroed memory, not a file. Private only.
   const MAP_ANONYMOUS: u64 = 1;
+
+  /// Map flag: the file's page cache itself; writes reach the file and
+  /// `READ` sees them. Needs a descriptor open for writing with write
+  /// access.
+  const MAP_SHARED: u64 = 2;
 
   /// A regular file, in `FileInfo::kind`.
   const KIND_FILE: u64 = 1;

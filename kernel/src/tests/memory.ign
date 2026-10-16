@@ -137,7 +137,7 @@ namespace Tests::Memory {
 
     let available: u64 = Mm::Pmm::availableFrameCount();
 
-    if (Proc::Memory::map(SLOT, root, tooLarge, Proc::Memory::READ | Proc::Memory::WRITE, null, 0, &mut address as *mut u64) != Proc::Memory::NO_MEMORY || Mm::Pmm::reservedFrameCount() != reserved || available - Mm::Pmm::availableFrameCount() > TABLE_SLACK) {
+    if (Proc::Memory::map(SLOT, root, tooLarge, Proc::Memory::READ | Proc::Memory::WRITE, null, 0, false, &mut address as *mut u64) != Proc::Memory::NO_MEMORY || Mm::Pmm::reservedFrameCount() != reserved || available - Mm::Pmm::availableFrameCount() > TABLE_SLACK) {
       @panic("memory self-test: a mapping larger than the free memory was granted");
     }
   }
@@ -161,7 +161,7 @@ namespace Tests::Memory {
   function checkRefusedMapTakesNothing(root: u64): void {
     let available: u64 = Mm::Pmm::availableFrameCount();
     let mut address: u64 = 0;
-    let status: u64 = Proc::Memory::map(SLOT, root, 1099511627776, Proc::Memory::READ | Proc::Memory::WRITE, null, 0, &mut address as *mut u64);
+    let status: u64 = Proc::Memory::map(SLOT, root, 1099511627776, Proc::Memory::READ | Proc::Memory::WRITE, null, 0, false, &mut address as *mut u64);
 
     if (status != Proc::Memory::NO_MEMORY || available - Mm::Pmm::availableFrameCount() > TABLE_SLACK) {
       @panic("memory self-test: a refused lazy map kept frames");
@@ -198,7 +198,7 @@ namespace Tests::Memory {
 
     Proc::Memory::resolve(SLOT, root, region, Proc::Memory::WRITE);
     Proc::Memory::resolve(SLOT, root, region + 9 * PAGE, Proc::Memory::WRITE);
-    Proc::Memory::releaseReservations(SLOT, root);
+    Proc::Memory::teardown(SLOT, root);
 
     if (Mm::Pmm::reservedFrameCount() != 0) {
       @panic("memory self-test: the end of a process kept a reservation");
@@ -210,7 +210,7 @@ namespace Tests::Memory {
   function mapOrPanic(root: u64, length: u64, protection: u64): u64 {
     let mut address: u64 = 0;
 
-    if (Proc::Memory::map(SLOT, root, length, protection, null, 0, &mut address as *mut u64) != Proc::Memory::OK) {
+    if (Proc::Memory::map(SLOT, root, length, protection, null, 0, false, &mut address as *mut u64) != Proc::Memory::OK) {
       @panic("memory self-test: a lazy mapping failed");
     }
 

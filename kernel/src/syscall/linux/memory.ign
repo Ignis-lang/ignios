@@ -6,16 +6,23 @@
 //! ## Overview
 //!
 //! `mmap(addr, length, prot, flags, fd, offset)` maps a new region and
-//! returns its address. Two kinds are supported, both private:
+//! returns its address. Three kinds are supported:
 //!
-//! | Kind                        | Flags                         | Contents                                   |
-//! |-----------------------------|-------------------------------|--------------------------------------------|
-//! | anonymous                   | `MAP_PRIVATE \| MAP_ANONYMOUS` | zeros                                      |
-//! | private copy of a file      | `MAP_PRIVATE`, an open `fd`   | the file from `offset`, zeros past its end |
+//! | Kind                 | Flags                          | Contents                                              |
+//! |----------------------|--------------------------------|-------------------------------------------------------|
+//! | anonymous            | `MAP_PRIVATE \| MAP_ANONYMOUS` | zeros                                                 |
+//! | private file mapping | `MAP_PRIVATE`, an open `fd`    | the file from `offset`, zeros past its end; a write copies the page |
+//! | shared file mapping  | `MAP_SHARED`, an open `fd`     | the file's page cache: writes reach the file          |
 //!
-//! A file mapping is a copy made at `mmap` time: writes to it never reach
-//! the file, and later writes to the file are not seen through it. Linux
-//! makes no promise about the second point for a private mapping either.
+//! A file mapping is lazy: each page comes from the page cache on first
+//! access, and nothing is copied at `mmap` time. A private page sees later
+//! writes to the file until the process writes it; the write copies the
+//! page, and the copy never reaches the file. A shared page is the cache
+//! page itself: a write through it is seen by `read`, and a `write` to the
+//! file is seen through it. A shared mapping past the end of the file
+//! reaches zeroed pages that `read` does not show, and growing the file
+//! zeroes them again. `MAP_SHARED | MAP_ANONYMOUS` is refused: without
+//! `fork` it would equal a private mapping.
 //!
 //! ## Arguments
 //!
@@ -24,8 +31,8 @@
 //! | `addr`   | a hint, ignored; the kernel picks the address                     |              |
 //! | `length` | not 0; rounded up to whole pages                                  | `-EINVAL`    |
 //! | `prot`   | `PROT_READ` 1, `PROT_WRITE` 2, `PROT_EXEC` 4, or `PROT_NONE` 0; not write and execute together | `-EINVAL` |
-//! | `flags`  | `MAP_PRIVATE` 2; `MAP_ANONYMOUS` `0x20` optional; `MAP_SHARED` 1 and `MAP_FIXED` `0x10` are not supported | `-EINVAL` |
-//! | `fd`     | ignored with `MAP_ANONYMOUS`; otherwise open, a regular file, opened for reading | `-EBADF`, `-ENODEV`, `-EACCES` |
+//! | `flags`  | exactly one of `MAP_SHARED` 1 and `MAP_PRIVATE` 2; `MAP_ANONYMOUS` `0x20` optional, only with `MAP_PRIVATE`; `MAP_FIXED` `0x10` is not supported | `-EINVAL` |
+//! | `fd`     | ignored with `MAP_ANONYMOUS`; otherwise open, a regular file, opened for reading, and for writing too with `MAP_SHARED` and `PROT_WRITE` | `-EBADF`, `-ENODEV`, `-EACCES` |
 //! | `offset` | a multiple of the page size                                       | `-EINVAL`    |
 //!
 //! Running out of frames or of region table entries is `-ENOMEM`.
@@ -80,12 +87,15 @@ namespace Syscall::Linux {
       return Linux::failure(Linux::EINVAL);
     }
 
-    if ((flags & MAP_SHARED) != 0 || (flags & MAP_PRIVATE) == 0 || (flags & MAP_FIXED) != 0) {
+    let shared: boolean = (flags & MAP_SHARED) != 0;
+    let anonymous: boolean = (flags & MAP_ANONYMOUS) != 0;
+
+    if (shared == ((flags & MAP_PRIVATE) != 0) || (flags & MAP_FIXED) != 0 || (shared && anonymous)) {
       return Linux::failure(Linux::EINVAL);
     }
 
     let mut address: u64 = 0;
-    let status: u64 = Syscall::Core::map((flags & MAP_ANONYMOUS) != 0, descriptor, offset, length, translateProtection(protection), &mut address as *mut u64);
+    let status: u64 = Syscall::Core::map(anonymous, shared, descriptor, offset, length, translateProtection(protection), &mut address as *mut u64);
 
     return status == Fs::Vfs::OK ? address : Linux::failureFor(status);
   }

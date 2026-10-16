@@ -566,7 +566,7 @@ namespace Proc::Process {
     // The descriptors and regions go first: once the slot is EXITED, or FREE
     // for an orphan, another process may be launched into it.
     Fs::Files::closeAll(slot);
-    Proc::Memory::releaseReservations(slot, currentRoot());
+    Proc::Memory::teardown(slot, currentRoot());
     Proc::Memory::reset(slot);
 
     Sched::Mutex::lock(tableLock());

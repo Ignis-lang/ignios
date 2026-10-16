@@ -25,13 +25,13 @@
 //! |--------|----------------------------------------------------------------------|
 //! | 10-13  | an anonymous mapping: page aligned, in the mapping area, zeroed, writable |
 //! | 14     | a second mapping does not overlap the first                         |
-//! | 20-26  | `mmap` errors: length 0, unknown `prot` bit, write with execute, `MAP_SHARED`, no `MAP_PRIVATE`, `MAP_FIXED`, an unaligned offset |
+//! | 20-26  | `mmap` errors: length 0, unknown `prot` bit, write with execute, `MAP_SHARED \| MAP_ANONYMOUS`, no `MAP_PRIVATE` or `MAP_SHARED`, `MAP_FIXED`, an unaligned offset |
 //! | 30-32  | `munmap` errors: unaligned address, length 0; a range with no mapping is 0 |
 //! | 40-42  | `munmap` of the middle page of three keeps the other two and their data |
 //! | 50-51  | a `PROT_READ` mapping reads as zeros; `read` into it is `-EFAULT`    |
 //! | 52     | `write` from a mapping works: the kernel sees it in the page tables |
 //! | 60-61  | the region table grows from 32 entries and fills up at 1024: `-ENOMEM`; a split that needs one more entry is `-ENOMEM` and leaves the region whole; then every mapping is removed |
-//! | 70-72  | a private mapping of `/etc/motd`: the file, then zeros to the page end; a write changes the mapping, not the file |
+//! | 70-72  | a private mapping of `/etc/motd`: the file, then zeros to the page end; a write copies the page and changes the mapping, not the file |
 //! | 73     | an offset: page 1 of `/bin/hello` mapped equals page 1 read with `read` |
 //! | 74     | an offset past the end of the file maps zeros                       |
 //! | 75-78  | file mapping errors: a closed descriptor `-EBADF`, a directory and the console `-ENODEV`, a write-only descriptor `-EACCES` |
@@ -40,6 +40,7 @@
 //! | 86     | a `PROT_READ \| PROT_EXEC` private mapping of a file runs: `/mmexec` holds a `ret`, the mapping is called and returns (the kernel test removes `/mmexec`) |
 //! | 92-93  | the stack grows: a recursion with a page of locals per call reaches 7 MiB below its start, near the 8 MiB limit, and comes back intact |
 //! | 90-91  | `read` into two pages of a new mapping that were never touched, across the page boundary, works and gives the file's bytes |
+//! | 100-104 | `MAP_SHARED` of `/mmshared`: the file's bytes; a store through the mapping is seen by `read`; a `write` to the file is seen through the mapping; a read-only descriptor with `PROT_WRITE` is `-EACCES` and without it maps; `MAP_SHARED \| MAP_PRIVATE` is `-EINVAL` (the file is removed after) |
 
 import Alloc from "std::alloc";
 import Args from "std::args";
@@ -314,6 +315,55 @@ function checkFiles(): void {
 
   expect(Sys::mmap(PAGE, Sys::PROT_READ, Sys::MAP_PRIVATE, writeOnly as u64, 0), 0 - Sys::EACCES, 78);
   Sys::close(writeOnly as u64);
+}
+
+/// A shared mapping of a file is the file: stores through it reach `read`,
+/// and `write` reaches it.
+function checkShared(): void {
+  let fd: i64 = Sys::open("/mmshared" as *u8, Sys::O_CREAT | Sys::O_RDWR | Sys::O_TRUNC, 0x1A4);
+
+  require(fd >= 0, 100);
+  expect(Sys::write(fd as u64, MOTD as *u8, MOTD_LENGTH), MOTD_LENGTH as i64, 100);
+
+  let mapped: i64 = Sys::mmap(PAGE, Sys::PROT_READ | Sys::PROT_WRITE, Sys::MAP_SHARED, fd as u64, 0);
+
+  require(mapped > 0, 100);
+
+  let base: u64 = mapped as u64;
+  let mut index: u64 = 0;
+
+  while (index < MOTD_LENGTH) {
+    require(peek(base + index) == *(MOTD as *u8 + index), 100);
+    index += 1;
+  }
+
+  let first: *mut u8 = &mut State::page as *mut u8;
+
+  poke(base, 0x58);
+  expect(Sys::seek(fd as u64, 0, Sys::SEEK_SET), 0, 101);
+  expect(Sys::read(fd as u64, first, 1), 1, 101);
+  require(*first == 0x58, 101);
+
+  let mut letter: u8 = 0x59;
+
+  expect(Sys::seek(fd as u64, 1, Sys::SEEK_SET), 1, 102);
+  expect(Sys::write(fd as u64, &mut letter as *u8, 1), 1, 102);
+  require(peek(base + 1) == 0x59, 102);
+  expect(Sys::munmap(base, PAGE), 0, 102);
+
+  let readOnly: i64 = Sys::open("/mmshared" as *u8, Sys::O_RDONLY, 0);
+
+  expect(Sys::mmap(PAGE, Sys::PROT_READ | Sys::PROT_WRITE, Sys::MAP_SHARED, readOnly as u64, 0), 0 - Sys::EACCES, 103);
+
+  let viewed: i64 = Sys::mmap(PAGE, Sys::PROT_READ, Sys::MAP_SHARED, readOnly as u64, 0);
+
+  require(viewed > 0 && peek(viewed as u64) == 0x58 && peek(viewed as u64 + 1) == 0x59, 103);
+  expect(Sys::munmap(viewed as u64, PAGE), 0, 103);
+  expect(Sys::mmap(PAGE, Sys::PROT_READ, Sys::MAP_SHARED | Sys::MAP_PRIVATE, fd as u64, 0), 0 - Sys::EINVAL, 104);
+
+  Sys::close(readOnly as u64);
+  Sys::close(fd as u64);
+  expect(Sys::unlink("/mmshared" as *u8), 0, 104);
 }
 
 /// The address of block `index` of `checkAllocator`.
@@ -596,13 +646,14 @@ function main(count: u64, values: *u64): u64 {
   checkProtection();
   checkLimit();
   checkFiles();
+  checkShared();
   checkLazy();
   checkStack();
   checkAllocator();
   checkClosure();
   checkExecutable();
 
-  Io::print("mmtest: anonymous and file mappings, protection, munmap, their errors and std::alloc behave as expected\n");
+  Io::print("mmtest: anonymous, private and shared file mappings, protection, munmap, their errors and std::alloc behave as expected\n");
 
   return 0;
 }

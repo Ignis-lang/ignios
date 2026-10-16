@@ -24,7 +24,13 @@
 //!     Mm::AddressSpace::copyToUser(...)
 //! ```
 //!
-//! `resolveFault` is the same decision for the page fault handler. The
+//! A present page that is not writable fails `translateUser` for a write
+//! too, so a copy into a copy-on-write page of a private file mapping
+//! resolves it like a write fault: the page is copied first.
+//!
+//! `resolveFault` is the same decision for the page fault handler: a
+//! missing page, or a write to a present one (copy on write). A file page
+//! takes the VFS lock, so the handler runs it with interrupts enabled. The
 //! functions take `root` like their `Mm::AddressSpace` counterparts; it must
 //! be the running process's space.
 //!
@@ -52,12 +58,14 @@ namespace Proc::User {
   /// Resolves a page fault the running process took at `address` with the
   /// error code `code`. Returns true when the page is now mapped and the
   /// instruction can run again, false when the access is not allowed and
-  /// the process must be killed. A fault on a present page is a protection
-  /// violation and is never resolved.
+  /// the process must be killed. A fault on a present page is resolved only
+  /// for a write, which a writable private file region copies (copy on
+  /// write); any other is a protection violation. May take the VFS lock:
+  /// the caller runs it with interrupts enabled and no spinlock held.
   function resolveFault(address: u64, code: u64): boolean {
     let slot: u64 = Proc::Process::currentSlot();
 
-    if (slot == Proc::Process::NO_PROCESS || (code & FAULT_PRESENT) != 0) {
+    if (slot == Proc::Process::NO_PROCESS || ((code & FAULT_PRESENT) != 0 && (code & FAULT_WRITE) == 0)) {
       return false;
     }
 

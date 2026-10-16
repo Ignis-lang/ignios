@@ -1,0 +1,351 @@
+//!
+//! # File Mapping Self-Test
+//!
+//! Checks the file regions of `Proc::Memory` against the page cache of
+//! `Fs::Vfs` and the frame counts of the PMM, in a space of its own and the
+//! free process slot 63, before any process runs. The test file holds two
+//! full pages and 100 bytes of a third: `A`, `B` and `C`.
+//!
+//! | Check            | What it proves                                                          |
+//! |------------------|-------------------------------------------------------------------------|
+//! | lazy             | a private file mapping fills no cache page and takes no frame until touched |
+//! | private copy     | a read maps the cache frame itself; a write copies only its page, which `read` of the file does not see |
+//! | coherence        | a `write` to the file is seen by an untouched or read-only page, not by a copied one |
+//! | tail             | the page that straddles the file end and the page past it are private, zero-tailed and zeroed |
+//! | shared           | a shared mapping maps the cache frame writable and a write through it is seen by `read` |
+//! | reservations     | writable private: every page; read-only private: only pages not fully backed; shared: none; `unmap` and `teardown` return the unused rest |
+//! | removal          | a mapped file's `remove` is `BUSY` until the last region goes, a split region included |
+//! | release          | the free frames and the reservations return to their start after unmap, removal of the file and reset |
+
+import Boot from "@boot";
+import Drivers from "@drivers";
+import Fs from "@fs";
+import Mm from "@mm";
+import Proc from "@proc";
+
+/// The checks.
+namespace Tests::FileMapping {
+  /// The process slot the test uses: the last one, free while the boot
+  /// self-tests run.
+  const SLOT: u64 = 63;
+
+  /// 4 KiB.
+  const PAGE: u64 = 4096;
+
+  /// The size of the test file: two full pages and 100 bytes.
+  const FILE_SIZE: u64 = 8292;
+
+  /// The bytes of the test file in its third page.
+  const TAIL: u64 = 100;
+
+  /// Page frames the page tables of a small region can take at most.
+  const TABLE_SLACK: u64 = 8;
+
+  /// The bytes of each page of the test file.
+  const BYTE_A: u8 = 0x41;
+  const BYTE_B: u8 = 0x42;
+  const BYTE_C: u8 = 0x43;
+
+  /// Bytes written by the checks.
+  const BYTE_PRIVATE: u8 = 0x50;
+  const BYTE_SHARED: u8 = 0x53;
+  const BYTE_FILE: u8 = 0x46;
+
+  function run(): void {
+    // The region table and the cache table come from the heap; make the
+    // heap big enough first so it does not grow in the middle of a count.
+    Mm::Heap::free(Mm::Heap::allocate(16384, 16));
+    Proc::Memory::reset(SLOT);
+
+    let freeBefore: u64 = Mm::Pmm::freeFrameCount();
+    let reservedBefore: u64 = Mm::Pmm::reservedFrameCount();
+    let root: u64 = Mm::AddressSpace::create();
+
+    if (root == Mm::Pmm::NO_FRAME) {
+      @panic("file mapping self-test: no address space");
+    }
+
+    let node: *mut Fs::Node = createFile();
+
+    checkPrivate(root, node);
+    checkShared(root, node);
+    checkReadOnly(root, node);
+    checkRemoval(root, node);
+
+    Proc::Memory::reset(SLOT);
+    Mm::AddressSpace::destroy(root);
+
+    if (Fs::Vfs::remove(node) != Fs::Vfs::OK) {
+      @panic("file mapping self-test: the unmapped file could not be removed");
+    }
+
+    if (Mm::Pmm::freeFrameCount() != freeBefore || Mm::Pmm::reservedFrameCount() != reservedBefore) {
+      @panic("file mapping self-test: frames or reservations leaked");
+    }
+
+    Drivers::Console::writeLine("memory: file mapping self-test ok, cache frames shared, private writes copied, shared writes reach the file");
+  }
+
+  /// A writable private mapping of four pages: lazy, reads share the cache
+  /// frame, a write copies only its page, coherence with `write`, the
+  /// private tail pages, the reservation of every page.
+  function checkPrivate(root: u64, node: *mut Fs::Node): void {
+    let free: u64 = Mm::Pmm::freeFrameCount();
+    let reserved: u64 = Mm::Pmm::reservedFrameCount();
+    let region: u64 = mapOrPanic(root, node, 4 * PAGE, Proc::Memory::READ | Proc::Memory::WRITE, false);
+
+    if (Mm::Pmm::reservedFrameCount() != reserved + 4 || free - Mm::Pmm::freeFrameCount() > TABLE_SLACK || cachedPages(node) != 0) {
+      @panic("file mapping self-test: a private file mapping did not reserve every page, or filled the cache");
+    }
+
+    // A private write copies its page only: page 1, read before, stays the
+    // cache frame.
+    resolveOrPanic(root, region + PAGE, Proc::Memory::READ);
+    resolveOrPanic(root, region, Proc::Memory::READ);
+
+    if (physical(root, region) != Fs::Vfs::cachedFrame(node, 0) || isWritable(root, region)) {
+      @panic("file mapping self-test: a private read did not map the cache frame read-only");
+    }
+
+    resolveOrPanic(root, region, Proc::Memory::WRITE);
+    storeByte(root, region, BYTE_PRIVATE);
+
+    if (physical(root, region) == Fs::Vfs::cachedFrame(node, 0) || physical(root, region + PAGE) != Fs::Vfs::cachedFrame(node, 1)) {
+      @panic("file mapping self-test: a private write did not copy exactly its page");
+    }
+
+    if (byteAt(root, region + 1) != BYTE_A || fileByte(node, 0) != BYTE_A || Mm::Pmm::referenceCount(Fs::Vfs::cachedFrame(node, 0)) != 1) {
+      @panic("file mapping self-test: a private copy lost the file bytes, reached the file or kept the cache frame");
+    }
+
+    // A write to the file: the read-only page 1 sees it, the copy of
+    // page 0 does not.
+    writeFile(node, 0, BYTE_FILE);
+    writeFile(node, PAGE, BYTE_FILE);
+
+    if (byteAt(root, region + PAGE) != BYTE_FILE || byteAt(root, region) != BYTE_PRIVATE) {
+      @panic("file mapping self-test: a write to the file was not seen by a cache page, or was seen by a copy");
+    }
+
+    writeFile(node, 0, BYTE_A);
+    writeFile(node, PAGE, BYTE_B);
+
+    // Page 2 straddles the end of the file and page 3 is past it: private
+    // frames, the file bytes and zeros, even when read.
+    resolveOrPanic(root, region + 2 * PAGE, Proc::Memory::READ);
+    resolveOrPanic(root, region + 3 * PAGE, Proc::Memory::READ);
+
+    if (physical(root, region + 2 * PAGE) == Fs::Vfs::cachedFrame(node, 2) || byteAt(root, region + 2 * PAGE + TAIL - 1) != BYTE_C || byteAt(root, region + 2 * PAGE + TAIL) != 0 || byteAt(root, region + 3 * PAGE) != 0) {
+      @panic("file mapping self-test: the pages at and past the end of the file are not private and zero-tailed");
+    }
+
+    // Three private frames (page 0 copied, pages 2 and 3), one reserved page
+    // left; unmap returns it and the frames.
+    if (Mm::Pmm::reservedFrameCount() != reserved + 1) {
+      @panic("file mapping self-test: private pages did not come from the reservation");
+    }
+
+    unmapOrPanic(root, region, 4 * PAGE);
+
+    if (Mm::Pmm::reservedFrameCount() != reserved || Mm::Pmm::referenceCount(Fs::Vfs::cachedFrame(node, 1)) != 1) {
+      @panic("file mapping self-test: unmap kept a reservation or a cache reference");
+    }
+  }
+
+  /// A shared mapping reserves nothing, maps the cache frames writable, and
+  /// a write through it reaches the file.
+  function checkShared(root: u64, node: *mut Fs::Node): void {
+    let reserved: u64 = Mm::Pmm::reservedFrameCount();
+    let region: u64 = mapOrPanic(root, node, 4 * PAGE, Proc::Memory::READ | Proc::Memory::WRITE, true);
+
+    if (Mm::Pmm::reservedFrameCount() != reserved) {
+      @panic("file mapping self-test: a shared mapping reserved frames");
+    }
+
+    resolveOrPanic(root, region, Proc::Memory::WRITE);
+    storeByte(root, region, BYTE_SHARED);
+
+    if (physical(root, region) != Fs::Vfs::cachedFrame(node, 0) || !isWritable(root, region) || fileByte(node, 0) != BYTE_SHARED) {
+      @panic("file mapping self-test: a write through a shared mapping did not reach the file");
+    }
+
+    writeFile(node, 0, BYTE_A);
+
+    // Past the end of the file a shared page is a zeroed cache page.
+    resolveOrPanic(root, region + 3 * PAGE, Proc::Memory::READ);
+
+    if (physical(root, region + 3 * PAGE) != Fs::Vfs::cachedFrame(node, 3) || byteAt(root, region + 3 * PAGE) != 0) {
+      @panic("file mapping self-test: a shared page past the end of the file is not a zeroed cache page");
+    }
+
+    unmapOrPanic(root, region, 4 * PAGE);
+
+    if (Mm::Pmm::reservedFrameCount() != reserved) {
+      @panic("file mapping self-test: a shared unmap changed the reservations");
+    }
+  }
+
+  /// A read-only private mapping reserves only the pages not fully backed
+  /// by the file, and a process end returns the unused part.
+  function checkReadOnly(root: u64, node: *mut Fs::Node): void {
+    let reserved: u64 = Mm::Pmm::reservedFrameCount();
+    let region: u64 = mapOrPanic(root, node, 4 * PAGE, Proc::Memory::READ, false);
+
+    if (Mm::Pmm::reservedFrameCount() != reserved + 2) {
+      @panic("file mapping self-test: a read-only private mapping did not reserve exactly its unbacked pages");
+    }
+
+    resolveOrPanic(root, region, Proc::Memory::READ);
+    resolveOrPanic(root, region + 2 * PAGE, Proc::Memory::READ);
+
+    if (Proc::Memory::resolve(SLOT, root, region, Proc::Memory::WRITE) || Mm::Pmm::reservedFrameCount() != reserved + 1) {
+      @panic("file mapping self-test: a read-only file page became writable, or a page took the wrong frame");
+    }
+
+    Proc::Memory::teardown(SLOT, root);
+
+    if (Mm::Pmm::reservedFrameCount() != reserved || (*node).mappings != 0) {
+      @panic("file mapping self-test: the end of a process kept a reservation or the node");
+    }
+  }
+
+  /// A mapped file cannot be removed, also after a split, until the last
+  /// region that names it is unmapped.
+  function checkRemoval(root: u64, node: *mut Fs::Node): void {
+    let region: u64 = mapOrPanic(root, node, 3 * PAGE, Proc::Memory::READ, false);
+
+    unmapOrPanic(root, region + PAGE, PAGE);
+
+    if (Fs::Vfs::remove(node) != Fs::Vfs::BUSY) {
+      @panic("file mapping self-test: a mapped file was removed");
+    }
+
+    resolveOrPanic(root, region + 2 * PAGE, Proc::Memory::READ);
+
+    if (byteAt(root, region + 2 * PAGE) != BYTE_C) {
+      @panic("file mapping self-test: the tail of a split file region lost its file offset");
+    }
+
+    unmapOrPanic(root, region, PAGE);
+
+    if (Fs::Vfs::remove(node) != Fs::Vfs::BUSY) {
+      @panic("file mapping self-test: a file mapped by the tail of a split region was removed");
+    }
+
+    unmapOrPanic(root, region + 2 * PAGE, PAGE);
+  }
+
+  /// Creates the test file `/fmt`: a page of `A`, a page of `B`, 100
+  /// bytes of `C`.
+  function createFile(): *mut Fs::Node {
+    let mut node: *mut Fs::Node = null;
+
+    if (Fs::Vfs::create(Fs::Vfs::root(), "fmt" as *u8, 3, Fs::Vfs::FILE, Fs::Vfs::FILE_MODE, &mut node as *mut *mut Fs::Node) != Fs::Vfs::OK) {
+      @panic("file mapping self-test: cannot create the test file");
+    }
+
+    let mut offset: u64 = 0;
+
+    while (offset < FILE_SIZE) {
+      writeFile(node, offset, offset < PAGE ? BYTE_A : offset < 2 * PAGE ? BYTE_B : BYTE_C);
+      offset += 1;
+    }
+
+    return node;
+  }
+
+  /// Writes one byte to the file.
+  function writeFile(node: *mut Fs::Node, offset: u64, value: u8): void {
+    let mut byte: u8 = value;
+
+    if (Fs::Vfs::write(node, offset, &mut byte as *u8, 1) != Fs::Vfs::OK) {
+      @panic("file mapping self-test: a write to the test file failed");
+    }
+  }
+
+  /// The byte of the file at `offset`, through `read`.
+  function fileByte(node: *mut Fs::Node, offset: u64): u8 {
+    let mut byte: u8 = 0;
+    let mut copied: u64 = 0;
+
+    if (Fs::Vfs::read(node, offset, &mut byte as *mut u8, 1, &mut copied as *mut u64) != Fs::Vfs::OK || copied != 1) {
+      @panic("file mapping self-test: a read of the test file failed");
+    }
+
+    return byte;
+  }
+
+  /// The cache pages of `node` that are filled.
+  function cachedPages(node: *mut Fs::Node): u64 {
+    let mut count: u64 = 0;
+    let mut page: u64 = 0;
+
+    while (page < 4) {
+      if (Fs::Vfs::cachedFrame(node, page) != 0) {
+        count += 1;
+      }
+
+      page += 1;
+    }
+
+    return count;
+  }
+
+  /// The frame the page at `address` maps to, or `NOT_MAPPED`.
+  function physical(root: u64, address: u64): u64 {
+    let translated: u64 = Mm::AddressSpace::translateUser(root, address, false);
+
+    return translated == Mm::AddressSpace::NOT_MAPPED ? translated : translated / PAGE * PAGE;
+  }
+
+  /// True when the page at `address` is mapped writable.
+  function isWritable(root: u64, address: u64): boolean {
+    return Mm::AddressSpace::translateUser(root, address, true) != Mm::AddressSpace::NOT_MAPPED;
+  }
+
+  /// The byte at the user address `address`.
+  function byteAt(root: u64, address: u64): u8 {
+    let translated: u64 = Mm::AddressSpace::translateUser(root, address, false);
+
+    if (translated == Mm::AddressSpace::NOT_MAPPED) {
+      @panic("file mapping self-test: a resolved page is not mapped");
+    }
+
+    return *(Boot::Hhdm::toVirtual(translated) as *mut u8);
+  }
+
+  /// Stores a byte at the user address `address`, which must be mapped
+  /// writable: the store a process would make.
+  function storeByte(root: u64, address: u64, value: u8): void {
+    let mut byte: u8 = value;
+
+    if (!Mm::AddressSpace::copyToUser(root, address, &mut byte as *u8, 1)) {
+      @panic("file mapping self-test: a store to a resolved page failed");
+    }
+  }
+
+  /// Resolves `access` at `address` and panics when it is refused.
+  function resolveOrPanic(root: u64, address: u64, access: u64): void {
+    if (!Proc::Memory::resolve(SLOT, root, address, access)) {
+      @panic("file mapping self-test: an allowed access was refused");
+    }
+  }
+
+  /// Maps `length` bytes of `node` from offset 0 and returns the start.
+  function mapOrPanic(root: u64, node: *mut Fs::Node, length: u64, protection: u64, shared: boolean): u64 {
+    let mut address: u64 = 0;
+
+    if (Proc::Memory::map(SLOT, root, length, protection, node, 0, shared, &mut address as *mut u64) != Proc::Memory::OK) {
+      @panic("file mapping self-test: a file mapping failed");
+    }
+
+    return address;
+  }
+
+  /// Unmaps a range and panics when it is refused.
+  function unmapOrPanic(root: u64, address: u64, length: u64): void {
+    if (Proc::Memory::unmap(SLOT, root, address, length) != Proc::Memory::OK) {
+      @panic("file mapping self-test: unmap failed");
+    }
+  }
+}

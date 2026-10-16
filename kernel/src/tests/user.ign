@@ -246,10 +246,13 @@ namespace Tests::User {
   /// execute one without `PROT_EXEC`, read a `PROT_NONE` one. Each must be
   /// killed with SIGSEGV. A last run frees a `std::alloc` block twice, which
   /// must end in the allocator's panic. The file `/mmexec` that the first run
-  /// made is removed. The PMM free count must be the same at the end:
+  /// made is removed. The PMM free count must be the same at the end, less
+  /// the page cache frames that the file mappings of `/etc/motd` and
+  /// `/bin/hello` filled, which the cache keeps until the file is removed:
   /// mappings are freed by `munmap` or when the process ends.
   function runMemory(): void {
     let freeBefore: u64 = Mm::Pmm::freeFrameCount();
+    let cachedBefore: u64 = cachedPages("/etc/motd") + cachedPages("/bin/hello");
     let status: u64 = Proc::Programs::runNamed("mmtest");
 
     if (status != 0) {
@@ -271,7 +274,9 @@ namespace Tests::User {
 
     removeFile("/mmexec");
 
-    if (Mm::Pmm::freeFrameCount() != freeBefore) {
+    let cachedNow: u64 = cachedPages("/etc/motd") + cachedPages("/bin/hello") - cachedBefore;
+
+    if (Mm::Pmm::freeFrameCount() + cachedNow != freeBefore) {
       @panic("user test: mappings leaked frames");
     }
 
@@ -469,6 +474,37 @@ namespace Tests::User {
     }
 
     Fs::Vfs::unlock();
+  }
+
+  /// The page cache frames the file at `path` holds.
+  function cachedPages(path: str): u64 {
+    let mut length: u64 = 0;
+    let mut node: *mut Fs::Node = null;
+    let mut count: u64 = 0;
+
+    while (*(path as *u8 + length) != 0) {
+      length += 1;
+    }
+
+    Fs::Vfs::lock();
+
+    if (Fs::Vfs::lookup(Fs::Vfs::root(), path as *u8, length, &mut node as *mut *mut Fs::Node) != Fs::Vfs::OK) {
+      @panic("user test: a seeded file is missing");
+    }
+
+    let mut page: u64 = 0;
+
+    while (page < (*node).cachePages) {
+      if (Fs::Vfs::cachedFrame(node, page) != 0) {
+        count += 1;
+      }
+
+      page += 1;
+    }
+
+    Fs::Vfs::unlock();
+
+    return count;
   }
 
   /// Panics unless running `line` ends with SIGSEGV.

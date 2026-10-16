@@ -6,18 +6,18 @@
 //!
 //! ## Overview
 //!
-//! Each process slot has a table of regions on the heap: a start, a length
-//! and a protection each. It starts at 32 entries on the first `map` and
-//! doubles when full, up to `MAX_REGIONS` (1024); `reset` frees it when the
-//! process ends. An anonymous region is lazy: `map` builds its page tables
-//! and reserves one frame per page (`Mm::Pmm::reserve`), and a page gets its
-//! zeroed frame on first access, from a page fault or a system call copy
-//! (`resolve`). A file mapping is still filled at once, as a private copy of
-//! the file. `unmap` frees the touched pages and gives back the reservation
-//! of the others. The ELF image and the stack are not regions: `unmap`
-//! never touches them. The stack grows on demand too: a fault anywhere in
-//! the 8 MiB below `STACK_TOP` gets a zeroed page (`growStack`), and the
-//! unmapped gap below `STACK_BOTTOM` ends a runaway recursion with SIGSEGV.
+//! Each process slot has a table of regions on the heap: a start, a length,
+//! a protection and, for a file mapping, the file backing each. It starts at
+//! 32 entries on the first `map` and doubles when full, up to `MAX_REGIONS`
+//! (1024); `reset` frees it when the process ends. Every region is lazy:
+//! `map` builds its page tables and reserves the frames its private pages
+//! may need (`Mm::Pmm::reserve`), and a page gets its frame on first access,
+//! from a page fault or a system call copy (`resolve`). `unmap` frees the
+//! touched pages and gives back the reservation of the others. The ELF
+//! image and the stack are not regions: `unmap` never touches them. The
+//! stack grows on demand too: a fault anywhere in the 8 MiB below
+//! `STACK_TOP` gets a zeroed page (`growStack`), and the unmapped gap below
+//! `STACK_BOTTOM` ends a runaway recursion with SIGSEGV.
 //!
 //! ```text
 //!   0x00007FFFFFFFF000  STACK_TOP
@@ -37,6 +37,55 @@
 //! The span holds about 110 TiB, so a process runs out of frames long before
 //! it runs out of addresses.
 //!
+//! ## File regions
+//!
+//! A file mapping copies nothing at `map`: its pages come from the page
+//! cache of the node (`Fs::Vfs::pageFrame`) when they are first touched. The
+//! region holds the node (`Fs::Vfs::addMapping`, so the file cannot be
+//! removed), the page-aligned file offset of its start, and `fileBytes`, the
+//! bytes of the region that come from the file, fixed at `map` from the
+//! file size then. A page is backed when it lies wholly within `fileBytes`.
+//!
+//! | Region            | Page         | Access        | Gets                                            |
+//! |-------------------|--------------|---------------|-------------------------------------------------|
+//! | anonymous         | any          | any           | a zeroed frame of the reservation               |
+//! | private file      | backed       | read, fetch   | the cache frame, read-only (shared with every mapping) |
+//! | private file      | backed       | write         | a copy of the cache page in a frame of the reservation, writable |
+//! | private file      | not backed   | any           | a frame of the reservation: the file bytes, zeros after |
+//! | shared file       | any          | any           | the cache frame, writable when the region is   |
+//!
+//! A write to a present read-only page of a writable private region (copy
+//! on write) copies the cache page, maps the copy writable in place of the
+//! cache frame, drops the reference on the cache frame and flushes the
+//! local TLB entry: a process has one thread. M4 always copies, even when
+//! the cache frame has one mapping. A `write` to the file changes the cache
+//! frame, so an untouched or read-only page sees it and a copied page does
+//! not, as on Linux. A shared region writes the cache frame itself, which
+//! `read` sees; past the end of the file it reaches zeroed cache pages that
+//! `read` never shows.
+//!
+//! ## Accounting
+//!
+//! A page that may get a private frame is reserved at `map`: every page of
+//! an anonymous region, every page of a writable private file region, and
+//! only the pages that are not backed in a read-only private file region.
+//! A shared region reserves nothing: cache frames do not count against free
+//! frames, and a cache fill that finds no frame refuses the access (SIGSEGV
+//! from a fault, `-EFAULT` from a system call copy). A refused `map` takes
+//! nothing. The unused reservation of a region, returned by `unmap` and by
+//! `teardown` at the end of a process, is its reserved pages minus the
+//! pages that hold a private frame: a present page of an anonymous region,
+//! a present writable page of a private region, or a present page that is
+//! not backed.
+//!
+//! ## Locks
+//!
+//! The node fields and the page cache are guarded by the VFS lock. `map` of
+//! a file runs with it held by the caller; `resolve`, `unmap` and
+//! `teardown` take it for a file region unless the running thread holds it
+//! already (a system call that copies to user memory under it), and never
+//! with a spinlock held.
+//!
 //! ## Protection
 //!
 //! `READ`, `WRITE` and `EXECUTE` become page table bits: every region page is
@@ -48,14 +97,16 @@
 //! ## Unmapping
 //!
 //! `unmap` frees every page of the range that lies in a region (a `PROT_NONE`
-//! region has none, and is not walked) and trims the regions: a range that covers a whole region removes it, one at an end
-//! shortens it, one in the middle splits it in two (which needs a free table
-//! entry). Pages outside every region are left alone.
+//! region has none, and is not walked) and trims the regions: a range that
+//! covers a whole region removes it, one at an end shortens it, one in the
+//! middle splits it in two (which needs a free table entry, and holds the
+//! node once more). Pages outside every region are left alone.
 //!
 //! The functions take the process slot, the address space and ABI-neutral
 //! arguments; `Syscall::Linux::mmap` translates the Linux flags.
 
 import Boot from "@boot";
+import Fs from "@fs";
 import Lib from "@lib";
 import Mm from "@mm";
 
@@ -72,10 +123,19 @@ namespace Proc {
     /// `Proc::Memory::READ`, `WRITE` and `EXECUTE` bits.
     public protection: u64;
 
-    /// 1 for a lazy region: its pages get frames on first access, from a
-    /// reservation of one frame per page made at `map`. 0 for a region whose
-    /// pages were all mapped at once.
-    public lazy: u64;
+    /// The file the region maps, null for an anonymous region. The region
+    /// holds one `Fs::Vfs::addMapping` on it.
+    public node: *mut Fs::Node;
+
+    /// The file offset of `start`, page aligned.
+    public offset: u64;
+
+    /// The bytes of the region, from `start`, that come from the file; past
+    /// them a private region gets zeroed pages. Fixed at `map`.
+    public fileBytes: u64;
+
+    /// 1 for a shared file region (`MAP_SHARED`), 0 otherwise.
+    public shared: u64;
   }
 }
 
@@ -147,7 +207,8 @@ namespace Proc::Memory {
   const OK: u64 = 0;
 
   /// A malformed request: a length of 0 or one that overflows, a start that
-  /// is not page aligned, or `WRITE` with `EXECUTE`.
+  /// is not page aligned, `WRITE` with `EXECUTE`, an unaligned file offset,
+  /// or a shared region without a file.
   const INVALID: u64 = 1;
 
   /// No frame or no address left.
@@ -157,7 +218,8 @@ namespace Proc::Memory {
   const TOO_MANY: u64 = 3;
 
   /// Gives `slot` no regions and the first address, and frees its table.
-  /// Called when a process starts in the slot and when it ends.
+  /// Called when a process starts in the slot and when it ends, after
+  /// `teardown`: the regions must hold no node or reservation by then.
   function reset(slot: u64): void {
     if (slot >= MAX_SLOTS) {
       return;
@@ -172,25 +234,31 @@ namespace Proc::Memory {
     *nextEndOf(slot) = MAP_TOP;
   }
 
-  /// Maps a new region of `length` bytes, rounded up to whole pages, with
-  /// `protection` into `root`, the space of the process in `slot`, and
-  /// writes its start to `address`. With `sourceLength` 0 the region is lazy:
-  /// its pages are reserved and get zeroed frames on first access. Otherwise
-  /// every page is mapped and zeroed now and the first `sourceLength` bytes
-  /// get a copy of the kernel bytes at `source` (a file mapping; nothing is
-  /// copied into a region without access). Returns `INVALID`, `NO_MEMORY` (no
-  /// page stays mapped and nothing stays reserved; page tables built for a
-  /// lazy region stay until the space is destroyed) or `TOO_MANY`.
+  /// Maps a new lazy region of `length` bytes, rounded up to whole pages,
+  /// with `protection` into `root`, the space of the process in `slot`, and
+  /// writes its start to `address`. With `node` null the region is
+  /// anonymous: its pages get zeroed frames on first access. Otherwise it
+  /// maps file `node` from `offset` (page aligned), privately or `shared`;
+  /// nothing is copied now, and the VFS lock must be held. The frames the
+  /// region may need privately are reserved (see the module header).
+  /// Returns `INVALID`, `NO_MEMORY` or `TOO_MANY`; a refused map takes no
+  /// reservation and no node, and page tables built for it stay until the
+  /// space is destroyed.
   function map(
     slot: u64,
     root: u64,
     length: u64,
     protection: u64,
-    source: *u8,
-    sourceLength: u64,
+    node: *mut Fs::Node,
+    offset: u64,
+    shared: boolean,
     address: *mut u64
   ): u64 {
     if (slot >= MAX_SLOTS || length == 0 || length > MAP_TOP - MAP_BOTTOM || ((protection & WRITE) != 0 && (protection & EXECUTE) != 0)) {
+      return INVALID;
+    }
+
+    if (offset % PAGE_SIZE != 0 || (shared && node == null)) {
       return INVALID;
     }
 
@@ -212,40 +280,42 @@ namespace Proc::Memory {
     }
 
     let start: u64 = end - rounded;
-    let lazy: boolean = protection != 0 && sourceLength == 0;
+    let mut fileBytes: u64 = 0;
 
-    if (lazy) {
-      // The reservation first: it bounds the request by the free memory
-      // before any table is built, so a refused map takes nothing. The
-      // tables then come from what is still available.
-      if (!Mm::Pmm::reserve(rounded / PAGE_SIZE)) {
-        return NO_MEMORY;
-      }
-
-      if (!Mm::AddressSpace::prepareRange(root, start, rounded)) {
-        Mm::Pmm::unreserve(rounded / PAGE_SIZE);
-        return NO_MEMORY;
-      }
-    } else if (protection != 0) {
-      let populated: u64 = populate(root, start, rounded, pageFlags(protection));
-
-      if (populated != rounded) {
-        release(root, start, populated);
-        return NO_MEMORY;
-      }
-
-      if (sourceLength > 0 && !Mm::AddressSpace::loadBytes(root, start, source, sourceLength)) {
-        release(root, start, rounded);
-        return NO_MEMORY;
-      }
+    if (node != null && offset < (*node).size) {
+      fileBytes = (*node).size - offset < rounded ? (*node).size - offset : rounded;
     }
 
     let region: *mut Proc::Region = regionAt(slot, entry);
 
-    (*region).start = start;
     (*region).length = rounded;
     (*region).protection = protection;
-    (*region).lazy = lazy ? 1 : 0;
+    (*region).node = node;
+    (*region).offset = offset;
+    (*region).fileBytes = fileBytes;
+    (*region).shared = shared ? 1 : 0;
+
+    if (protection != 0) {
+      let reserved: u64 = reservedPages(region, 0, rounded);
+
+      // The reservation first: it bounds the request by the free memory
+      // before any table is built, so a refused map takes nothing. The
+      // tables then come from what is still available.
+      if (!Mm::Pmm::reserve(reserved)) {
+        return NO_MEMORY;
+      }
+
+      if (!Mm::AddressSpace::prepareRange(root, start, rounded)) {
+        Mm::Pmm::unreserve(reserved);
+        return NO_MEMORY;
+      }
+    }
+
+    if (node != null) {
+      Fs::Vfs::addMapping(node);
+    }
+
+    (*region).start = start;
     *nextEndOf(slot) = start;
     *address = start;
 
@@ -288,30 +358,14 @@ namespace Proc::Memory {
         // A PROT_NONE region maps no page, so there is nothing to free, and
         // walking a huge one page by page would stall the processor.
         if ((*region).protection != 0) {
-          let freed: u64 = release(root, cutStart, cutEnd - cutStart);
+          let reserved: u64 = reservedPages(region, cutStart - regionStart, cutEnd - regionStart);
+          let privateFrames: u64 = releaseRange(region, root, cutStart, cutEnd);
 
-          // The pages never touched still hold their promised frame.
-          if ((*region).lazy != 0) {
-            Mm::Pmm::unreserve((cutEnd - cutStart) / PAGE_SIZE - freed);
-          }
+          // The pages that never took their private frame still hold it.
+          Mm::Pmm::unreserve(reserved - privateFrames);
         }
 
-        if (cutStart == regionStart && cutEnd == regionEnd) {
-          (*region).start = 0;
-        } else if (cutStart == regionStart) {
-          (*region).start = cutEnd;
-          (*region).length = regionEnd - cutEnd;
-        } else if (cutEnd == regionEnd) {
-          (*region).length = cutStart - regionStart;
-        } else {
-          let tail: *mut Proc::Region = regionAt(slot, freeEntry(slot));
-
-          (*tail).start = cutEnd;
-          (*tail).length = regionEnd - cutEnd;
-          (*tail).protection = (*region).protection;
-          (*tail).lazy = (*region).lazy;
-          (*region).length = cutStart - regionStart;
-        }
+        trim(slot, region, cutStart, cutEnd);
       }
 
       index += 1;
@@ -320,13 +374,80 @@ namespace Proc::Memory {
     return OK;
   }
 
+  /// Takes `[cutStart, cutEnd)` out of `region`: removes it, shortens it
+  /// or splits it, keeping the file offset and bytes of what stays and the
+  /// node count right.
+  function trim(slot: u64, region: *mut Proc::Region, cutStart: u64, cutEnd: u64): void {
+    let regionStart: u64 = (*region).start;
+    let regionEnd: u64 = regionStart + (*region).length;
+
+    if (cutStart == regionStart && cutEnd == regionEnd) {
+      (*region).start = 0;
+      dropNode(region);
+    } else if (cutStart == regionStart) {
+      advance(region, cutEnd - regionStart);
+      (*region).start = cutEnd;
+      (*region).length = regionEnd - cutEnd;
+    } else if (cutEnd == regionEnd) {
+      (*region).length = cutStart - regionStart;
+      capFileBytes(region);
+    } else {
+      let tail: *mut Proc::Region = regionAt(slot, freeEntry(slot));
+
+      Lib::Mem::copy(tail as *mut u8, region as *u8, @sizeOf<Proc::Region>());
+      advance(tail, cutEnd - regionStart);
+      (*tail).start = cutEnd;
+      (*tail).length = regionEnd - cutEnd;
+      (*region).length = cutStart - regionStart;
+      capFileBytes(region);
+
+      if ((*tail).node != null) {
+        let taken: boolean = Fs::Vfs::lockUnlessHeld();
+
+        Fs::Vfs::addMapping((*tail).node);
+        Fs::Vfs::unlockIfTaken(taken);
+      }
+    }
+  }
+
+  /// Moves the file view of `region` forward by `bytes` (a page multiple),
+  /// for a region whose first `bytes` are cut.
+  function advance(region: *mut Proc::Region, bytes: u64): void {
+    (*region).offset += bytes;
+    (*region).fileBytes = (*region).fileBytes > bytes ? (*region).fileBytes - bytes : 0;
+  }
+
+  /// Keeps the file bytes of `region` within its length.
+  function capFileBytes(region: *mut Proc::Region): void {
+    if ((*region).fileBytes > (*region).length) {
+      (*region).fileBytes = (*region).length;
+    }
+  }
+
+  /// Gives back the node of a removed region.
+  function dropNode(region: *mut Proc::Region): void {
+    if ((*region).node == null) {
+      return;
+    }
+
+    let taken: boolean = Fs::Vfs::lockUnlessHeld();
+
+    Fs::Vfs::removeMapping((*region).node);
+    Fs::Vfs::unlockIfTaken(taken);
+    (*region).node = null;
+  }
+
   /// Gives the page holding `address` its frame when a region of `slot`
-  /// allows `access` there (`READ`, `WRITE` or `EXECUTE`). Returns true when
-  /// the page is present afterwards with the access allowed, false when no
-  /// region covers it, the region forbids the access, or the page is present
-  /// without it (a write to a read-only page). Reading needs any access at
-  /// all, since x86 cannot map a page ring 3 cannot read; `PROT_NONE`
-  /// allows nothing. Runs in the thread of the process that owns `slot`.
+  /// allows `access` there (`READ`, `WRITE` or `EXECUTE`), and copies a
+  /// present read-only page of a writable private file region on a write.
+  /// Returns true when the page is present afterwards with the access
+  /// allowed, false when no region covers it, the region forbids the
+  /// access, the page is present without it (a write to a read-only page
+  /// of a region that does not allow it), or no frame is left for a cache
+  /// page. Reading needs any access at all, since x86 cannot map a page
+  /// ring 3 cannot read; `PROT_NONE` allows nothing. Runs in the thread of
+  /// the process that owns `slot`, with no spinlock held: a file region
+  /// takes the VFS lock.
   function resolve(slot: u64, root: u64, address: u64, access: u64): boolean {
     if (address >= STACK_BOTTOM && address < STACK_TOP) {
       return growStack(root, address, access);
@@ -343,23 +464,180 @@ namespace Proc::Memory {
 
     let page: u64 = address / PAGE_SIZE * PAGE_SIZE;
     let entry: u64 = Mm::Vmm::leafEntryIn(root, page);
+    let present: boolean = (entry & Mm::Vmm::PRESENT) != 0;
 
-    if ((entry & Mm::Vmm::PRESENT) != 0) {
-      return (access & WRITE) == 0 || (entry & Mm::Vmm::WRITABLE) != 0;
+    if (present && ((access & WRITE) == 0 || (entry & Mm::Vmm::WRITABLE) != 0)) {
+      return true;
     }
 
-    if ((*region).lazy == 0) {
+    if ((*region).node == null) {
+      if (present) {
+        return false;
+      }
+
+      // The reservation made at `map` holds this page's frame, and the
+      // tables were built then: neither step can fail.
+      let frame: u64 = Mm::Pmm::allocateReserved();
+
+      Lib::Mem::fill(Boot::Hhdm::toVirtual(frame), 0, PAGE_SIZE);
+      Mm::AddressSpace::mapPrepared(root, page, frame, pageFlags((*region).protection));
+
+      return true;
+    }
+
+    return resolveFile(region, root, page, access, present);
+  }
+
+  /// `resolve` for a page of a file region whose protection allows
+  /// `access`. `present` is true for a write to a present read-only page:
+  /// a private region copies it, a shared one refuses.
+  function resolveFile(region: *mut Proc::Region, root: u64, page: u64, access: u64, present: boolean): boolean {
+    let within: u64 = page - (*region).start;
+    let flags: u64 = pageFlags((*region).protection);
+
+    if ((*region).shared != 0) {
+      if (present) {
+        return false;
+      }
+
+      return mapCacheFrame(region, root, page, flags);
+    }
+
+    if (isBacked(region, within) && (access & WRITE) == 0) {
+      return mapCacheFrame(region, root, page, flags & ~Mm::Vmm::WRITABLE);
+    }
+
+    // A private page: the reservation holds its frame. Its bytes are the
+    // file's, as the cache or `data` has them now, and zeros after the
+    // file bytes of the region.
+    let frame: u64 = Mm::Pmm::allocateReserved();
+    let bytes: *mut u8 = Boot::Hhdm::toVirtual(frame);
+
+    Lib::Mem::fill(bytes, 0, PAGE_SIZE);
+
+    if ((*region).fileBytes > within) {
+      let wanted: u64 = (*region).fileBytes - within < PAGE_SIZE ? (*region).fileBytes - within : PAGE_SIZE;
+      let mut copied: u64 = 0;
+      let taken: boolean = Fs::Vfs::lockUnlessHeld();
+
+      Fs::Vfs::read((*region).node, (*region).offset + within, bytes, wanted, &mut copied as *mut u64);
+      Fs::Vfs::unlockIfTaken(taken);
+    }
+
+    // Copy on write: the copy takes the place of the cache frame, whose
+    // reference goes back; `freePage` drops the local TLB entry, and the
+    // process has one thread, so no other processor holds it.
+    if (present) {
+      Mm::AddressSpace::freePage(root, page);
+    }
+
+    Mm::AddressSpace::mapPrepared(root, page, frame, flags);
+
+    return true;
+  }
+
+  /// Maps the cache frame of `page` of a file region with `flags`, taking a
+  /// reference for the mapping. Returns false when no frame or heap is left
+  /// for the cache.
+  function mapCacheFrame(region: *mut Proc::Region, root: u64, page: u64, flags: u64): boolean {
+    let taken: boolean = Fs::Vfs::lockUnlessHeld();
+    let frame: u64 = Fs::Vfs::pageFrame((*region).node, ((*region).offset + page - (*region).start) / PAGE_SIZE);
+
+    if (frame != Mm::Pmm::NO_FRAME) {
+      Mm::Pmm::reference(frame);
+    }
+
+    Fs::Vfs::unlockIfTaken(taken);
+
+    if (frame == Mm::Pmm::NO_FRAME) {
       return false;
     }
 
-    // The reservation made at `map` holds this page's frame, and the tables
-    // were built then: neither step can fail.
-    let frame: u64 = Mm::Pmm::allocateReserved();
-
-    Lib::Mem::fill(Boot::Hhdm::toVirtual(frame), 0, PAGE_SIZE);
-    Mm::AddressSpace::mapPrepared(root, page, frame, pageFlags((*region).protection));
+    Mm::AddressSpace::mapPrepared(root, page, frame, flags);
 
     return true;
+  }
+
+  /// True when the page at `within` bytes into `region` lies wholly within
+  /// its file bytes. An anonymous region has none.
+  function isBacked(region: *mut Proc::Region, within: u64): boolean {
+    return within + PAGE_SIZE <= (*region).fileBytes;
+  }
+
+  /// The pages of `[firstByte, endByte)` bytes into `region` that may take a private
+  /// frame, so `map` reserved them: every page of an anonymous or writable
+  /// private region, the pages that are not backed in a read-only private
+  /// one, none of a shared or `PROT_NONE` region.
+  function reservedPages(region: *mut Proc::Region, firstByte: u64, endByte: u64): u64 {
+    if ((*region).protection == 0 || (*region).shared != 0) {
+      return 0;
+    }
+
+    if (((*region).protection & WRITE) != 0 || (*region).fileBytes <= firstByte) {
+      return (endByte - firstByte) / PAGE_SIZE;
+    }
+
+    let mut count: u64 = 0;
+    let mut within: u64 = firstByte;
+
+    while (within < endByte) {
+      if (!isBacked(region, within)) {
+        count += 1;
+      }
+
+      within += PAGE_SIZE;
+    }
+
+    return count;
+  }
+
+  /// True when the present page with the leaf `entry`, `within` bytes into
+  /// `region`, holds a frame of the region's reservation rather than a
+  /// cache frame.
+  function isPrivateFrame(region: *mut Proc::Region, within: u64, entry: u64): boolean {
+    if ((*region).shared != 0) {
+      return false;
+    }
+
+    return (*region).node == null || (entry & Mm::Vmm::WRITABLE) != 0 || !isBacked(region, within);
+  }
+
+  /// Unmaps every present page of `[firstByte, endByte)` in `region`, dropping its
+  /// frame or its reference on a cache frame, and returns how many held a
+  /// private frame.
+  function releaseRange(region: *mut Proc::Region, root: u64, firstByte: u64, endByte: u64): u64 {
+    let mut page: u64 = firstByte;
+    let mut privateFrames: u64 = 0;
+
+    while (page < endByte) {
+      let entry: u64 = Mm::Vmm::leafEntryIn(root, page);
+
+      if ((entry & Mm::Vmm::PRESENT) != 0 && Mm::AddressSpace::freePage(root, page) && isPrivateFrame(region, page - (*region).start, entry)) {
+        privateFrames += 1;
+      }
+
+      page += PAGE_SIZE;
+    }
+
+    return privateFrames;
+  }
+
+  /// The private frames of the present pages of `region`.
+  function privateFrameCount(region: *mut Proc::Region, root: u64): u64 {
+    let mut count: u64 = 0;
+    let mut within: u64 = 0;
+
+    while (within < (*region).length) {
+      let entry: u64 = Mm::Vmm::leafEntryIn(root, (*region).start + within);
+
+      if ((entry & Mm::Vmm::PRESENT) != 0 && isPrivateFrame(region, within, entry)) {
+        count += 1;
+      }
+
+      within += PAGE_SIZE;
+    }
+
+    return count;
   }
 
   /// Gives the stack page holding `address` a zeroed frame. The stack can be
@@ -452,45 +730,12 @@ namespace Proc::Memory {
     return false;
   }
 
-  /// Allocates a zeroed frame for every page of `[start, start + length)`
-  /// and returns the bytes it mapped: `length` on success, less when a page
-  /// failed. The caller frees exactly what was mapped, and nothing that was
-  /// there before.
-  function populate(root: u64, start: u64, length: u64, flags: u64): u64 {
-    let mut offset: u64 = 0;
-
-    while (offset < length) {
-      if (Mm::AddressSpace::allocatePage(root, start + offset, flags) == Mm::Pmm::NO_FRAME) {
-        return offset;
-      }
-
-      offset += PAGE_SIZE;
-    }
-
-    return length;
-  }
-
-  /// Frees every mapped page of `[start, start + length)` and returns how
-  /// many there were.
-  function release(root: u64, start: u64, length: u64): u64 {
-    let mut offset: u64 = 0;
-    let mut freed: u64 = 0;
-
-    while (offset < length) {
-      if (Mm::AddressSpace::freePage(root, start + offset)) {
-        freed += 1;
-      }
-
-      offset += PAGE_SIZE;
-    }
-
-    return freed;
-  }
-
-  /// Gives back the reservation of every page of a lazy region of `slot`
-  /// that was never touched. Called when the process ends, before its
-  /// address space `root` is destroyed with the frames of the touched ones.
-  function releaseReservations(slot: u64, root: u64): void {
+  /// Ends the regions of `slot` when its process ends: gives back the
+  /// unused reservation of each region and the node of each file region.
+  /// The address space `root` is destroyed later with the frames it maps,
+  /// which drops the references on cache frames. Takes the VFS lock for a
+  /// file region; no spinlock may be held.
+  function teardown(slot: u64, root: u64): void {
     if (slot >= MAX_SLOTS) {
       return;
     }
@@ -500,19 +745,13 @@ namespace Proc::Memory {
     while (index < *capacityOf(slot)) {
       let region: *mut Proc::Region = regionAt(slot, index);
 
-      if ((*region).start != 0 && (*region).lazy != 0) {
-        let mut untouched: u64 = 0;
-        let mut offset: u64 = 0;
-
-        while (offset < (*region).length) {
-          if ((Mm::Vmm::leafEntryIn(root, (*region).start + offset) & Mm::Vmm::PRESENT) == 0) {
-            untouched += 1;
-          }
-
-          offset += PAGE_SIZE;
+      if ((*region).start != 0) {
+        if ((*region).protection != 0) {
+          Mm::Pmm::unreserve(reservedPages(region, 0, (*region).length) - privateFrameCount(region, root));
         }
 
-        Mm::Pmm::unreserve(untouched);
+        dropNode(region);
+        (*region).start = 0;
       }
 
       index += 1;

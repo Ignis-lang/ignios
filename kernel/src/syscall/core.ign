@@ -20,7 +20,9 @@
 //! | an error after some bytes moved        | `OK` with the bytes moved so far              |
 //!
 //! `map` and `unmap` do the same for `Proc::Memory`: the descriptor checks of
-//! a file mapping and the status of the region table, as kernel codes.
+//! a file mapping (readable; writable too for a writable shared one) and
+//! the status of the region table, as kernel codes. A file mapping copies
+//! nothing: its pages come from the page cache when touched.
 //!
 //! The staging buffer of `read` and `write` is the COPY part of the calling
 //! thread's scratch area (`Syscall::Scratch`), so a call preempted or
@@ -179,27 +181,30 @@ namespace Syscall::Core {
 
   /// Maps `length` bytes with the `Proc::Memory` `protection` into the
   /// running process and writes the address to `address`. An `anonymous`
-  /// mapping is zeroed; otherwise it is a private copy of the file open as
-  /// `descriptor`, from `offset` (a page multiple), with zeros past its end.
-  /// Returns `Fs::Vfs::INVALID` for a bad length, protection or offset,
+  /// mapping is zeroed; otherwise it maps the file open as `descriptor`
+  /// from `offset` (a page multiple), privately or `shared`, lazily from
+  /// the page cache: nothing is copied now. Returns `Fs::Vfs::INVALID` for
+  /// a bad length, protection or offset or a shared anonymous mapping,
   /// `Fs::Files::BAD_DESCRIPTOR`, `NO_DEVICE` for something other than a
-  /// regular file, `ACCESS` for a descriptor not open for reading, and
+  /// regular file, `ACCESS` for a descriptor not open for reading, or a
+  /// writable shared mapping of one not open for writing, and
   /// `Fs::Vfs::NO_MEMORY` when frames or region entries run out.
   function map(
     anonymous: boolean,
+    shared: boolean,
     descriptor: u64,
     offset: u64,
     length: u64,
     protection: u64,
     address: *mut u64
   ): u64 {
-    // A file mapping copies the node's data, which a write from another
-    // process could move: the VFS lock is held until the copy is done.
+    // A file mapping looks up the node and counts the region on it: the
+    // VFS lock is held until the region holds the node.
     if (!anonymous) {
       Fs::Vfs::lock();
     }
 
-    let result: u64 = mapFrom(anonymous, descriptor, offset, length, protection, address);
+    let result: u64 = mapFrom(anonymous, shared, descriptor, offset, length, protection, address);
 
     if (!anonymous) {
       Fs::Vfs::unlock();
@@ -211,19 +216,19 @@ namespace Syscall::Core {
   /// The body of `map`, with the VFS lock held for a file mapping.
   function mapFrom(
     anonymous: boolean,
+    shared: boolean,
     descriptor: u64,
     offset: u64,
     length: u64,
     protection: u64,
     address: *mut u64
   ): u64 {
-    if (length == 0 || offset % 4096 != 0 || (protection & ~(Proc::Memory::READ | Proc::Memory::WRITE | Proc::Memory::EXECUTE)) != 0) {
+    if (length == 0 || offset % 4096 != 0 || (protection & ~(Proc::Memory::READ | Proc::Memory::WRITE | Proc::Memory::EXECUTE)) != 0 || (anonymous && shared)) {
       return Fs::Vfs::INVALID;
     }
 
     let slot: u64 = Proc::Process::currentSlot();
-    let mut source: *u8 = null;
-    let mut sourceLength: u64 = 0;
+    let mut node: *mut Fs::Node = null;
 
     if (!anonymous) {
       Fs::Vfs::requireLock();
@@ -242,15 +247,14 @@ namespace Syscall::Core {
         return ACCESS;
       }
 
-      let node: *mut Fs::Node = (*file).node;
-
-      if (offset < (*node).size) {
-        source = ((*node).data as *u8) + offset;
-        sourceLength = (*node).size - offset < length ? (*node).size - offset : length;
+      if (shared && (protection & Proc::Memory::WRITE) != 0 && ((*file).flags & Fs::Files::WRITE) == 0) {
+        return ACCESS;
       }
+
+      node = (*file).node;
     }
 
-    let status: u64 = Proc::Memory::map(slot, Proc::Process::currentRoot(), length, protection, source, sourceLength, address);
+    let status: u64 = Proc::Memory::map(slot, Proc::Process::currentRoot(), length, protection, node, offset, shared, address);
 
     if (status == Proc::Memory::OK) {
       return Fs::Vfs::OK;

@@ -24,6 +24,7 @@
 //! | 50-53  | `INFO_AT` from `ROOT` and relative to a directory descriptor; an empty path is `NOT_FOUND` |
 //! | 60-64  | `READ_ENTRY`: `a` then `b` with kind and id, no `.` or `..`, then 0; a small buffer is `INVALID`; a file is `NOT_DIRECTORY` |
 //! | 70-75  | `MAP` anonymous and of a file; write with execute, an unknown flag, a directory (`NO_DEVICE`), a write-only descriptor (`ACCESS`); `UNMAP` |
+//! | 76-77  | `MAP_SHARED` of `/nt/a` read-only maps and reads; with write access on a read-only descriptor it is `ACCESS`; with `MAP_ANONYMOUS` it is `INVALID` |
 //! | 80-81  | `YIELD` and `SLEEP(20 ms)` return 0                                  |
 //! | 82     | `CLOSE` twice: the second is `BAD_DESCRIPTOR`                        |
 //! | 90-92  | `READ_ENTRY` into a kernel address is `BAD_ADDRESS` and does not consume the entry; 24 bytes for a 25-byte entry is `INVALID`; `SEEK` on a directory |
@@ -276,7 +277,7 @@ function checkMapping(): void {
   require(same(mapped, "Welcome to IgniOS.\n", 19) && byte(mapped + 19) == 0, 71);
   expect(Sys::call2(Sys::UNMAP, mapped, PAGE), Sys::OK, 0, 71);
   expect(Sys::call5(Sys::MAP, PAGE, Sys::PROT_WRITE | Sys::PROT_EXEC, Sys::MAP_ANONYMOUS, 0, 0), Sys::INVALID, 0, 72);
-  expect(Sys::call5(Sys::MAP, PAGE, Sys::PROT_READ, 2, motd, 0), Sys::INVALID, 0, 73);
+  expect(Sys::call5(Sys::MAP, PAGE, Sys::PROT_READ, 4, motd, 0), Sys::INVALID, 0, 73);
   succeed(Sys::call1(Sys::CLOSE, motd), 73);
 
   let directory: u64 = succeed(open("/etc", 4, Sys::OPEN_READ), 74);
@@ -288,6 +289,16 @@ function checkMapping(): void {
 
   expect(Sys::call5(Sys::MAP, PAGE, Sys::PROT_READ, 0, writeOnly, 0), Sys::ACCESS, 0, 75);
   succeed(Sys::call1(Sys::CLOSE, writeOnly), 75);
+
+  let readOnly: u64 = succeed(open("/nt/a", 5, Sys::OPEN_READ), 76);
+  let shared: u64 = succeed(Sys::call5(Sys::MAP, PAGE, Sys::PROT_READ, Sys::MAP_SHARED, readOnly, 0), 76);
+
+  require(shared % PAGE == 0, 76);
+  byte(shared);
+  expect(Sys::call2(Sys::UNMAP, shared, PAGE), Sys::OK, 0, 76);
+  expect(Sys::call5(Sys::MAP, PAGE, Sys::PROT_READ | Sys::PROT_WRITE, Sys::MAP_SHARED, readOnly, 0), Sys::ACCESS, 0, 77);
+  expect(Sys::call5(Sys::MAP, PAGE, Sys::PROT_READ, Sys::MAP_SHARED | Sys::MAP_ANONYMOUS, 0, 0), Sys::INVALID, 0, 77);
+  succeed(Sys::call1(Sys::CLOSE, readOnly), 77);
 }
 
 /// `YIELD` and `SLEEP`.

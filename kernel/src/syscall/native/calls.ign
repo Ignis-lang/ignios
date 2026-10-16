@@ -58,9 +58,14 @@
 //! index of the next child.
 //!
 //! **Map**: `protection` is the `Proc::Memory` bits (read 1, write 2,
-//! execute 4); `flags` is 0 for a private copy of the file open as the
-//! descriptor, or `ANONYMOUS` (1) for zeroed memory. Every mapping is
-//! private.
+//! execute 4); `flags` is 0 for a private mapping of the file open as the
+//! descriptor, `SHARED` (2) for a shared one, or `ANONYMOUS` (1) for zeroed
+//! memory; any other bit, and `SHARED | ANONYMOUS`, is `INVALID`. A file
+//! mapping is lazy, from the page cache: a private page is copied on the
+//! first write, which never reaches the file; a shared page is the cache
+//! page, so writes through it reach the file and `read` sees them. The
+//! descriptor must be open for reading (`ACCESS`), and for writing too for
+//! a shared mapping with write access.
 //!
 //! **Power** takes 1 to reset the machine and 2 to power it off; neither
 //! returns on success. Another action is `INVALID`, and a machine that cannot
@@ -101,6 +106,9 @@ namespace Syscall::Native {
 
   /// `MAP` flag: zeroed memory, not a file.
   const MAP_ANONYMOUS: u64 = 1;
+
+  /// `MAP` flag: the file's page cache itself, so writes reach the file.
+  const MAP_SHARED: u64 = 2;
 
   /// Bytes of the info record.
   const INFO_SIZE: u64 = 32;
@@ -629,11 +637,11 @@ namespace Syscall::Native {
     offset: u64,
     address: *mut u64
   ): u64 {
-    if ((flags & ~MAP_ANONYMOUS) != 0) {
+    if ((flags & ~(MAP_ANONYMOUS | MAP_SHARED)) != 0) {
       return Fs::Vfs::INVALID;
     }
 
-    return Syscall::Core::map(flags == MAP_ANONYMOUS, descriptor, offset, length, protection, address);
+    return Syscall::Core::map((flags & MAP_ANONYMOUS) != 0, (flags & MAP_SHARED) != 0, descriptor, offset, length, protection, address);
   }
 
   /// `SLEEP(nanoseconds)`: rounded up to whole ticks, at most a million
