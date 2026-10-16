@@ -48,9 +48,19 @@
 //! `Mm::AddressSpace::create`. Every switch loads the incoming thread's PML4, or
 //! the kernel's when it owns none, and points TSS.RSP0 and the `SYSCALL`
 //! stack (`gs:[8]` of the per-CPU block) at the incoming thread's kernel
-//! stack, so an interrupt or a system call from ring 3 lands on it. The
-//! thread's end destroys the space it owns, right after the switch away
-//! from it.
+//! stack, so an interrupt or a system call from ring 3 lands on it.
+//!
+//! The threads of one user process share its space (`spawnMember`). The
+//! reap of a dead thread destroys its space only when no other thread in
+//! the table still holds it, so the space goes with the last of them, once:
+//!
+//! ```text
+//!   thread A (root R) dies ─► reapZombie: B still holds R ─► R stays
+//!   thread B (root R) dies ─► reapZombie: nobody holds R  ─► destroy(R)
+//! ```
+//!
+//! `awaitSharers` lets the last thread of a process wait until its siblings
+//! are reaped, so the reap of that thread is the one that destroys.
 //!
 //! Every switch also saves the outgoing thread's x87 and SSE registers and
 //! loads the incoming one's (`Arch::Fpu`), so a user program's vector and
@@ -248,20 +258,30 @@ namespace Sched::Scheduler {
   /// thread then owns: it is destroyed when the thread ends, and also when
   /// the thread cannot be created. 0 means the kernel's own address space.
   function spawnIn(entry: u64, argument: u64, root: u64): u64 {
+    let id: u64 = spawnMember(entry, argument, root, 0);
+
+    if (id == Sched::Thread::NO_THREAD && root != 0) {
+      Mm::AddressSpace::destroy(root);
+    }
+
+    return id;
+  }
+
+  /// `spawn` for a thread of the process slot `processPlusOne` - 1 (0 for
+  /// none) that runs in `root`, which it shares with every other thread
+  /// holding it: the reap of the last of them destroys it. Nothing is
+  /// destroyed when the thread cannot be created.
+  function spawnMember(entry: u64, argument: u64, root: u64, processPlusOne: u64): u64 {
     Arch::Spin::lockIrq(runQueueLock());
 
     let slot: u64 = Sched::Thread::findFreeSlot();
 
     if (slot == Sched::Thread::NO_THREAD || !Sched::Thread::createThread(slot, entry, argument, root)) {
       Arch::Spin::unlockIrq(runQueueLock());
-
-      if (root != 0) {
-        Mm::AddressSpace::destroy(root);
-      }
-
       return Sched::Thread::NO_THREAD;
     }
 
+    (*Sched::Thread::slotPointer(slot)).process = processPlusOne;
     enqueue(slot);
     kickIdleProcessor();
 
@@ -425,9 +445,10 @@ namespace Sched::Scheduler {
   }
 
   /// Frees the stack and the slot of the thread that died just before the
-  /// current one was switched in. The run queue lock is held: the stack and
-  /// the address space are freed under it (page tables, heap and frames
-  /// rank above it), and nothing in that path may sleep.
+  /// current one was switched in, and its address space when no other
+  /// thread holds it. The run queue lock is held: the stack and the address
+  /// space are freed under it (page tables, heap and frames rank above it),
+  /// and nothing in that path may sleep.
   function reapZombie(): void {
     let marker: u64 = Arch::CpuLocal::zombie();
 
@@ -442,7 +463,10 @@ namespace Sched::Scheduler {
     // The stack stays mapped for the next thread in the slot (see
     // `thread.ign`, "Thread Stacks").
     if ((*thread).root != 0) {
-      Mm::AddressSpace::destroy((*thread).root);
+      if (sharerOf(marker - 1, (*thread).root) == Sched::Thread::NO_THREAD) {
+        Mm::AddressSpace::destroy((*thread).root);
+      }
+
       (*thread).root = 0;
     }
 
@@ -494,17 +518,42 @@ namespace Sched::Scheduler {
       let thread: *mut Sched::Thread::Control = Sched::Thread::slotPointer(slot);
 
       if ((*thread).id == id && (*thread).state != Sched::Thread::UNUSED) {
-        if ((*thread).state == Sched::Thread::PARKED) {
-          makeReady(slot);
-        } else {
-          (*thread).wakePending = 1;
-        }
+        wakeSlot(slot);
       }
 
       slot += 1;
     }
 
     Arch::Spin::unlockIrq(runQueueLock());
+  }
+
+  /// `wake` for every thread of the process slot `processPlusOne` - 1.
+  function wakeProcess(processPlusOne: u64): void {
+    Arch::Spin::lockIrq(runQueueLock());
+
+    let mut slot: u64 = 0;
+
+    while (slot < Sched::Thread::MAX_THREADS) {
+      if (isMemberSlot(slot, processPlusOne)) {
+        wakeSlot(slot);
+      }
+
+      slot += 1;
+    }
+
+    Arch::Spin::unlockIrq(runQueueLock());
+  }
+
+  /// Makes the parked thread in `slot` ready, or leaves it a token. The run
+  /// queue lock is held.
+  function wakeSlot(slot: u64): void {
+    let thread: *mut Sched::Thread::Control = Sched::Thread::slotPointer(slot);
+
+    if ((*thread).state == Sched::Thread::PARKED) {
+      makeReady(slot);
+    } else {
+      (*thread).wakePending = 1;
+    }
   }
 
   /// Makes the thread `id` ready if it waits in `sleep`, `join` or `park`,
@@ -519,21 +568,118 @@ namespace Sched::Scheduler {
     let mut slot: u64 = 0;
 
     while (slot < Sched::Thread::MAX_THREADS) {
-      let thread: *mut Sched::Thread::Control = Sched::Thread::slotPointer(slot);
-      let state: u64 = (*thread).state;
-
-      if ((*thread).id == id) {
-        if (state == Sched::Thread::BLOCKED || state == Sched::Thread::WAITING || state == Sched::Thread::PARKED) {
-          makeReady(slot);
-        } else if (state == Sched::Thread::READY || state == Sched::Thread::RUNNING) {
-          (*thread).interrupted = 1;
-        }
+      if ((*Sched::Thread::slotPointer(slot)).id == id) {
+        interruptSlot(slot);
       }
 
       slot += 1;
     }
 
     Arch::Spin::unlockIrq(runQueueLock());
+  }
+
+  /// `interrupt` for every thread of the process slot `processPlusOne` - 1
+  /// except the thread `except`.
+  function interruptProcess(processPlusOne: u64, except: u64): void {
+    Arch::Spin::lockIrq(runQueueLock());
+
+    let mut slot: u64 = 0;
+
+    while (slot < Sched::Thread::MAX_THREADS) {
+      if (isMemberSlot(slot, processPlusOne) && (*Sched::Thread::slotPointer(slot)).id != except) {
+        interruptSlot(slot);
+      }
+
+      slot += 1;
+    }
+
+    Arch::Spin::unlockIrq(runQueueLock());
+  }
+
+  /// Makes the thread in `slot` ready when it waits in `sleep`, `join` or
+  /// `park`, or gives it the interrupt token when it is ready or running.
+  /// The run queue lock is held.
+  function interruptSlot(slot: u64): void {
+    let thread: *mut Sched::Thread::Control = Sched::Thread::slotPointer(slot);
+    let state: u64 = (*thread).state;
+
+    if (state == Sched::Thread::BLOCKED || state == Sched::Thread::WAITING || state == Sched::Thread::PARKED) {
+      makeReady(slot);
+    } else if (state == Sched::Thread::READY || state == Sched::Thread::RUNNING) {
+      (*thread).interrupted = 1;
+    }
+  }
+
+  /// The id of a thread of the process slot `processPlusOne` - 1 still in
+  /// the table, or `NO_THREAD`.
+  function threadOfProcess(processPlusOne: u64): u64 {
+    Arch::Spin::lockIrq(runQueueLock());
+
+    let mut found: u64 = Sched::Thread::NO_THREAD;
+    let mut slot: u64 = 0;
+
+    while (slot < Sched::Thread::MAX_THREADS && found == Sched::Thread::NO_THREAD) {
+      if (isMemberSlot(slot, processPlusOne)) {
+        found = (*Sched::Thread::slotPointer(slot)).id;
+      }
+
+      slot += 1;
+    }
+
+    Arch::Spin::unlockIrq(runQueueLock());
+
+    return found;
+  }
+
+  /// True when `slot` holds a thread, not dead, of the process slot
+  /// `processPlusOne` - 1 (above 0). The run queue lock is held.
+  function isMemberSlot(slot: u64, processPlusOne: u64): boolean {
+    let thread: *mut Sched::Thread::Control = Sched::Thread::slotPointer(slot);
+
+    return processPlusOne != 0 && (*thread).process == processPlusOne && (*thread).state != Sched::Thread::UNUSED && (*thread).state != Sched::Thread::DEAD;
+  }
+
+  /// The slot of a thread other than the one in `slot` that holds the
+  /// address space `root`, dead and not yet reaped included, or
+  /// `NO_THREAD`. The run queue lock is held.
+  function sharerOf(slot: u64, root: u64): u64 {
+    let mut other: u64 = 0;
+
+    while (other < Sched::Thread::MAX_THREADS) {
+      let thread: *mut Sched::Thread::Control = Sched::Thread::slotPointer(other);
+
+      if (other != slot && (*thread).state != Sched::Thread::UNUSED && (*thread).root == root) {
+        return other;
+      }
+
+      other += 1;
+    }
+
+    return Sched::Thread::NO_THREAD;
+  }
+
+  /// Blocks the calling thread until no other thread holds its address
+  /// space, so that its own reap destroys it. The last thread of a process
+  /// calls it before it ends; its siblings already left and only their
+  /// reaps are pending. A kill does not end the wait.
+  function awaitSharers(): void {
+    noSpinlockHeld();
+
+    let saved: u64 = Arch::Cpu::saveAndDisableInterrupts();
+
+    lockRunQueue();
+
+    let me: u64 = Arch::CpuLocal::currentSlot();
+    let current: *mut Sched::Thread::Control = Sched::Thread::slotPointer(me);
+
+    while ((*current).root != 0 && sharerOf(me, (*current).root) != Sched::Thread::NO_THREAD) {
+      (*current).joinTarget = (*Sched::Thread::slotPointer(sharerOf(me, (*current).root))).id;
+      (*current).state = Sched::Thread::WAITING;
+      switchToNext();
+    }
+
+    unlockRunQueue();
+    Arch::Cpu::restoreInterrupts(saved);
   }
 
   /// Clears `thread`'s interrupt token and returns true when it was set. The
@@ -549,8 +695,8 @@ namespace Sched::Scheduler {
   }
 
   /// Records which process slot the running thread runs: the slot plus 1, or
-  /// 0 for none. Only the thread itself writes it, so it is
-  /// read without a lock.
+  /// 0 for none. `spawnMember` sets it; the thread clears it when it leaves
+  /// its process, under the process table lock.
   function setProcess(slotPlusOne: u64): void {
     (*Sched::Thread::slotPointer(Arch::CpuLocal::currentSlot())).process = slotPlusOne;
   }

@@ -1,22 +1,41 @@
 //!
 //! # Processes
 //!
-//! User processes: an address space, a thread that runs in it, and the
-//! bookkeeping that outlives the thread.
+//! User processes: an address space, the threads that run in it, and the
+//! bookkeeping that outlives them.
 //!
 //! ## Overview
 //!
-//! A process is a slot in a fixed table next to a kernel thread that owns the
-//! address space (`Sched::Scheduler::spawnIn`). The thread starts in `userMain`,
-//! which drops to ring 3 and never comes back: from then on the thread is
-//! only the kernel stack that interrupts and system calls of the process run
-//! on. When the process ends, through `exit` or because it was killed, the
-//! slot records the status, the thread ends, and the next thread to run frees
-//! the thread's stack and the address space. `wait` collects the status and
-//! frees the slot.
+//! A process is a slot in a fixed table. It owns the address space, the
+//! regions, the descriptors, the current directory, the parent and the exit
+//! status; its threads own their registers, kernel stacks and states. The
+//! slot counts its threads (`threadCount`), and each thread records its
+//! slot (`Sched::Thread::Control::process`, set by
+//! `Sched::Scheduler::spawnMember`), which is how system calls find the
+//! calling process. `launch` makes the first thread; `addThread` adds one
+//! to a running process. A thread starts in `userMain`, which drops to
+//! ring 3 and never comes back: from then on the thread is only the kernel
+//! stack that interrupts and system calls of the process run on.
 //!
-//! The process id is not the thread id. Syscalls find the calling process
-//! by looking for the slot whose thread is the running one.
+//! The process ends when its last thread ends. That thread waits until its
+//! siblings are reaped (`Sched::Scheduler::awaitSharers`), closes the
+//! descriptors, ends the regions, records the state and ends; its reap, the
+//! last one holding the space, destroys the address space. `wait`
+//! collects the status and frees the slot.
+//!
+//! ```text
+//!   exitThread(n)                  one thread goes
+//!     └─ finishThread: status := n unless fixed, threadCount -= 1
+//!          ├─ others remain: leave the process, Sched::Scheduler::exitCurrent
+//!          └─ last one: awaitSharers, closeAll, teardown, reset,
+//!                       state := EXITED, thread := this one, exitCurrent
+//!   exitCurrent(n), killCurrent(n), kill(id)    the whole process goes
+//!     └─ requestEnd: status := n once (the first event wins), killPending,
+//!                    interrupt the other threads, cancel their reads
+//!          └─ each thread: finishThread at its next checkKill
+//! ```
+//!
+//! The process id is not the thread id.
 //!
 //! ## Lifetime
 //!
@@ -33,19 +52,22 @@
 //!          └─ launch
 //!               ├─ slot := RUNNING, id := nextId++
 //!               ├─ Proc::Memory::reset, then adoptImage   the slot gets the regions
-//!               └─ Sched::Scheduler::spawnIn(userMain, slot, root)   thread owns `root`
+//!               └─ Sched::Scheduler::spawnMember(userMain, slot, root, slot + 1)
+//!                                                   the process owns `root`
 //!
 //!   any failure before the thread exists: Proc::Memory::dropStaged gives the
 //!   node counts and reservations back, once, and the space is destroyed
 //!
 //!   the new thread:  userMain ─► Arch::UserMode::enter ─► ring 3 ...
 //!                                    ... syscall exit(n) or a fault ...
-//!   finishCurrent:   status := n, state := EXITED, print "process N exited"
+//!   finishThread (last thread): state := EXITED, print "process N exited"
 //!                      └─ Sched::Scheduler::exitCurrent   thread DEAD
-//!   next thread:     reapZombie frees the kernel stack and destroys the
-//!                    address space (every frame goes back to the PMM)
-//!   Proc::Process::wait:   blocks in Sched::Scheduler::join until the
-//!                    thread is gone, returns the status, slot := FREE
+//!   next thread:     reapZombie frees the kernel stack and, no other
+//!                    thread holding it, destroys the address space
+//!                    (every frame goes back to the PMM)
+//!   Proc::Process::wait:   joins the threads of the process until it is
+//!                    EXITED and its last thread gone, returns the status,
+//!                    slot := FREE
 //! ```
 //!
 //! ## Parents and children
@@ -60,10 +82,12 @@
 //!
 //! ## Killing
 //!
-//! `kill` marks a process (`killPending`) and wakes it if it waits in a
-//! sleep, a wait or a keyboard read. The process ends with `KILLED` (137)
-//! the next time it would return to ring 3: `checkKill` runs at the end of
-//! every system call and of every interrupt taken from ring 3. A process is
+//! `kill` records `KILLED` (137) as the status unless an earlier end set
+//! one, marks the process (`killPending`) and wakes every thread of it
+//! that waits in a sleep, a wait or a keyboard read. A fatal fault and
+//! `exit_group` do the same from inside the process. Each thread ends the
+//! next time it would return to ring 3: `checkKill` runs at the end of
+//! every system call and of every interrupt taken from ring 3. A thread is
 //! never ended in the middle of kernel code, so no lock or half-done change
 //! is left behind.
 //!
@@ -107,7 +131,8 @@ record ProcessEntry {
   /// `FREE`, `RUNNING` or `EXITED`.
   public state: u64;
 
-  /// Id of the kernel thread that runs the process.
+  /// Id of the first thread while the process runs; once `EXITED`, the id
+  /// of its last thread, whose reap destroys the address space.
   public thread: u64;
 
   /// User address the program starts at.
@@ -130,9 +155,23 @@ record ProcessEntry {
   /// and its slot is freed as soon as it ends.
   public detached: boolean;
 
-  /// True once another process killed this one: it ends with `KILLED` the
-  /// next time it leaves the kernel (`checkKill`).
+  /// True once the process is ending (`kill`, a fatal fault, `exit_group`):
+  /// each thread ends the next time it leaves the kernel (`checkKill`),
+  /// and no thread is added.
   public killPending: boolean;
+
+  /// The address space, destroyed after the last thread is reaped.
+  public root: u64;
+
+  /// The threads that have not ended yet.
+  public threadCount: u64;
+
+  /// True once an end of the whole process recorded `status`; a later end
+  /// or thread exit does not change it.
+  public statusFixed: boolean;
+
+  /// True when that end was a kill or a fault, for the console report.
+  public killedEnd: boolean;
 }
 
 /// The process table and the id counter.
@@ -144,8 +183,10 @@ record ProcessState {
   static mut nextId: u64;
 
   /// Guards every slot's state, id, parent, detached flag and status, and
-  /// `nextId`, rank `Lib::MutexRank::PROCESS_TABLE`. A process's own
-  /// `killPending`, `abi`, entry and stack pointer are read without it.
+  /// `nextId`, every thread count, root and end field, and the process
+  /// slot each thread records; rank `Lib::MutexRank::PROCESS_TABLE`. A
+  /// process's own `killPending`, `abi`, entry and stack pointer are read
+  /// without it.
   static mut lock: Sched::Mutex;
 }
 
@@ -225,6 +266,7 @@ namespace Proc::Process {
   function initialize(): void {
     ProcessState::nextId = 1;
     Sched::Mutex::initialize(tableLock(), Lib::MutexRank::PROCESS_TABLE);
+    Proc::Memory::initialize();
   }
 
   /// Starts a process whose whole image is `length` bytes of machine code
@@ -434,6 +476,29 @@ namespace Proc::Process {
     directory: *mut Fs::Node,
     staged: *mut Proc::StagedImage
   ): u64 {
+    return launchThread(root, entry, stackPointer, abi, directory, staged, Arch::ContextAsm::ignis_function_address(userMain));
+  }
+
+  /// Makes a process of the empty address space `root` whose first thread
+  /// runs the kernel function `body(slot)` in ring 0 instead of a
+  /// program, for the self-tests of thread and process lifetime. The
+  /// function must end through `exitThread`, `exitCurrent` or `checkKill`,
+  /// never by returning. Returns the process id, or `NO_PROCESS`; on
+  /// failure the space is destroyed.
+  function startKernel(root: u64, body: u64): u64 {
+    return launchThread(root, 0, 0, ABI_LINUX, Fs::Vfs::root(), null, body);
+  }
+
+  /// `launch` with the first thread running `threadEntry(slot)`.
+  function launchThread(
+    root: u64,
+    entry: u64,
+    stackPointer: u64,
+    abi: u64,
+    directory: *mut Fs::Node,
+    staged: *mut Proc::StagedImage,
+    threadEntry: u64
+  ): u64 {
     let caller: u64 = currentId();
 
     Sched::Mutex::lock(tableLock());
@@ -458,6 +523,10 @@ namespace Proc::Process {
     (*process).parent = caller == NO_PROCESS ? NO_PARENT : caller;
     (*process).detached = false;
     (*process).killPending = false;
+    (*process).root = root;
+    (*process).threadCount = 0;
+    (*process).statusFixed = false;
+    (*process).killedEnd = false;
 
     Proc::Memory::reset(slot);
 
@@ -480,14 +549,15 @@ namespace Proc::Process {
       return NO_PROCESS;
     }
 
-    // `spawnIn` destroys `root` when it fails. No image page was touched,
-    // so the staging alone still describes what the regions hold.
-    let thread: u64 = Sched::Scheduler::spawnIn(Arch::ContextAsm::ignis_function_address(userMain), slot, root);
+    // No image page was touched, so the staging alone still describes what
+    // the regions hold.
+    let thread: u64 = Sched::Scheduler::spawnMember(threadEntry, slot, root, slot + 1);
 
     if (thread == Sched::Thread::NO_THREAD) {
       Fs::Files::closeAll(slot);
       Proc::Memory::reset(slot);
       dropImage(staged);
+      Mm::AddressSpace::destroy(root);
       (*process).state = FREE;
       Sched::Mutex::unlock(tableLock());
       return NO_PROCESS;
@@ -498,6 +568,7 @@ namespace Proc::Process {
     }
 
     (*process).thread = thread;
+    (*process).threadCount = 1;
     ProcessState::nextId += 1;
 
     let id: u64 = (*process).id;
@@ -505,6 +576,38 @@ namespace Proc::Process {
     Sched::Mutex::unlock(tableLock());
 
     return id;
+  }
+
+  /// Adds a thread to the running process in `slot`: it runs
+  /// `entry(argument)` (an address from
+  /// `Arch::ContextAsm::ignis_function_address`) in the process's address
+  /// space and counts as one of its threads until it ends through
+  /// `exitThread` or the end of the process. Refused, with `NO_THREAD`,
+  /// when the slot holds no running process, the process is ending, or no
+  /// thread slot is free. Returns the thread id.
+  function addThread(slot: u64, entry: u64, argument: u64): u64 {
+    if (slot >= MAX_PROCESSES) {
+      return Sched::Thread::NO_THREAD;
+    }
+
+    Sched::Mutex::lock(tableLock());
+
+    let process: *mut ProcessEntry = slotPointer(slot);
+
+    if ((*process).state != RUNNING || (*process).killPending || (*process).threadCount == 0) {
+      Sched::Mutex::unlock(tableLock());
+      return Sched::Thread::NO_THREAD;
+    }
+
+    let thread: u64 = Sched::Scheduler::spawnMember(entry, argument, (*process).root, slot + 1);
+
+    if (thread != Sched::Thread::NO_THREAD) {
+      (*process).threadCount += 1;
+    }
+
+    Sched::Mutex::unlock(tableLock());
+
+    return thread;
   }
 
   /// `Proc::Memory::dropStaged` of `staged`, when there is one.
@@ -519,39 +622,63 @@ namespace Proc::Process {
   /// `0xFFFFFFFFFFFFFFFF` for an id that is not in the table, and for one
   /// whose status another waiter collected first.
   ///
-  /// The caller blocks in `Sched::Scheduler::join` on the process thread and
-  /// runs again only once that thread is gone, which happens after
-  /// `finishCurrent` recorded the status. The table lock is let go during
-  /// the join, so the slot is checked again after it: the id must still be
-  /// there, ended.
+  /// While the process runs, the caller joins one of its threads at a
+  /// time (`Sched::Scheduler::join`), so it sleeps until a thread is gone
+  /// and then looks again. Once the process is `EXITED` it joins the last
+  /// thread, whose reap destroys the address space. The table lock is let
+  /// go during a join, so the slot is checked again after it: the id must
+  /// still be there, ended. A killed caller stops waiting.
   function wait(id: u64): u64 {
-    Sched::Mutex::lock(tableLock());
+    while (true) {
+      Sched::Mutex::lock(tableLock());
 
-    let slot: u64 = findSlot(id);
+      let slot: u64 = findSlot(id);
 
-    if (slot == NO_PROCESS) {
+      if (slot == NO_PROCESS) {
+        Sched::Mutex::unlock(tableLock());
+        return NO_PROCESS;
+      }
+
+      let process: *mut ProcessEntry = slotPointer(slot);
+
+      if ((*process).state == EXITED) {
+        let last: u64 = (*process).thread;
+
+        Sched::Mutex::unlock(tableLock());
+        Sched::Scheduler::join(last);
+        Sched::Mutex::lock(tableLock());
+
+        if ((*process).state != EXITED || (*process).id != id) {
+          Sched::Mutex::unlock(tableLock());
+          return NO_PROCESS;
+        }
+
+        let status: u64 = (*process).status;
+
+        (*process).state = FREE;
+        Sched::Mutex::unlock(tableLock());
+
+        return status;
+      }
+
+      // A running process has a thread in the table until it is EXITED:
+      // the last one leaves it under this lock.
+      let thread: u64 = Sched::Scheduler::threadOfProcess(slot + 1);
+
       Sched::Mutex::unlock(tableLock());
-      return NO_PROCESS;
+
+      if (thread == Sched::Thread::NO_THREAD) {
+        Sched::Scheduler::yield();
+      } else {
+        Sched::Scheduler::join(thread);
+      }
+
+      if (killRequested()) {
+        return NO_PROCESS;
+      }
     }
 
-    let process: *mut ProcessEntry = slotPointer(slot);
-    let thread: u64 = (*process).thread;
-
-    Sched::Mutex::unlock(tableLock());
-    Sched::Scheduler::join(thread);
-    Sched::Mutex::lock(tableLock());
-
-    if ((*process).state != EXITED || (*process).id != id) {
-      Sched::Mutex::unlock(tableLock());
-      return NO_PROCESS;
-    }
-
-    let status: u64 = (*process).status;
-
-    (*process).state = FREE;
-    Sched::Mutex::unlock(tableLock());
-
-    return status;
+    return NO_PROCESS;
   }
 
   /// The id of the process the running thread belongs to, or `NO_PROCESS`
@@ -587,21 +714,76 @@ namespace Proc::Process {
     return Arch::Cpu::readCr3();
   }
 
-  /// Ends the running process with `status` and never returns.
+  /// Ends the whole running process with `status` (native `EXIT`, Linux
+  /// `exit` and `exit_group`) and never returns: the status is recorded
+  /// unless an earlier end set one, every other thread is interrupted and
+  /// ends at its next `checkKill`, and the calling thread ends now.
   function exitCurrent(status: u64): never {
-    finishCurrent(status, false);
+    endCurrent(status, false);
   }
 
   /// Ends the running process because it did something the kernel does not
-  /// allow. `status` follows the shell convention, 128 plus the number of
-  /// the signal Linux would have sent. Never returns.
+  /// allow, as `exitCurrent` does. `status` follows the shell convention,
+  /// 128 plus the number of the signal Linux would have sent. Never
+  /// returns.
   function killCurrent(status: u64): never {
-    finishCurrent(status, true);
+    endCurrent(status, true);
   }
 
-  /// Records the status, reports the end on the console and ends the
-  /// thread. The address space is freed by the next thread that runs.
-  function finishCurrent(status: u64, killed: boolean): never {
+  /// Ends only the calling thread. Its status becomes the process's when it
+  /// is the last thread and no end of the whole process set one first.
+  /// Never returns.
+  function exitThread(status: u64): never {
+    finishThread(status);
+  }
+
+  /// `exitCurrent` and `killCurrent`.
+  function endCurrent(status: u64, killed: boolean): never {
+    let slot: u64 = currentSlot();
+
+    if (slot == NO_PROCESS) {
+      @panic("process: a kernel thread tried to end a process");
+    }
+
+    Sched::Mutex::lock(tableLock());
+    requestEnd(slot, status, killed);
+    Sched::Mutex::unlock(tableLock());
+
+    finishThread(status);
+  }
+
+  /// Starts the end of the process in `slot`: records `status` unless an
+  /// earlier end did (the first one wins), sets `killPending`, and wakes
+  /// every thread of the process but the caller that waits in a sleep, a
+  /// wait or a keyboard read, so each reaches `checkKill`. The table lock
+  /// is held.
+  function requestEnd(slot: u64, status: u64, killed: boolean): void {
+    let process: *mut ProcessEntry = slotPointer(slot);
+
+    if (!(*process).statusFixed) {
+      (*process).status = status;
+      (*process).statusFixed = true;
+      (*process).killedEnd = killed;
+    }
+
+    // The flag goes first: the interrupt and the read cancel make the
+    // threads look at it.
+    (*process).killPending = true;
+
+    // A process that ends itself with one thread has nobody to tell.
+    if (currentSlot() != slot || (*process).threadCount > 1) {
+      Sched::Scheduler::interruptProcess(slot + 1, Sched::Scheduler::currentId());
+      Fs::Files::cancelRead(slot);
+    }
+  }
+
+  /// Ends the calling thread. Its `status` becomes the process's unless an
+  /// end of the whole process fixed one. When other threads remain, only
+  /// this one leaves. The last one waits until its siblings are reaped,
+  /// releases the descriptors and regions, makes the slot `EXITED` (or
+  /// `FREE` for an orphan), reports the end and ends; the reap that follows
+  /// destroys the address space.
+  function finishThread(status: u64): never {
     let slot: u64 = currentSlot();
 
     if (slot == NO_PROCESS) {
@@ -609,6 +791,26 @@ namespace Proc::Process {
     }
 
     let process: *mut ProcessEntry = slotPointer(slot);
+
+    Sched::Mutex::lock(tableLock());
+
+    if (!(*process).statusFixed) {
+      (*process).status = status;
+    }
+
+    (*process).threadCount -= 1;
+
+    if ((*process).threadCount > 0) {
+      Sched::Scheduler::setProcess(0);
+      Sched::Mutex::unlock(tableLock());
+      Sched::Scheduler::exitCurrent();
+    }
+
+    Sched::Mutex::unlock(tableLock());
+
+    // Siblings that already left may not be reaped yet; once they are, this
+    // thread alone holds the space, and its own reap destroys it.
+    Sched::Scheduler::awaitSharers();
 
     // The descriptors and regions go first: once the slot is EXITED, or FREE
     // for an orphan, another process may be launched into it.
@@ -619,8 +821,10 @@ namespace Proc::Process {
     Sched::Mutex::lock(tableLock());
 
     let id: u64 = (*process).id;
+    let finalStatus: u64 = (*process).status;
+    let killed: boolean = (*process).killedEnd;
 
-    (*process).status = status;
+    (*process).thread = Sched::Scheduler::currentId();
     (*process).state = (*process).detached ? FREE : EXITED;
     releaseChildren(id);
     wakeParent((*process).parent);
@@ -636,7 +840,7 @@ namespace Proc::Process {
       Drivers::Console::write(" exited with status ");
     }
 
-    Drivers::Console::writeDecimal(status);
+    Drivers::Console::writeDecimal(finalStatus);
     Drivers::Console::writeLine("");
 
     Sched::Scheduler::exitCurrent();
@@ -664,10 +868,11 @@ namespace Proc::Process {
     }
   }
 
-  /// Kills process `id`: it ends with `KILLED` as soon as it would run user
-  /// code again. A process waiting in a sleep, a wait or a keyboard read is
-  /// woken so that it notices. Killing the calling process ends it at once
-  /// (no return). Killing a process that already ended changes nothing.
+  /// Kills process `id`: it ends with `KILLED`, unless an earlier end set
+  /// its status, as soon as each of its threads would run user code again.
+  /// A thread waiting in a sleep, a wait or a keyboard read is woken so
+  /// that it notices. Killing the calling process ends it at once (no
+  /// return). Killing a process that already ended changes nothing.
   /// Returns `KILL_OK` or `KILL_NOT_FOUND`.
   function kill(id: u64): u64 {
     if (id == currentId()) {
@@ -686,11 +891,7 @@ namespace Proc::Process {
     let process: *mut ProcessEntry = slotPointer(slot);
 
     if ((*process).state == RUNNING) {
-      // The flag goes first: the interrupt and the read cancel make the
-      // process look at it.
-      (*process).killPending = true;
-      Sched::Scheduler::interrupt((*process).thread);
-      Fs::Files::cancelRead(slot);
+      requestEnd(slot, KILLED, true);
     }
 
     Sched::Mutex::unlock(tableLock());
@@ -705,17 +906,18 @@ namespace Proc::Process {
     return slot != NO_PROCESS && (*slotPointer(slot)).killPending;
   }
 
-  /// Ends the running process with `KILLED` when it was killed. The system
-  /// call and interrupt paths call it right before they return to ring 3.
+  /// Ends the calling thread when its process is ending; the status was
+  /// recorded by the end that set `killPending`. The system call and
+  /// interrupt paths call it right before they return to ring 3.
   function checkKill(): void {
     if (killRequested()) {
-      killCurrent(KILLED);
+      finishThread(KILLED);
     }
   }
 
-  /// Wakes the thread of process `parent` if it is parked in `waitAny`, or
-  /// leaves it a token for its next park. Nothing happens for `NO_PARENT`.
-  /// The table lock is held.
+  /// Wakes the threads of process `parent` that are parked in `waitAny`, and
+  /// leaves the others a token for their next park. Nothing happens for
+  /// `NO_PARENT`. The table lock is held.
   function wakeParent(parent: u64): void {
     if (parent == NO_PARENT) {
       return;
@@ -724,7 +926,7 @@ namespace Proc::Process {
     let slot: u64 = findSlot(parent);
 
     if (slot != NO_PROCESS && (*slotPointer(slot)).state == RUNNING) {
-      Sched::Scheduler::wake((*slotPointer(slot)).thread);
+      Sched::Scheduler::wakeProcess(slot + 1);
     }
   }
 
@@ -764,8 +966,8 @@ namespace Proc::Process {
       Sched::Mutex::unlock(tableLock());
 
       if (endedId != NO_PROCESS) {
-        // The child's thread may still be dying: wait until it is gone and
-        // its address space freed, as `wait` does. Only the parent collects
+        // The child's last thread may still be dying: wait until it is gone
+        // and its address space freed, as `wait` does. Only the parent collects
         // its children, so the slot still holds the child afterwards.
         Sched::Scheduler::join(endedThread);
         Sched::Mutex::lock(tableLock());
@@ -807,6 +1009,43 @@ namespace Proc::Process {
     return parent;
   }
 
+  /// The slot of the process `id`, running or ended, or `NO_PROCESS`.
+  function slotOf(id: u64): u64 {
+    Sched::Mutex::lock(tableLock());
+
+    let slot: u64 = findSlot(id);
+
+    Sched::Mutex::unlock(tableLock());
+
+    return slot;
+  }
+
+  /// The threads of process `id` that have not ended, 0 for an ended or
+  /// unknown process.
+  function threadCountOf(id: u64): u64 {
+    Sched::Mutex::lock(tableLock());
+
+    let slot: u64 = findSlot(id);
+    let count: u64 = slot == NO_PROCESS || (*slotPointer(slot)).state != RUNNING ? 0 : (*slotPointer(slot)).threadCount;
+
+    Sched::Mutex::unlock(tableLock());
+
+    return count;
+  }
+
+  /// The state of process `id`: `RUNNING`, `EXITED`, or `FREE` when no slot
+  /// holds it.
+  function stateOf(id: u64): u64 {
+    Sched::Mutex::lock(tableLock());
+
+    let slot: u64 = findSlot(id);
+    let state: u64 = slot == NO_PROCESS ? FREE : (*slotPointer(slot)).state;
+
+    Sched::Mutex::unlock(tableLock());
+
+    return state;
+  }
+
   /// The number of slots in use, ended processes waiting for `wait`
   /// included. The self-tests check it to prove nothing is left behind.
   function usedSlots(): u64 {
@@ -833,8 +1072,6 @@ namespace Proc::Process {
   function userMain(slot: u64): void {
     let process: *mut ProcessEntry = slotPointer(slot);
 
-    Sched::Scheduler::setProcess(slot + 1);
-
     // A process killed before it ever ran ends here, before any user code.
     checkKill();
 
@@ -842,8 +1079,9 @@ namespace Proc::Process {
   }
 
   /// The slot of the process whose thread is running, or `NO_PROCESS`: what
-  /// the thread recorded in `userMain`, cleared again when the process
-  /// ends. Read without a lock, since only the thread itself writes it.
+  /// `Sched::Scheduler::spawnMember` recorded, cleared again when the
+  /// thread leaves the process. Read without a lock: only the thread itself
+  /// clears it.
   function currentSlot(): u64 {
     let slotPlusOne: u64 = Sched::Scheduler::currentProcess();
 

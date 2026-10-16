@@ -134,8 +134,11 @@ namespace Sched::Thread {
     /// another thread runs one.
     public scratch: u64;
 
-    /// The process slot the thread runs, plus 1; 0 for a kernel thread. Only
-    /// the thread itself sets it (`Sched::Scheduler::setProcess`).
+    /// The process slot the thread belongs to, plus 1; 0 for a kernel
+    /// thread. Set when the thread is created (`Sched::Scheduler::spawnMember`)
+    /// and cleared when it leaves its process (`setProcess`), both under the
+    /// process table lock; the threads of a process are the slots that
+    /// hold its value.
     public process: u64;
 
     /// 1 when `wake` came while the thread was not parked: its next `park`

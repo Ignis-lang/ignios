@@ -27,6 +27,7 @@
 //! | `Tests::User`         | `user.ign`          | ring 3, `SYSCALL`, `clac` on entry, process isolation, an ELF module |
 //! | `Tests::CpuLocal`     | `cpu_local.ign`     | the GS bases are balanced after every way in and out of ring 3 |
 //! | `Tests::Smp`          | `smp.ign`           | reschedule IPIs; the lock stress on every processor        |
+//! | `Tests::Threads`      | `threads.ign`       | threads of one process: shared space lifetime, process end, concurrent faults |
 //!
 //! ## Dependencies
 //!
@@ -53,6 +54,7 @@ import _ from "./program_image";
 import _ from "./protection";
 import _ from "./scheduler";
 import _ from "./smp";
+import _ from "./threads";
 import _ from "./timer";
 import _ from "./user";
 import _ from "./vfs";

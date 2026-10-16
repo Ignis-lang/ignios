@@ -60,6 +60,7 @@
 //!   │  .................................... preemption, locks, wake tokens  tests/     doc 24, 25
 //!   ├─ Drivers::Keyboard::initialize ...... 8042 enable, IRQ1 live        drivers/   doc 06
 //!   ├─ Smp::releaseProcessors ............. the others join the scheduler smp/       doc 27
+//!   ├─ Tests::Smp::run, Tests::Threads::run  IPIs, lock stress, process threads tests/
 //!   ├─ Tests::User::run ................... ring 3 smoke tests            tests/     doc 14
 //!   ├─ Tests::CpuLocal::run ............... GS bases balanced             tests/     doc 18
 //!   └─ Shell::Terminal::run ............... prompt loop, never returns    shell/
@@ -219,6 +220,7 @@ function kmain(): void {
   // runs threads from the shared run queue.
   Smp::releaseProcessors();
   Tests::Smp::run();
+  Tests::Threads::run();
 
   Tests::User::run();
   Tests::CpuLocal::run();

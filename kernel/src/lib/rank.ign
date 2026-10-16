@@ -21,6 +21,9 @@
 //!
 //!   mutexes
 //!   process table (10) ──► VFS (30) ──► address space (40)
+//!     launch: table, then the slot's regions (reset, adoptImage)
+//!     a copy to user memory under VFS faults: VFS, then the space
+//!     resolve of a file page without VFS: drop the space, take VFS, retake
 //! ```
 //!
 //! Gaps are left so a new lock fits between two existing ones.
@@ -62,7 +65,8 @@ namespace Lib::MutexRank {
   /// have several threads.
   const VFS: u64 = 30;
 
-  /// A process's address space and region table. Reserved: a process has
-  /// one thread, which alone uses them, until processes get several.
+  /// A process's address space and region table, one per process slot
+  /// (`Proc::Memory`), shared by the threads of the process. A page fault
+  /// takes it, also inside a system call that holds the VFS lock.
   const ADDRESS_SPACE: u64 = 40;
 }

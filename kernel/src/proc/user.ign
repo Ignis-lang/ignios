@@ -24,6 +24,14 @@
 //!     Mm::AddressSpace::copyToUser(...)
 //! ```
 //!
+//! Each copy holds the process's address space lock from the first
+//! resolution to the end of the copy (D15): the kernel touches the frames
+//! through the direct map, and a sibling's `munmap` in between would free
+//! a frame under it. A copy made under the VFS lock takes the address space
+//! lock after it (VFS 30, address space 40). A file page found without the
+//! VFS lock makes the copy drop the address space lock, take VFS, retake
+//! it and resolve the range again (`prepare`).
+//!
 //! A present page that is not writable fails `translateUser` for a write
 //! too, so a copy into a copy-on-write page of a private file mapping
 //! resolves it like a write fault: the page is copied first.
@@ -36,6 +44,7 @@
 //!
 //! See concept doc 26.
 
+import Fs from "@fs";
 import Mm from "@mm";
 import _ from "./memory";
 import _ from "./process";
@@ -81,61 +90,124 @@ namespace Proc::User {
   }
 
   /// True when every page of the byte range is, or can now be made,
-  /// accessible to the process, writable when `forWrite`.
+  /// accessible to the process, writable when `forWrite`. The answer holds
+  /// while the address space lock was held; a sibling may change it after.
   function isAccessible(root: u64, address: u64, length: u64, forWrite: boolean): boolean {
-    return prepare(root, address, length, forWrite) && Mm::AddressSpace::isAccessible(root, address, length, forWrite);
+    let slot: u64 = Proc::Process::currentSlot();
+    let mut vfsTaken: boolean = false;
+    let mut spaceTaken: boolean = enter(slot);
+    let result: boolean = prepare(slot, root, address, length, forWrite, &mut vfsTaken as *mut boolean, &mut spaceTaken as *mut boolean) && Mm::AddressSpace::isAccessible(root, address, length, forWrite);
+
+    leave(slot, vfsTaken, spaceTaken);
+
+    return result;
   }
 
-  /// `Mm::AddressSpace::copyFromUser` after resolving the range.
+  /// `Mm::AddressSpace::copyFromUser` after resolving the range, under the
+  /// address space lock.
   function copyFromUser(root: u64, destination: *mut u8, source: u64, length: u64): boolean {
-    return prepare(root, source, length, false) && Mm::AddressSpace::copyFromUser(root, destination, source, length);
+    let slot: u64 = Proc::Process::currentSlot();
+    let mut vfsTaken: boolean = false;
+    let mut spaceTaken: boolean = enter(slot);
+    let result: boolean = prepare(slot, root, source, length, false, &mut vfsTaken as *mut boolean, &mut spaceTaken as *mut boolean) && Mm::AddressSpace::copyFromUser(root, destination, source, length);
+
+    leave(slot, vfsTaken, spaceTaken);
+
+    return result;
   }
 
-  /// `Mm::AddressSpace::copyToUser` after resolving the range.
+  /// `Mm::AddressSpace::copyToUser` after resolving the range, under the
+  /// address space lock.
   function copyToUser(root: u64, destination: u64, source: *u8, length: u64): boolean {
-    return prepare(root, destination, length, true) && Mm::AddressSpace::copyToUser(root, destination, source, length);
+    let slot: u64 = Proc::Process::currentSlot();
+    let mut vfsTaken: boolean = false;
+    let mut spaceTaken: boolean = enter(slot);
+    let result: boolean = prepare(slot, root, destination, length, true, &mut vfsTaken as *mut boolean, &mut spaceTaken as *mut boolean) && Mm::AddressSpace::copyToUser(root, destination, source, length);
+
+    leave(slot, vfsTaken, spaceTaken);
+
+    return result;
   }
 
-  /// `Mm::AddressSpace::copyStringFromUser`, resolving one page at a time:
-  /// the string's length is not known in advance, so only the pages the
-  /// copy reaches are resolved, and a string that ends before a page no
-  /// region covers is fine.
+  /// `Mm::AddressSpace::copyStringFromUser`, resolving one page at a time
+  /// under the address space lock: the string's length is not known in
+  /// advance, so only the pages the copy reaches are resolved, and a string
+  /// that ends before a page no region covers is fine.
   function copyStringFromUser(root: u64, destination: *mut u8, source: u64, capacity: u64): u64 {
+    let slot: u64 = Proc::Process::currentSlot();
+    let mut vfsTaken: boolean = false;
+    let mut spaceTaken: boolean = enter(slot);
     let mut done: u64 = 0;
+    let mut result: u64 = capacity;
 
     while (done < capacity) {
       let address: u64 = source + done;
       let chunk: u64 = Mm::AddressSpace::bytesToPageEnd(address, capacity - done);
 
-      if (!prepare(root, address, 1, false)) {
-        return Mm::AddressSpace::NOT_MAPPED;
+      if (!prepare(slot, root, address, 1, false, &mut vfsTaken as *mut boolean, &mut spaceTaken as *mut boolean)) {
+        result = Mm::AddressSpace::NOT_MAPPED;
+        break;
       }
 
       let copied: u64 = Mm::AddressSpace::copyStringFromUser(root, destination + done, address, chunk);
 
       if (copied == Mm::AddressSpace::NOT_MAPPED) {
-        return Mm::AddressSpace::NOT_MAPPED;
+        result = Mm::AddressSpace::NOT_MAPPED;
+        break;
       }
 
       if (copied < chunk) {
-        return done + copied;
+        result = done + copied;
+        break;
       }
 
       done += chunk;
     }
 
-    return capacity;
+    leave(slot, vfsTaken, spaceTaken);
+
+    return result;
   }
 
-  /// Resolves every page of the range that is not yet accessible. Returns
-  /// false when the range leaves the user half or a page cannot be made
-  /// accessible; pages resolved before that stay mapped, as after a fault.
-  function prepare(root: u64, address: u64, length: u64, forWrite: boolean): boolean {
+  /// Takes the address space lock of the process in `slot` for a copy, and
+  /// returns whether it was taken (not for a kernel thread, nor before the
+  /// locks exist). Pass the result to `prepare` and `leave`.
+  function enter(slot: u64): boolean {
+    if (slot == Proc::Process::NO_PROCESS) {
+      return false;
+    }
+
+    return Proc::Memory::lockSpace(slot);
+  }
+
+  /// Ends a copy: the address space lock, then the VFS lock if the copy
+  /// took it.
+  function leave(slot: u64, vfsTaken: boolean, spaceTaken: boolean): void {
+    Proc::Memory::unlockSpace(slot, spaceTaken);
+    Fs::Vfs::unlockIfTaken(vfsTaken);
+  }
+
+  /// Resolves every page of the range that is not yet accessible, with the
+  /// address space lock of `slot` held (`*spaceTaken`). A file page that
+  /// needs the VFS lock, which ranks below, makes it let the address space
+  /// lock go, take VFS (`*vfsTaken`), take the address space lock again
+  /// and resolve the range again from its start, since a sibling may have
+  /// changed it meanwhile. Returns false when the range leaves the user
+  /// half or a page cannot be made accessible; pages resolved before that
+  /// stay mapped, as after a fault.
+  function prepare(
+    slot: u64,
+    root: u64,
+    address: u64,
+    length: u64,
+    forWrite: boolean,
+    vfsTaken: *mut boolean,
+    spaceTaken: *mut boolean
+  ): boolean {
     if (!Mm::AddressSpace::isUserRange(address, length)) {
       return false;
     }
 
-    let slot: u64 = Proc::Process::currentSlot();
     let access: u64 = forWrite ? Proc::Memory::WRITE : Proc::Memory::READ;
     let mut done: u64 = 0;
 
@@ -143,7 +215,21 @@ namespace Proc::User {
       let page: u64 = address + done;
 
       if (Mm::AddressSpace::translateUser(root, page, forWrite) == Mm::AddressSpace::NOT_MAPPED) {
-        if (slot == Proc::Process::NO_PROCESS || !Proc::Memory::resolve(slot, root, page, access)) {
+        if (slot == Proc::Process::NO_PROCESS) {
+          return false;
+        }
+
+        let status: u64 = Proc::Memory::resolveHeld(slot, root, page, access);
+
+        if (status == Proc::Memory::NEEDS_VFS) {
+          Proc::Memory::unlockSpace(slot, *spaceTaken);
+          *vfsTaken = Fs::Vfs::lockUnlessHeld();
+          *spaceTaken = Proc::Memory::lockSpace(slot);
+          done = 0;
+          continue;
+        }
+
+        if (status != Proc::Memory::OK) {
           return false;
         }
       }

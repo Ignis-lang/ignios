@@ -1,0 +1,478 @@
+//!
+//! # Process Threads Self-Test
+//!
+//! Runs after the application processors joined the scheduler. Kernel
+//! threads stand in for the user threads of one process: `Proc::Process::startKernel`
+//! makes a process whose first thread runs a kernel function in the
+//! process's address space, and `Proc::Process::addThread` adds a second.
+//!
+//! | Check    | What it proves                                                     |
+//! |----------|--------------------------------------------------------------------|
+//! | lifetime | one of two threads ends: the process runs on, its address space and frames stay, `wait` does not return; the last one ends: `wait` returns its status, the space is destroyed once and the PMM free and reserved counts and the slots in use are back where they started |
+//! | end      | `kill` of a process with two parked threads wakes both, each ends at `checkKill`, and the first status (137) wins over a later `exitCurrent(3)` |
+//! | copy     | while one thread holds the address space lock, the other's `Proc::User::copyToUser` into a lazy page does not finish; once it is released the copy lands. Without the lock (D15) the copy runs between a sibling's `unmap` and its frame's reuse |
+//! | race     | two threads resolve the same `RACE_PAGES` lazy pages at once: every resolve succeeds and exactly one frame per page is taken (without the address space lock, the second `mapPrepared` of a page panics) |
+//!
+//! The lifetime check runs twice and checks the second round, so the heap
+//! growth of the first use of a thread or process slot is not counted.
+
+import Arch from "@arch";
+import Drivers from "@drivers";
+import Mm from "@mm";
+import Proc from "@proc";
+import Sched from "@sched";
+import Time from "@time";
+
+/// What the driver and the member threads share.
+record ThreadTestState {
+  /// The scenario the members run: `LIFETIME`, `END` or `RACE`.
+  static mut scenario: u64;
+
+  /// The process slot under test.
+  static mut slot: u64;
+
+  /// The address space of the process under test.
+  static mut root: u64;
+
+  /// The first byte of the region the members resolve.
+  static mut region: u64;
+
+  /// Set by the driver once the region is mapped: the members start.
+  static mut go: u64;
+
+  /// Per member: 1 once it did its part (resolved, or about to park).
+  static mut ready: u64[2];
+
+  /// Per member: 1 once the driver tells it to end its thread.
+  static mut command: u64[2];
+
+  /// Per member: 1 once it saw its process ending.
+  static mut woke: u64[2];
+
+  /// Per member: its thread id.
+  static mut ids: u64[2];
+
+  /// Per member: the processor it resolved on, plus 1.
+  static mut cpus: u64[2];
+
+  /// Set by the waiter thread once `wait` returned.
+  static mut waiterDone: u64;
+
+  /// What `wait` returned to the waiter thread.
+  static mut waiterStatus: u64;
+
+  /// The process the waiter waits for.
+  static mut waitedId: u64;
+}
+
+/// The checks.
+namespace Tests::Threads {
+  /// Scenario: one thread ends, then the other.
+  const LIFETIME: u64 = 1;
+
+  /// Scenario: the process is killed with both threads parked.
+  const END: u64 = 2;
+
+  /// Scenario: both threads resolve the same pages.
+  const RACE: u64 = 3;
+
+  /// Scenario: member 0 holds the address space lock while member 1 copies
+  /// to user memory.
+  const COPY: u64 = 4;
+
+  /// The word member 1 copies.
+  const COPY_MARKER: u64 = 0x5EED0C0FFEE;
+
+  /// 4 KiB.
+  const PAGE: u64 = 4096;
+
+  /// Pages both threads resolve in the race.
+  const RACE_PAGES: u64 = 256;
+
+  /// Ticks member 0 is known to hold the lock while the copy should wait.
+  const HOLD_TICKS: u64 = 10;
+
+  /// Ticks the driver waits for a member before it gives up: 5 s.
+  const TIMEOUT_TICKS: u64 = 500;
+
+  /// Exit status of the first member to end in the lifetime check.
+  const FIRST_STATUS: u64 = 5;
+
+  /// Exit status of the last member, which becomes the process's.
+  const LAST_STATUS: u64 = 7;
+
+  /// Runs the three checks and prints a line for each.
+  function run(): void {
+    checkLifetime(false);
+    checkLifetime(true);
+    Drivers::Console::writeLine("proc: thread lifetime self-test ok");
+
+    checkEnd();
+    Drivers::Console::writeLine("proc: process end self-test ok");
+
+    checkRace();
+
+    checkCopy();
+    Drivers::Console::writeLine("proc: user copy lock self-test ok");
+  }
+
+  /// Member 0 takes the address space lock; member 1 then copies into an
+  /// untouched page. The copy must wait for the lock: it has not finished
+  /// after `HOLD_TICKS`, and lands once member 0 lets go.
+  function checkCopy(): void {
+    let id: u64 = startPair(COPY, 1);
+
+    release();
+    awaitFlags(&mut ThreadTestState::ready as *mut u64, "a member never started its part of the copy check");
+    Sched::Scheduler::sleep(HOLD_TICKS);
+
+    if (@readVolatile<u64>(wokeOf(1)) != 0) {
+      @panic("threads: a user copy ran while a sibling held the address space lock");
+    }
+
+    *commandOf(0) = 1;
+    awaitFlags(&mut ThreadTestState::woke as *mut u64, "the copy never finished after the lock was released");
+
+    let mut copied: u64 = 0;
+
+    if (!Mm::AddressSpace::copyFromUser(ThreadTestState::root, &mut copied as *mut u8, ThreadTestState::region, 8) || copied != COPY_MARKER) {
+      @panic("threads: the user copy did not land");
+    }
+
+    *commandOf(1) = 1;
+
+    if (Proc::Process::wait(id) != 0) {
+      @panic("threads: the copy process did not end cleanly");
+    }
+  }
+
+  /// One process, two threads: the first ends, the space and its frames
+  /// stay and `wait` keeps waiting; the second ends, `wait` returns its
+  /// status and everything is given back. With `check` false the round only
+  /// warms the heap up.
+  function checkLifetime(check: boolean): void {
+    let free: u64 = Mm::Pmm::freeFrameCount();
+    let reserved: u64 = Mm::Pmm::reservedFrameCount();
+    let used: u64 = Proc::Process::usedSlots();
+    let id: u64 = startPair(LIFETIME, 2);
+
+    release();
+
+    let waiter: u64 = Sched::Scheduler::spawn(Arch::ContextAsm::ignis_function_address(waiterMain), 0);
+
+    awaitFlags(&mut ThreadTestState::ready as *mut u64, "a member never resolved its page");
+
+    if (Proc::Process::threadCountOf(id) != 2) {
+      @panic("threads: the process does not count two threads");
+    }
+
+    let held: u64 = Mm::Pmm::freeFrameCount();
+
+    *commandOf(0) = 1;
+    Sched::Scheduler::join(*idOf(0));
+
+    let page: u64 = Mm::Vmm::leafEntryIn(ThreadTestState::root, ThreadTestState::region);
+
+    if (Mm::Pmm::freeFrameCount() != held) {
+      Drivers::Console::write("threads: free frames ");
+      Drivers::Console::writeDecimal(held);
+      Drivers::Console::write(" before, ");
+      Drivers::Console::writeDecimal(Mm::Pmm::freeFrameCount());
+      Drivers::Console::writeLine(" after the first thread's reap");
+      @panic("threads: reaping one of two threads freed the shared address space");
+    }
+
+    if ((page & Mm::Vmm::PRESENT) == 0 || Proc::Process::stateOf(id) != Proc::Process::RUNNING || Proc::Process::threadCountOf(id) != 1) {
+      @panic("threads: the process did not run on with its other thread");
+    }
+
+    Sched::Scheduler::sleep(5);
+
+    if (@readVolatile<u64>(&mut ThreadTestState::waiterDone as *mut u64) != 0) {
+      @panic("threads: wait returned before the last thread ended");
+    }
+
+    *commandOf(1) = 1;
+    Sched::Scheduler::join(waiter);
+
+    if (ThreadTestState::waiterStatus != LAST_STATUS || Proc::Process::stateOf(id) != Proc::Process::FREE) {
+      @panic("threads: wait did not return the last thread's status");
+    }
+
+    if (check && (Mm::Pmm::freeFrameCount() != free || Mm::Pmm::reservedFrameCount() != reserved || Proc::Process::usedSlots() != used)) {
+      @panic("threads: the last thread's end did not give everything back");
+    }
+  }
+
+  /// Kills a process whose two threads park until they see the kill: both
+  /// wake, the first status wins, and `wait` returns it.
+  function checkEnd(): void {
+    let free: u64 = Mm::Pmm::freeFrameCount();
+    let id: u64 = startPair(END, 0);
+
+    release();
+    awaitFlags(&mut ThreadTestState::ready as *mut u64, "a member never started");
+
+    if (Proc::Process::kill(id) != Proc::Process::KILL_OK) {
+      @panic("threads: kill did not find the process");
+    }
+
+    awaitFlags(&mut ThreadTestState::woke as *mut u64, "kill did not wake every thread of the process");
+
+    if (Proc::Process::wait(id) != Proc::Process::KILLED) {
+      @panic("threads: a later end changed the status of a killed process");
+    }
+
+    if (Mm::Pmm::freeFrameCount() != free) {
+      @panic("threads: the killed process did not give its frames back");
+    }
+  }
+
+  /// Two threads resolve the same `RACE_PAGES` pages of an anonymous region
+  /// at once: every resolve succeeds and each page takes one frame.
+  function checkRace(): void {
+    let reservedBefore: u64 = Mm::Pmm::reservedFrameCount();
+    let id: u64 = startPair(RACE, RACE_PAGES);
+    let free: u64 = Mm::Pmm::freeFrameCount();
+    let reserved: u64 = Mm::Pmm::reservedFrameCount();
+
+    release();
+    awaitFlags(&mut ThreadTestState::ready as *mut u64, "a member never finished resolving");
+
+    if (free - Mm::Pmm::freeFrameCount() != RACE_PAGES || reserved - Mm::Pmm::reservedFrameCount() != RACE_PAGES) {
+      Drivers::Console::write("threads: frames taken ");
+      Drivers::Console::writeDecimal(free - Mm::Pmm::freeFrameCount());
+      Drivers::Console::write(", expected ");
+      Drivers::Console::writeDecimal(RACE_PAGES);
+      Drivers::Console::writeLine("");
+      @panic("threads: two threads resolving the same pages took the wrong number of frames");
+    }
+
+    *commandOf(0) = 1;
+    *commandOf(1) = 1;
+
+    if (Proc::Process::wait(id) != 0 || Mm::Pmm::reservedFrameCount() != reservedBefore) {
+      @panic("threads: the race process did not end cleanly");
+    }
+
+    Drivers::Console::write("memory: concurrent fault self-test ok, ");
+    Drivers::Console::writeDecimal(RACE_PAGES);
+    Drivers::Console::write(" pages on cpus ");
+    Drivers::Console::writeDecimal(*cpuOf(0) - 1);
+    Drivers::Console::write(" and ");
+    Drivers::Console::writeDecimal(*cpuOf(1) - 1);
+    Drivers::Console::writeLine("");
+  }
+
+  /// Starts a process of two member threads for `scenario`, with a region
+  /// of `pages` read/write anonymous pages (none for 0). The members spin
+  /// until `release`. Returns the process id.
+  function startPair(scenario: u64, pages: u64): u64 {
+    let mut index: u64 = 0;
+
+    while (index < 2) {
+      *readyOf(index) = 0;
+      *commandOf(index) = 0;
+      *wokeOf(index) = 0;
+      *cpuOf(index) = 0;
+      index += 1;
+    }
+
+    ThreadTestState::scenario = scenario;
+    ThreadTestState::go = 0;
+    ThreadTestState::waiterDone = 0;
+    ThreadTestState::root = Mm::AddressSpace::create();
+
+    if (ThreadTestState::root == Mm::Pmm::NO_FRAME) {
+      @panic("threads: no address space");
+    }
+
+    let id: u64 = Proc::Process::startKernel(ThreadTestState::root, Arch::ContextAsm::ignis_function_address(firstMember));
+
+    if (id == Proc::Process::NO_PROCESS) {
+      @panic("threads: the process did not start");
+    }
+
+    ThreadTestState::waitedId = id;
+    ThreadTestState::slot = Proc::Process::slotOf(id);
+
+    if (Proc::Process::addThread(ThreadTestState::slot, Arch::ContextAsm::ignis_function_address(secondMember), 1) == Sched::Thread::NO_THREAD) {
+      @panic("threads: addThread refused a running process");
+    }
+
+    if (pages > 0) {
+      let mut address: u64 = 0;
+
+      if (Proc::Memory::map(ThreadTestState::slot, ThreadTestState::root, pages * PAGE, Proc::Memory::READ | Proc::Memory::WRITE, null, 0, false, &mut address as *mut u64) != Proc::Memory::OK) {
+        @panic("threads: the region was not mapped");
+      }
+
+      ThreadTestState::region = address;
+    }
+
+    return id;
+  }
+
+  /// Lets the members of `startPair` go.
+  function release(): void {
+    @writeVolatile<u64>(&mut ThreadTestState::go as *mut u64, 1);
+  }
+
+  /// The first thread of the process: member 0. The argument is the slot.
+  function firstMember(slot: u64): void {
+    member(0);
+  }
+
+  /// The added thread: member 1.
+  function secondMember(index: u64): void {
+    member(1);
+  }
+
+  /// What member `index` does in the current scenario. Never returns: a
+  /// member ends through the process API, as a user thread would.
+  function member(index: u64): void {
+    *idOf(index) = Sched::Scheduler::currentId();
+
+    // Spinning, not sleeping: both members are running when `go` comes, on
+    // two processors when there are two idle ones.
+    while (@readVolatile<u64>(&mut ThreadTestState::go as *mut u64) == 0) {
+      Arch::Cpu::pause();
+    }
+
+    let scenario: u64 = ThreadTestState::scenario;
+
+    if (scenario == END) {
+      *readyOf(index) = 1;
+
+      while (!Proc::Process::killRequested()) {
+        Sched::Scheduler::park();
+      }
+
+      *wokeOf(index) = 1;
+
+      // A second end of the process: the kill's status must stay.
+      if (index == 0) {
+        Proc::Process::exitCurrent(3);
+      }
+
+      Proc::Process::checkKill();
+      @panic("threads: checkKill returned in a killed process");
+    }
+
+    if (scenario == COPY) {
+      copyMember(index);
+    }
+
+    *cpuOf(index) = Arch::CpuLocal::index() + 1;
+
+    if (scenario == LIFETIME) {
+      // Each member touches its own page.
+      if (!Proc::Memory::resolve(ThreadTestState::slot, ThreadTestState::root, ThreadTestState::region + index * PAGE, Proc::Memory::WRITE)) {
+        @panic("threads: a member could not resolve its page");
+      }
+    } else {
+      let mut page: u64 = 0;
+
+      while (page < RACE_PAGES) {
+        if (!Proc::Memory::resolve(ThreadTestState::slot, ThreadTestState::root, ThreadTestState::region + page * PAGE, Proc::Memory::WRITE)) {
+          @panic("threads: a resolve failed in the race");
+        }
+
+        page += 1;
+      }
+    }
+
+    @writeVolatile<u64>(readyOf(index), 1);
+
+    while (@readVolatile<u64>(commandOf(index)) == 0) {
+      Sched::Scheduler::sleep(1);
+    }
+
+    Proc::Process::exitThread(scenario == LIFETIME ? FIRST_STATUS + index * (LAST_STATUS - FIRST_STATUS) : 0);
+  }
+
+  /// Member `index` of the copy check: member 0 holds the address space
+  /// lock until told to let go; member 1 starts once it is held and copies
+  /// `COPY_MARKER` to the region. Each then ends its thread when told.
+  function copyMember(index: u64): never {
+    if (index == 0) {
+      let taken: boolean = Proc::Memory::lockSpace(ThreadTestState::slot);
+
+      @writeVolatile<u64>(readyOf(0), 1);
+
+      while (@readVolatile<u64>(commandOf(0)) == 0) {
+        Sched::Scheduler::sleep(1);
+      }
+
+      Proc::Memory::unlockSpace(ThreadTestState::slot, taken);
+      @writeVolatile<u64>(wokeOf(0), 1);
+    } else {
+      while (@readVolatile<u64>(readyOf(0)) == 0) {
+        Sched::Scheduler::sleep(1);
+      }
+
+      @writeVolatile<u64>(readyOf(1), 1);
+
+      let marker: u64 = COPY_MARKER;
+
+      if (!Proc::User::copyToUser(Proc::Process::currentRoot(), ThreadTestState::region, &marker as *u8, 8)) {
+        @panic("threads: the user copy was refused");
+      }
+
+      @writeVolatile<u64>(wokeOf(1), 1);
+    }
+
+    while (@readVolatile<u64>(commandOf(1)) == 0) {
+      Sched::Scheduler::sleep(1);
+    }
+
+    Proc::Process::exitThread(0);
+  }
+
+  /// Waits for the lifetime process and records what `wait` returned.
+  function waiterMain(argument: u64): void {
+    ThreadTestState::waiterStatus = Proc::Process::wait(ThreadTestState::waitedId);
+    @writeVolatile<u64>(&mut ThreadTestState::waiterDone as *mut u64, 1);
+  }
+
+  /// Sleeps until both flags of `flags` are set; panics with `message` after
+  /// `TIMEOUT_TICKS`.
+  function awaitFlags(flags: *mut u64, message: str): void {
+    let deadline: u64 = Time::Timer::ticks() + TIMEOUT_TICKS;
+
+    while (@readVolatile<u64>(flags) == 0 || @readVolatile<u64>(flags + 1) == 0) {
+      if (Time::Timer::ticks() > deadline) {
+        Drivers::Console::write("threads: ");
+        Drivers::Console::writeLine(message);
+        @panic("threads: a member thread timed out");
+      }
+
+      Sched::Scheduler::sleep(1);
+    }
+  }
+
+  /// Entry `index` of `ready`.
+  function readyOf(index: u64): *mut u64 {
+    return &mut ThreadTestState::ready as *mut u64 + index;
+  }
+
+  /// Entry `index` of `command`.
+  function commandOf(index: u64): *mut u64 {
+    return &mut ThreadTestState::command as *mut u64 + index;
+  }
+
+  /// Entry `index` of `woke`.
+  function wokeOf(index: u64): *mut u64 {
+    return &mut ThreadTestState::woke as *mut u64 + index;
+  }
+
+  /// Entry `index` of `ids`.
+  function idOf(index: u64): *mut u64 {
+    return &mut ThreadTestState::ids as *mut u64 + index;
+  }
+
+  /// Entry `index` of `cpus`.
+  function cpuOf(index: u64): *mut u64 {
+    return &mut ThreadTestState::cpus as *mut u64 + index;
+  }
+}

@@ -337,6 +337,13 @@ namespace Fs::Vfs {
     }
   }
 
+  /// True when the running thread holds the VFS lock. A caller that holds a
+  /// lock of higher rank checks it before `lockUnlessHeld`
+  /// (`Proc::Memory::resolve`).
+  function holdsLock(): boolean {
+    return Sched::Scheduler::isStarted() && Sched::Mutex::isHeldByCaller(vfsLock());
+  }
+
   /// Panics when the running thread does not hold the VFS lock, once the
   /// scheduler runs: a missing lock then fails the first call that lacks it,
   /// on every boot, instead of a race that shows once in a while. The

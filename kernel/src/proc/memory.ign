@@ -112,11 +112,43 @@
 //!
 //! ## Locks
 //!
-//! The node fields and the page cache are guarded by the VFS lock. `map` of
-//! a file runs with it held by the caller; `resolve`, `unmap` and
-//! `teardown` take it for a file region unless the running thread holds it
-//! already (a system call that copies to user memory under it), and never
-//! with a spinlock held.
+//! Each process slot has an address space mutex (rank
+//! `Lib::MutexRank::ADDRESS_SPACE`), since the threads of a process share
+//! its regions and page tables. `map`, `unmap`, `resolve` (and `growStack`
+//! under it), `teardown`, `reset` and `adoptImage` hold it while they read
+//! or change the region table of the slot, so a table that grows is never
+//! read half moved and a page is resolved by one thread at a time. Under
+//! the lock a page found present is taken as it is: two threads that fault
+//! on the same page both continue, and the page is mapped once.
+//!
+//! The node fields and the page cache are guarded by the VFS lock, which
+//! ranks below: process table (10) ──► VFS (30) ──► address space (40).
+//! `map` of a file runs with the VFS lock held by the caller. `unmap` and
+//! `teardown` take it first, unless the running thread holds it already (a
+//! system call that copies to user memory under it). `resolve` of a page
+//! of a file region that finds the VFS lock not held drops the address
+//! space lock, takes VFS, takes the address space lock again and looks the
+//! region up again, since it may have changed meanwhile:
+//!
+//! ```text
+//!   resolve(slot, page)
+//!     ├─ lock space; region := lookup
+//!     ├─ file region, VFS not held:  unlock space; lock VFS; lock space
+//!     ├─ region := lookup again; present? done; else map the page once
+//!     └─ unlock space; unlock VFS if taken here
+//! ```
+//!
+//! A copy between the kernel and user memory (`Proc::User`) holds the
+//! address space lock from the resolution of its range to the end of the
+//! copy, so a sibling's `unmap` cannot free a frame it is about to touch.
+//! It resolves through `resolveHeld`, which reports `NEEDS_VFS` instead of
+//! dropping the lock itself; the copy then drops it, takes VFS, retakes it
+//! and resolves the rest of its range again.
+//!
+//! None of them runs with a spinlock held. Before `initialize` (the boot
+//! self-tests that run before the scheduler) nothing is locked.
+//! `regionContaining` and `regionCount` read the table without the lock,
+//! for callers that know nothing else changes it.
 //!
 //! ## Protection
 //!
@@ -141,6 +173,7 @@ import Boot from "@boot";
 import Fs from "@fs";
 import Lib from "@lib";
 import Mm from "@mm";
+import Sched from "@sched";
 
 namespace Proc {
   /// One mapped region of a process.
@@ -191,11 +224,11 @@ namespace Proc {
 }
 
 /// The region tables and the next address of every slot. Each size must
-/// equal `MAX_SLOTS`. A slot's entries are used only by the process's own
-/// thread, and by the kernel before that thread starts or after it ended
-/// (`launch`, `finishCurrent`), so they take no lock; the page table edits
-/// under them take the page table spinlock. A per-process lock comes with
-/// processes of several threads.
+/// equal `MAX_SLOTS`. A slot's entries are guarded by its address space
+/// mutex (`locks`), which every thread of the process, and the kernel
+/// before the first starts and after the last ends (`launch`,
+/// `finishThread`), takes through the functions below; the page table
+/// edits under them take the page table spinlock.
 record MemoryState {
   /// The region table of each slot: the address of a heap array of
   /// `capacities[s]` regions, 0 before the first `map`.
@@ -207,6 +240,14 @@ record MemoryState {
 
   /// The end of the next region of each slot.
   static mut nextEnd: u64[64];
+
+  /// The address space mutex of each slot, rank
+  /// `Lib::MutexRank::ADDRESS_SPACE`.
+  static mut locks: Sched::Mutex[64];
+
+  /// True once `initialize` set the mutexes up: from then on the functions
+  /// below take them.
+  static mut locking: boolean;
 }
 
 /// The mapping API.
@@ -273,6 +314,51 @@ namespace Proc::Memory {
   /// The region table of the process is full.
   const TOO_MANY: u64 = 3;
 
+  /// `resolveHeld`: the access is not allowed or no frame is left.
+  const REFUSED: u64 = 4;
+
+  /// `resolveHeld`: the page is in a file region and the VFS lock is not
+  /// held. The caller lets the address space lock go, takes VFS, takes the
+  /// address space lock again and resolves again.
+  const NEEDS_VFS: u64 = 5;
+
+  /// Sets up the address space mutex of every slot. Called once the
+  /// scheduler runs; until then nothing is locked.
+  function initialize(): void {
+    let mut slot: u64 = 0;
+
+    while (slot < MAX_SLOTS) {
+      Sched::Mutex::initialize(spaceLock(slot), Lib::MutexRank::ADDRESS_SPACE);
+      slot += 1;
+    }
+
+    MemoryState::locking = true;
+  }
+
+  /// Takes the address space mutex of `slot` and returns true, or returns
+  /// false before `initialize`. Pass the result to `unlockSpace`.
+  function lockSpace(slot: u64): boolean {
+    if (!MemoryState::locking) {
+      return false;
+    }
+
+    Sched::Mutex::lock(spaceLock(slot));
+
+    return true;
+  }
+
+  /// Ends a `lockSpace` of `slot` that returned `taken`.
+  function unlockSpace(slot: u64, taken: boolean): void {
+    if (taken) {
+      Sched::Mutex::unlock(spaceLock(slot));
+    }
+  }
+
+  /// The address space mutex of `slot`.
+  function spaceLock(slot: u64): *mut Sched::Mutex {
+    return &mut MemoryState::locks as *mut Sched::Mutex + slot;
+  }
+
   /// Gives `slot` no regions and the first address, and frees its table.
   /// Called when a process starts in the slot and when it ends, after
   /// `teardown`: the regions must hold no node or reservation by then.
@@ -281,6 +367,14 @@ namespace Proc::Memory {
       return;
     }
 
+    let taken: boolean = lockSpace(slot);
+
+    clearSlot(slot);
+    unlockSpace(slot, taken);
+  }
+
+  /// `reset` with the address space lock held.
+  function clearSlot(slot: u64): void {
     if (*capacityOf(slot) > 0) {
       Mm::Heap::free(@pointerFromInteger<*mut u8>(*tableOf(slot)));
       *tableOf(slot) = 0;
@@ -318,6 +412,25 @@ namespace Proc::Memory {
       return INVALID;
     }
 
+    let taken: boolean = lockSpace(slot);
+    let status: u64 = mapLocked(slot, root, length, protection, node, offset, shared, address);
+
+    unlockSpace(slot, taken);
+
+    return status;
+  }
+
+  /// `map` with valid arguments and the address space lock held.
+  function mapLocked(
+    slot: u64,
+    root: u64,
+    length: u64,
+    protection: u64,
+    node: *mut Fs::Node,
+    offset: u64,
+    shared: boolean,
+    address: *mut u64
+  ): u64 {
     let rounded: u64 = (length + PAGE_SIZE - 1) / PAGE_SIZE * PAGE_SIZE;
     let end: u64 = *nextEndOf(slot);
 
@@ -393,6 +506,19 @@ namespace Proc::Memory {
       return INVALID;
     }
 
+    let vfsTaken: boolean = Fs::Vfs::lockUnlessHeld();
+    let taken: boolean = lockSpace(slot);
+    let status: u64 = unmapLocked(slot, root, address, length);
+
+    unlockSpace(slot, taken);
+    Fs::Vfs::unlockIfTaken(vfsTaken);
+
+    return status;
+  }
+
+  /// `unmap` with valid arguments, the VFS lock (once the scheduler runs)
+  /// and the address space lock held.
+  function unmapLocked(slot: u64, root: u64, address: u64, length: u64): u64 {
     let end: u64 = address + (length + PAGE_SIZE - 1) / PAGE_SIZE * PAGE_SIZE;
 
     // A split needs a free entry. Reserving it here, before the loop, may
@@ -626,19 +752,23 @@ namespace Proc::Memory {
       return false;
     }
 
+    let taken: boolean = lockSpace(slot);
     let mut index: u64 = 0;
 
     while (index < (*staged).count) {
       let entry: u64 = reserveEntry(slot);
 
       if (entry == MAX_REGIONS || entry == NO_ROOM) {
-        reset(slot);
+        clearSlot(slot);
+        unlockSpace(slot, taken);
         return false;
       }
 
       Lib::Mem::copy(regionAt(slot, entry) as *mut u8, stagedAt(staged, index) as *u8, @sizeOf<Proc::Region>());
       index += 1;
     }
+
+    unlockSpace(slot, taken);
 
     return true;
   }
@@ -685,10 +815,61 @@ namespace Proc::Memory {
   /// access, the page is present without it (a write to a read-only page
   /// of a region that does not allow it), or no frame is left for a cache
   /// page. Reading needs any access at all, since x86 cannot map a page
-  /// ring 3 cannot read; `PROT_NONE` allows nothing. Runs in the thread of
-  /// the process that owns `slot`, with no spinlock held: a file region
-  /// takes the VFS lock.
+  /// ring 3 cannot read; `PROT_NONE` allows nothing. Runs in a thread of
+  /// the process that owns `slot`, with no spinlock held: it takes the
+  /// address space lock, and a file region the VFS lock (see Locks).
   function resolve(slot: u64, root: u64, address: u64, access: u64): boolean {
+    if (slot >= MAX_SLOTS) {
+      return false;
+    }
+
+    let mut vfsTaken: boolean = false;
+    let mut taken: boolean = lockSpace(slot);
+
+    if (taken && !(address >= STACK_BOTTOM && address < STACK_TOP)) {
+      let region: *mut Proc::Region = regionContaining(slot, address);
+
+      // The VFS lock ranks below this one: let go, take both in order, and
+      // let `resolveLocked` look the region up again.
+      if (region != null && (*region).node != null && !Fs::Vfs::holdsLock()) {
+        unlockSpace(slot, taken);
+        vfsTaken = Fs::Vfs::lockUnlessHeld();
+        taken = lockSpace(slot);
+      }
+    }
+
+    let resolved: boolean = resolveLocked(slot, root, address, access);
+
+    unlockSpace(slot, taken);
+    Fs::Vfs::unlockIfTaken(vfsTaken);
+
+    return resolved;
+  }
+
+  /// `resolve` for a caller that holds the address space lock of `slot`
+  /// (`Proc::User` copies, which keep it to the end of the copy). Returns
+  /// `OK`, `REFUSED`, or `NEEDS_VFS` without touching anything when the
+  /// page is in a file region and the VFS lock, which ranks below, is not
+  /// held.
+  function resolveHeld(slot: u64, root: u64, address: u64, access: u64): u64 {
+    if (slot >= MAX_SLOTS) {
+      return REFUSED;
+    }
+
+    if (MemoryState::locking && !(address >= STACK_BOTTOM && address < STACK_TOP)) {
+      let region: *mut Proc::Region = regionContaining(slot, address);
+
+      if (region != null && (*region).node != null && !Fs::Vfs::holdsLock()) {
+        return NEEDS_VFS;
+      }
+    }
+
+    return resolveLocked(slot, root, address, access) ? OK : REFUSED;
+  }
+
+  /// `resolve` with the address space lock held, and the VFS lock for a
+  /// file region. A page found present is not mapped again.
+  function resolveLocked(slot: u64, root: u64, address: u64, access: u64): boolean {
     if (address >= STACK_BOTTOM && address < STACK_TOP) {
       return growStack(root, address, access);
     }
@@ -765,8 +946,9 @@ namespace Proc::Memory {
     }
 
     // Copy on write: the copy takes the place of the cache frame, whose
-    // reference goes back; `freePage` drops the local TLB entry, and the
-    // process has one thread, so no other processor holds it.
+    // reference goes back; `freePage` drops the local TLB entry. Another
+    // processor running a sibling thread may still hold it until the TLB
+    // shootdown exists (C4 T4).
     if (present) {
       Mm::AddressSpace::freePage(root, page);
     }
@@ -884,7 +1066,8 @@ namespace Proc::Memory {
   /// read and written, never executed. Its frames are not reserved ahead,
   /// as on Linux: when none is left the access is refused and the process
   /// is killed with SIGSEGV. The page tables were built when the process
-  /// started (`prepareStack`), so only the frame can be missing.
+  /// started (`prepareStack`), so only the frame can be missing. The
+  /// address space lock is held (`resolve`), so a present page is final.
   function growStack(root: u64, address: u64, access: u64): boolean {
     if ((access & EXECUTE) != 0) {
       return false;
@@ -973,13 +1156,24 @@ namespace Proc::Memory {
   /// Ends the regions of `slot` when its process ends: gives back the
   /// unused reservation of each region and the node of each file region.
   /// The address space `root` is destroyed later with the frames it maps,
-  /// which drops the references on cache frames. Takes the VFS lock for a
-  /// file region; no spinlock may be held.
+  /// which drops the references on cache frames. Takes the VFS lock unless
+  /// the caller holds it, then the address space lock; no spinlock may be
+  /// held.
   function teardown(slot: u64, root: u64): void {
     if (slot >= MAX_SLOTS) {
       return;
     }
 
+    let vfsTaken: boolean = Fs::Vfs::lockUnlessHeld();
+    let taken: boolean = lockSpace(slot);
+
+    teardownLocked(slot, root);
+    unlockSpace(slot, taken);
+    Fs::Vfs::unlockIfTaken(vfsTaken);
+  }
+
+  /// `teardown` with both locks held.
+  function teardownLocked(slot: u64, root: u64): void {
     let mut index: u64 = 0;
 
     while (index < *capacityOf(slot)) {
