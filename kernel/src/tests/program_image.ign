@@ -6,7 +6,7 @@
 //! free process slots 62 and 63, before any process runs. It loads
 //! `/bin/sh` twice, and twice a small ELF file `/pit` that the test writes:
 //! a text page and a data segment of two full pages, 16 bytes of a third
-//! and a bss page.
+//! and a bss page. `/pitbad` is `/pit` with its entry in the data segment.
 //!
 //! | Check        | What it proves                                                          |
 //! |--------------|-------------------------------------------------------------------------|
@@ -16,6 +16,8 @@
 //! | private data | a write to a data page copies only that page; the other space, the other data page and the file keep the cache frame and its bytes |
 //! | data tail    | the page holding the end of the data file bytes is private, zero-tailed; the bss page past it is zero |
 //! | busy         | a write, a truncate and a removal of a file an image region names are `BUSY`; a write works again after teardown |
+//! | shared writer| a load of `/pit` is `BUSY` while a writable shared region of it exists, and works once it is unmapped, a read-only shared one still there |
+//! | failed load  | `startElf` of `/pitbad`, whose entry lies in its data, fails after staging its segments and gives everything back: frames, reservations, node counts; the file can be removed |
 //! | release      | the free frames and the reservations return to their start, less the cache pages of `/bin/sh`, which stay |
 
 import Boot from "@boot";
@@ -65,13 +67,16 @@ namespace Tests::ProgramImage {
     Proc::Memory::reset(SLOT_B);
 
     let shell: *mut Fs::Node = lookupOrPanic("/bin/sh", 7);
-    let program: *mut Fs::Node = createProgram();
+    let program: *mut Fs::Node = createProgram("pit", 3, TEXT_ADDRESS);
+    let broken: *mut Fs::Node = createProgram("pitbad", 6, DATA_ADDRESS);
     let shellCachedBefore: u64 = cachedPages(shell);
     let freeBefore: u64 = Mm::Pmm::freeFrameCount();
     let reservedBefore: u64 = Mm::Pmm::reservedFrameCount();
 
     checkSharedText(shell);
     checkPrivateData(program);
+    checkSharedWriter(program);
+    checkFailedLoad(broken);
 
     if (Fs::Vfs::remove(program) != Fs::Vfs::OK) {
       @panic("program image self-test: the test program could not be removed after teardown");
@@ -193,6 +198,60 @@ namespace Tests::ProgramImage {
     }
   }
 
+  /// A writable shared region of `/pit` keeps it from being loaded; a
+  /// read-only one does not.
+  function checkSharedWriter(program: *mut Fs::Node): void {
+    let rootA: u64 = createSpace();
+    let rootB: u64 = createSpace();
+    let mut viewed: u64 = 0;
+    let mut written: u64 = 0;
+
+    if (Proc::Memory::map(SLOT_A, rootA, PAGE, Proc::Memory::READ, program, 0, true, &mut viewed as *mut u64) != Proc::Memory::OK || Proc::Memory::map(SLOT_A, rootA, PAGE, Proc::Memory::READ | Proc::Memory::WRITE, program, 0, true, &mut written as *mut u64) != Proc::Memory::OK) {
+      @panic("program image self-test: the shared mappings of the test program failed");
+    }
+
+    let mut loaded: Proc::LoadedImage = Proc::LoadedImage { entry: 0, segments: 0, pages: 0, abi: 0 };
+    let mut staged: Proc::StagedImage = Proc::StagedImage { table: 0, count: 0 };
+
+    if ((*program).sharedWriters != 1 || Proc::Elf::load(program, rootB, &mut staged as *mut Proc::StagedImage, &mut loaded as *mut Proc::LoadedImage) != Proc::Elf::ERR_BUSY || staged.count != 0) {
+      @panic("program image self-test: a file mapped writable and shared was loaded");
+    }
+
+    Proc::Memory::dropStaged(&mut staged as *mut Proc::StagedImage);
+
+    if (Proc::Memory::unmap(SLOT_A, rootA, written, PAGE) != Proc::Memory::OK || (*program).sharedWriters != 0) {
+      @panic("program image self-test: unmapping a writable shared region kept its count");
+    }
+
+    loadInto(program, rootB, SLOT_B);
+    endSpace(SLOT_A, rootA);
+    endSpace(SLOT_B, rootB);
+
+    if ((*program).images != 0 || (*program).mappings != 0 || (*program).sharedWriters != 0) {
+      @panic("program image self-test: teardown kept the counts on the test program");
+    }
+  }
+
+  /// A load that fails after staging its segments (the entry of `/pitbad`
+  /// lies in its data) takes nothing: frames, reservations and node counts
+  /// are back, and the file can be removed.
+  function checkFailedLoad(broken: *mut Fs::Node): void {
+    let freeBefore: u64 = Mm::Pmm::freeFrameCount();
+    let reservedBefore: u64 = Mm::Pmm::reservedFrameCount();
+
+    if (Proc::Process::startElf(broken, "pitbad" as *u8, 7, 1, Fs::Vfs::root()) != Proc::Process::NO_PROCESS) {
+      @panic("program image self-test: a program whose entry is in its data started");
+    }
+
+    if (Mm::Pmm::reservedFrameCount() != reservedBefore || Mm::Pmm::freeFrameCount() != freeBefore) {
+      @panic("program image self-test: a failed load kept frames or reservations");
+    }
+
+    if ((*broken).mappings != 0 || (*broken).images != 0 || Fs::Vfs::remove(broken) != Fs::Vfs::OK) {
+      @panic("program image self-test: a failed load kept its node counts");
+    }
+  }
+
   /// Panics unless a write, a truncate and a removal of `node` are `BUSY`.
   function expectBusy(node: *mut Fs::Node): void {
     let mut byte: u8 = 0;
@@ -256,10 +315,10 @@ namespace Tests::ProgramImage {
     @panic("program image self-test: the image has no writable region");
   }
 
-  /// Creates `/pit`: an ELF header, two program headers, a text page of
-  /// `ret` at file page 1, the data `D`, `E` pages and 16 bytes of `F` from
-  /// file page 3.
-  function createProgram(): *mut Fs::Node {
+  /// Creates the file `name` (`length` bytes) in `/`: an ELF header with
+  /// entry `entry`, two program headers, a text page of `ret` at file page
+  /// 1, the data `D`, `E` pages and 16 bytes of `F` from file page 3.
+  function createProgram(name: str, length: u64, entry: u64): *mut Fs::Node {
     let image: *mut u8 = Mm::Heap::allocate(FILE_SIZE, 16);
 
     if (image == null) {
@@ -279,7 +338,7 @@ namespace Tests::ProgramImage {
     put(image, 16, 2, 2);
     put(image, 18, 62, 2);
     put(image, 20, 1, 4);
-    put(image, 24, TEXT_ADDRESS, 8);
+    put(image, 24, entry, 8);
     put(image, 32, 64, 8);
     put(image, 52, 64, 2);
     put(image, 54, 56, 2);
@@ -289,7 +348,7 @@ namespace Tests::ProgramImage {
 
     let mut node: *mut Fs::Node = null;
 
-    if (Fs::Vfs::create(Fs::Vfs::root(), "pit" as *u8, 3, Fs::Vfs::FILE, Fs::Vfs::FILE_MODE, &mut node as *mut *mut Fs::Node) != Fs::Vfs::OK || Fs::Vfs::write(node, 0, image as *u8, FILE_SIZE) != Fs::Vfs::OK) {
+    if (Fs::Vfs::create(Fs::Vfs::root(), name as *u8, length, Fs::Vfs::FILE, Fs::Vfs::FILE_MODE, &mut node as *mut *mut Fs::Node) != Fs::Vfs::OK || Fs::Vfs::write(node, 0, image as *u8, FILE_SIZE) != Fs::Vfs::OK) {
       @panic("program image self-test: cannot write the test program");
     }
 

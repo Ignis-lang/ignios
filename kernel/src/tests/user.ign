@@ -255,10 +255,12 @@ namespace Tests::User {
   /// must end in the allocator's panic. The file `/mmexec` that the first run
   /// made is removed. The PMM free count must be the same at the end, less
   /// the page cache frames that the file mappings of `/etc/motd` and
-  /// `/bin/hello` filled, which the cache keeps until the file is removed:
-  /// mappings are freed by `munmap` or when the process ends.
+  /// `/bin/hello` filled, which the cache keeps until the file is removed,
+  /// and the reservation count must be the same: mappings are freed by
+  /// `munmap` or when the process ends.
   function runMemory(): void {
     let freeBefore: u64 = Mm::Pmm::freeFrameCount();
+    let reservedBefore: u64 = Mm::Pmm::reservedFrameCount();
     let cachedBefore: u64 = cachedPages("/etc/motd") + cachedPages("/bin/hello");
     let status: u64 = Proc::Programs::runNamed("mmtest");
 
@@ -283,8 +285,8 @@ namespace Tests::User {
 
     let cachedNow: u64 = cachedPages("/etc/motd") + cachedPages("/bin/hello") - cachedBefore;
 
-    if (Mm::Pmm::freeFrameCount() + cachedNow != freeBefore) {
-      @panic("user test: mappings leaked frames");
+    if (Mm::Pmm::freeFrameCount() + cachedNow != freeBefore || Mm::Pmm::reservedFrameCount() != reservedBefore) {
+      @panic("user test: mappings leaked frames or reservations");
     }
 
     Drivers::Console::writeLine("user: mmtest passed, writing read-only, using unmapped, executing non-exec, touching PROT_NONE memory and overflowing the 8 MiB stack were killed, a double free was caught, no frame leaked");

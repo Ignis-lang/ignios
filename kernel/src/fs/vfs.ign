@@ -49,13 +49,16 @@
 //! path, so a cached frame changes in place and a mapping sees the new
 //! bytes; an extension zeroes `[old size, new size)` explicitly, since a
 //! shared writer may have dirtied the tail of the last page. `truncate`
-//! down keeps the frames. The cache holds one reference to each frame
+//! down keeps the frames and zeroes their bytes past the new end, so no
+//! mapping sees the cut bytes. The cache holds one reference to each frame
 //! (a mapping takes its own with `Mm::Pmm::reference`) and gives them back
 //! only when the node is freed; nothing is evicted. The VFS lock guards it.
 //!
-//! Two counters keep a mapped file whole: `mappings` (the memory regions
-//! that name the node) refuses removal, and `images` (the regions of a
-//! running program) refuses `write` and `truncate`, as Linux's `ETXTBSY`.
+//! Three counters keep a mapped file whole: `mappings` (the memory regions
+//! that name the node) refuses removal, `images` (the regions of a running
+//! program) refuses `write`, `truncate` and a writable shared mapping, and
+//! `sharedWriters` (the writable `MAP_SHARED` regions) refuses loading a
+//! program from the file; the last two are Linux's `ETXTBSY`.
 //!
 //! ## Paths
 //!
@@ -171,8 +174,14 @@ namespace Fs {
     public mappings: u64;
 
     /// The program image regions that name the node. While above 0 the file
-    /// cannot be written or truncated (`BUSY`, Linux `ETXTBSY`).
+    /// cannot be written or truncated (`BUSY`, Linux `ETXTBSY`), nor mapped
+    /// writable and shared.
     public images: u64;
+
+    /// The writable shared memory regions (`MAP_SHARED` with `WRITE`) that
+    /// name the node. While above 0 no program is loaded from the file
+    /// (`BUSY`, Linux `ETXTBSY`): their stores would change its text.
+    public sharedWriters: u64;
   }
 }
 
@@ -388,6 +397,24 @@ namespace Fs::Vfs {
     (*node).images -= 1;
   }
 
+  /// Counts one more writable shared region that names `node`. The lock is
+  /// held.
+  function addSharedWriter(node: *mut Fs::Node): void {
+    requireLock();
+    (*node).sharedWriters += 1;
+  }
+
+  /// Ends an `addSharedWriter`. The lock is held.
+  function removeSharedWriter(node: *mut Fs::Node): void {
+    requireLock();
+
+    if ((*node).sharedWriters == 0) {
+      @panic("vfs: removeSharedWriter of a node that is not mapped writable and shared");
+    }
+
+    (*node).sharedWriters -= 1;
+  }
+
   /// The cache frame of page `page` of file `node`, or 0 when that page is
   /// not cached. The lock is held.
   function cachedFrame(node: *mut Fs::Node, page: u64): u64 {
@@ -466,6 +493,24 @@ namespace Fs::Vfs {
         Lib::Mem::fill(target, 0, chunk);
       } else {
         Lib::Mem::copy(target, source + done, chunk);
+      }
+
+      done += chunk;
+    }
+  }
+
+  /// Zeroes the `count` bytes of file `node` from `offset` that lie in
+  /// cached pages, page by page; the bytes of uncached pages are left alone.
+  function zeroCached(node: *mut Fs::Node, offset: u64, count: u64): void {
+    let mut done: u64 = 0;
+
+    while (done < count) {
+      let position: u64 = offset + done;
+      let chunk: u64 = pageChunk(position, count - done);
+      let frame: u64 = cachedFrame(node, position / PAGE_SIZE);
+
+      if (frame != 0) {
+        Lib::Mem::fill(Boot::Hhdm::toVirtual(frame) + position % PAGE_SIZE, 0, chunk);
       }
 
       done += chunk;
@@ -927,7 +972,8 @@ namespace Fs::Vfs {
   }
 
   /// Cuts file `node` to `length` bytes, or extends it with zeros, written
-  /// into the cache frames of cached pages. Cutting keeps the frames.
+  /// into the cache frames of cached pages. Cutting keeps the frames and
+  /// zeroes their bytes from `length` to the old end.
   /// Returns `IS_DIRECTORY`, `INVALID` for a device, `BUSY` while pinned or
   /// a program image, `TOO_LARGE` past `MAX_FILE_SIZE`, or `NO_MEMORY`.
   function truncate(node: *mut Fs::Node, length: u64): u64 {
@@ -953,8 +999,13 @@ namespace Fs::Vfs {
       store(node, (*node).size, null, length - (*node).size);
     }
 
-    // Cutting keeps the cache frames: the bytes past the new end are zeroed
-    // by the next extension, not now.
+    // Cutting keeps the cache frames but zeroes their bytes past the new
+    // end, so no mapping sees the cut bytes. Uncached bytes stay in `data`,
+    // which nothing reads past `size`.
+    if (length < (*node).size) {
+      zeroCached(node, length, (*node).size - length);
+    }
+
     (*node).size = length;
 
     return OK;
@@ -1155,6 +1206,7 @@ namespace Fs::Vfs {
     (*node).cachePages = 0;
     (*node).mappings = 0;
     (*node).images = 0;
+    (*node).sharedWriters = 0;
 
     VfsState::nextId += 1;
 

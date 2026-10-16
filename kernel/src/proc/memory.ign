@@ -62,8 +62,8 @@
 //! the cache frame has one mapping. A `write` to the file changes the cache
 //! frame, so an untouched or read-only page sees it and a copied page does
 //! not, as on Linux. A shared region writes the cache frame itself, which
-//! `read` sees; past the end of the file it reaches zeroed cache pages that
-//! `read` never shows.
+//! `read` sees; past the end of the file it reaches cache pages that `read`
+//! never shows, zeroed at the fill and again when `truncate` cuts the file.
 //!
 //! ## Program images
 //!
@@ -74,7 +74,12 @@
 //! the same region past its file bytes. An image region holds the node
 //! twice: `Fs::Vfs::addMapping` (no removal) and `Fs::Vfs::addImage` (no
 //! `write` or `truncate`, Linux `ETXTBSY`), both given back by `unmap` and
-//! `teardown`.
+//! `teardown`. A writable shared region holds `Fs::Vfs::addSharedWriter`
+//! the same way. The two exclude each other (Linux `ETXTBSY`, here `BUSY`):
+//! `Syscall::Core::map` refuses a writable shared mapping of a file that is
+//! a program image or being loaded, and `Proc::Elf::load` refuses a file
+//! that has a writable shared mapping, since its stores would change the
+//! text the program runs.
 //!
 //! The loader runs before the process has a slot, so it stages the regions
 //! (`stageImage`, a `Proc::StagedImage`) with their node counts,
@@ -161,7 +166,8 @@ namespace Proc {
     /// them a private region gets zeroed pages. Fixed at `map`.
     public fileBytes: u64;
 
-    /// 1 for a shared file region (`MAP_SHARED`), 0 otherwise.
+    /// 1 for a shared file region (`MAP_SHARED`), 0 otherwise. A writable
+    /// one also holds one `Fs::Vfs::addSharedWriter` on `node`.
     public shared: u64;
 
     /// 1 for a segment of the program image, which also holds one
@@ -364,6 +370,10 @@ namespace Proc::Memory {
 
     if (node != null) {
       Fs::Vfs::addMapping(node);
+
+      if (isSharedWriter(region)) {
+        Fs::Vfs::addSharedWriter(node);
+      }
     }
 
     (*region).start = start;
@@ -461,6 +471,10 @@ namespace Proc::Memory {
           Fs::Vfs::addImage((*tail).node);
         }
 
+        if (isSharedWriter(tail)) {
+          Fs::Vfs::addSharedWriter((*tail).node);
+        }
+
         Fs::Vfs::unlockIfTaken(taken);
       }
     }
@@ -494,8 +508,18 @@ namespace Proc::Memory {
       Fs::Vfs::removeImage((*region).node);
     }
 
+    if (isSharedWriter(region)) {
+      Fs::Vfs::removeSharedWriter((*region).node);
+    }
+
     Fs::Vfs::unlockIfTaken(taken);
     (*region).node = null;
+  }
+
+  /// True when `region` is a writable shared file region, which holds one
+  /// `Fs::Vfs::addSharedWriter` on its node.
+  function isSharedWriter(region: *mut Proc::Region): boolean {
+    return (*region).shared != 0 && ((*region).protection & WRITE) != 0;
   }
 
   /// Stages an image region of `length` bytes (a page multiple) at `start`

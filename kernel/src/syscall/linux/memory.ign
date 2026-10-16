@@ -20,8 +20,10 @@
 //! page, and the copy never reaches the file. A shared page is the cache
 //! page itself: a write through it is seen by `read`, and a `write` to the
 //! file is seen through it. A shared mapping past the end of the file
-//! reaches zeroed pages that `read` does not show, and growing the file
-//! zeroes them again. `MAP_SHARED | MAP_ANONYMOUS` is refused: without
+//! reaches zeroed pages that `read` does not show; cutting the file zeroes
+//! the cut bytes, and growing it zeroes the new bytes again. A writable
+//! shared mapping of a running program's file is `-EBUSY` (Linux says
+//! `ETXTBSY`), and the file of a writable shared mapping cannot be run. `MAP_SHARED | MAP_ANONYMOUS` is refused: without
 //! `fork` it would equal a private mapping.
 //!
 //! ## Arguments
@@ -35,7 +37,10 @@
 //! | `fd`     | ignored with `MAP_ANONYMOUS`; otherwise open, a regular file, opened for reading, and for writing too with `MAP_SHARED` and `PROT_WRITE` | `-EBADF`, `-ENODEV`, `-EACCES` |
 //! | `offset` | a multiple of the page size                                       | `-EINVAL`    |
 //!
-//! Running out of frames or of region table entries is `-ENOMEM`.
+//! Running out of frames or of region table entries is `-ENOMEM`. A
+//! `MAP_SHARED` with `PROT_WRITE` of a file that a running program's image
+//! maps, or that is being loaded, is `-EBUSY`: Linux says `ETXTBSY` (26),
+//! which IgniOS does not have, and `write` to such a file is `-EBUSY` too.
 //!
 //! `munmap(addr, length)` removes the pages of `[addr, addr + length)` that
 //! belong to `mmap` regions. `addr` must be page aligned and `length` not 0

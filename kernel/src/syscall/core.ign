@@ -187,7 +187,9 @@ namespace Syscall::Core {
   /// a bad length, protection or offset or a shared anonymous mapping,
   /// `Fs::Files::BAD_DESCRIPTOR`, `NO_DEVICE` for something other than a
   /// regular file, `ACCESS` for a descriptor not open for reading, or a
-  /// writable shared mapping of one not open for writing, and
+  /// writable shared mapping of one not open for writing, `Fs::Vfs::BUSY`
+  /// for a writable shared mapping of a running program's file or one being
+  /// loaded (Linux `ETXTBSY`, reported as `EBUSY`), and
   /// `Fs::Vfs::NO_MEMORY` when frames or region entries run out.
   function map(
     anonymous: boolean,
@@ -252,6 +254,12 @@ namespace Syscall::Core {
       }
 
       node = (*file).node;
+
+      // Its stores would change the text of a running program, or of one
+      // being loaded (Linux `ETXTBSY`).
+      if (shared && (protection & Proc::Memory::WRITE) != 0 && ((*node).images > 0 || (*node).pins > 0)) {
+        return Fs::Vfs::BUSY;
+      }
     }
 
     let status: u64 = Proc::Memory::map(slot, Proc::Process::currentRoot(), length, protection, node, offset, shared, address);

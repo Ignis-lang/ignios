@@ -65,7 +65,9 @@
 //! first write, which never reaches the file; a shared page is the cache
 //! page, so writes through it reach the file and `read` sees them. The
 //! descriptor must be open for reading (`ACCESS`), and for writing too for
-//! a shared mapping with write access.
+//! a shared mapping with write access. A shared mapping with write access
+//! of a running program's file is `BUSY`, and so is spawning a program
+//! whose file has one.
 //!
 //! **Power** takes 1 to reset the machine and 2 to power it off; neither
 //! returns on success. Another action is `INVALID`, and a machine that cannot
@@ -386,7 +388,8 @@ namespace Syscall::Native {
   /// `argumentCount` NUL-terminated strings packed in the `argumentBytes`
   /// bytes at `arguments` (argument 0 is the program name). The new process
   /// starts in the caller's current directory with fresh descriptors 0 to 2.
-  /// Returns the lookup codes, `IS_DIRECTORY`, `BAD_ADDRESS`, and `INVALID`
+  /// Returns the lookup codes, `IS_DIRECTORY`, `BAD_ADDRESS`, `BUSY` for a
+  /// file mapped writable and shared (Linux `ETXTBSY`), and `INVALID`
   /// for arguments that are not exactly `argumentCount` strings, more than
   /// `MAX_ARGUMENTS` of them or `MAX_ARGUMENT_BYTES` bytes, or a file the
   /// loader refuses or a full process table.
@@ -407,7 +410,13 @@ namespace Syscall::Native {
 
     Fs::Vfs::lock();
 
-    let status: u64 = findProgram(table, path, length, &mut node as *mut *mut Fs::Node);
+    let mut status: u64 = findProgram(table, path, length, &mut node as *mut *mut Fs::Node);
+
+    // A file mapped writable and shared cannot become a program (Linux
+    // `ETXTBSY`); the pin then keeps a new such mapping out.
+    if (status == Fs::Vfs::OK && (*node).sharedWriters > 0) {
+      status = Fs::Vfs::BUSY;
+    }
 
     if (status == Fs::Vfs::OK) {
       Fs::Vfs::pin(node);

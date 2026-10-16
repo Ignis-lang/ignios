@@ -41,6 +41,8 @@
 //! | 92-93  | the stack grows: a recursion with a page of locals per call reaches 7 MiB below its start, near the 8 MiB limit, and comes back intact |
 //! | 90-91  | `read` into two pages of a new mapping that were never touched, across the page boundary, works and gives the file's bytes |
 //! | 100-104 | `MAP_SHARED` of `/mmshared`: the file's bytes; a store through the mapping is seen by `read`; a `write` to the file is seen through the mapping; a read-only descriptor with `PROT_WRITE` is `-EACCES` and without it maps; `MAP_SHARED \| MAP_PRIVATE` is `-EINVAL` (the file is removed after) |
+//! | 105    | `/bin/mmtest`, the running program, opened `O_RDWR`: a writable `MAP_SHARED` mapping is `-EBUSY` (Linux says `ETXTBSY`), a read-only one maps its ELF header |
+//! | 106    | a shared mapping of `/mmtrunc` reads zeros where the file was cut by `O_TRUNC` (the file is removed after) |
 
 import Alloc from "std::alloc";
 import Args from "std::args";
@@ -372,6 +374,43 @@ function checkShared(): void {
   expect(Sys::unlink("/mmshared" as *u8), 0, 104);
 }
 
+/// The file of a running program cannot be mapped writable and shared: the
+/// stores would change the text it runs. Reading it shared is fine.
+function checkRunningImage(): void {
+  let fd: i64 = Sys::open("/bin/mmtest" as *u8, Sys::O_RDWR, 0);
+
+  require(fd >= 0, 105);
+  expect(Sys::mmap(PAGE, Sys::PROT_READ | Sys::PROT_WRITE, Sys::MAP_SHARED, fd as u64, 0), 0 - Sys::EBUSY, 105);
+
+  let viewed: i64 = Sys::mmap(PAGE, Sys::PROT_READ, Sys::MAP_SHARED, fd as u64, 0);
+
+  require(viewed > 0 && peek(viewed as u64) == 0x7F && peek(viewed as u64 + 1) == 0x45, 105);
+  expect(Sys::munmap(viewed as u64, PAGE), 0, 105);
+  Sys::close(fd as u64);
+}
+
+/// Cutting a file zeroes the cached bytes past its new end, so a shared
+/// mapping does not keep showing them.
+function checkTruncatedShared(): void {
+  let fd: i64 = Sys::open("/mmtrunc" as *u8, Sys::O_CREAT | Sys::O_RDWR | Sys::O_TRUNC, 0x1A4);
+
+  require(fd >= 0, 106);
+  expect(Sys::write(fd as u64, MOTD as *u8, MOTD_LENGTH), MOTD_LENGTH as i64, 106);
+
+  let mapped: i64 = Sys::mmap(PAGE, Sys::PROT_READ, Sys::MAP_SHARED, fd as u64, 0);
+
+  require(mapped > 0 && peek(mapped as u64) == *(MOTD as *u8), 106);
+
+  let cut: i64 = Sys::open("/mmtrunc" as *u8, Sys::O_RDWR | Sys::O_TRUNC, 0);
+
+  require(cut >= 0, 106);
+  require(isZero(mapped as u64, MOTD_LENGTH), 106);
+  expect(Sys::munmap(mapped as u64, PAGE), 0, 106);
+  Sys::close(cut as u64);
+  Sys::close(fd as u64);
+  expect(Sys::unlink("/mmtrunc" as *u8), 0, 106);
+}
+
 /// The address of block `index` of `checkAllocator`.
 function blockSlot(index: u64): *mut u64 {
   return @pointerFromInteger<*mut u64>(@integerFromPointer(&mut State::blocks as *mut u64) + index * 8);
@@ -653,6 +692,8 @@ function main(count: u64, values: *u64): u64 {
   checkLimit();
   checkFiles();
   checkShared();
+  checkRunningImage();
+  checkTruncatedShared();
   checkLazy();
   checkStack();
   checkAllocator();

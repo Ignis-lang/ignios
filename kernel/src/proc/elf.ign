@@ -21,6 +21,9 @@
 //! The headers and notes are read through `Fs::Vfs::read` under the VFS
 //! lock, never from the node's `data`, which a cached page supersedes.
 //!
+//! A file that has a writable shared mapping (`Fs::Node.sharedWriters`) is
+//! refused (`ERR_BUSY`, Linux `ETXTBSY`): its stores would change the text.
+//!
 //! The loader trusts nothing in the file: every offset, size and address is
 //! checked against the file size and the user range before it is used, with
 //! comparisons that cannot overflow.
@@ -275,6 +278,10 @@ namespace Proc::Elf {
   /// A note segment, or a note in it, runs past the end of the file.
   const ERR_NOTE: u64 = 13;
 
+  /// The file has a writable shared mapping (Linux `ETXTBSY`): its stores
+  /// would change the program's text.
+  const ERR_BUSY: u64 = 14;
+
   /// Segment type of a note segment (`PT_NOTE`).
   const SEGMENT_NOTE: u32 = 4;
 
@@ -313,6 +320,10 @@ namespace Proc::Elf {
 
   /// `load` with the VFS lock held.
   function loadLocked(node: *mut Fs::Node, root: u64, staged: *mut Proc::StagedImage, result: *mut Proc::LoadedImage): u64 {
+    if ((*node).sharedWriters > 0) {
+      return ERR_BUSY;
+    }
+
     let size: u64 = (*node).size;
     let header: *mut ElfHeader = Mm::Heap::allocate(HEADER_SIZE, 16) as *mut ElfHeader;
 
@@ -430,6 +441,7 @@ namespace Proc::Elf {
       11 -> "the entry point is not in an executable user page",
       12 -> "the IgniOS ABI note names an unknown version",
       13 -> "a note runs past the end of the file",
+      14 -> "the file is mapped writable and shared",
       _ -> "unknown error",
     };
   }
