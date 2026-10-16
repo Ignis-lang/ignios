@@ -1,0 +1,290 @@
+//!
+//! # Page Cache Self-Test
+//!
+//! Checks the page cache of `Fs::Vfs`: filling, coherence with `read`,
+//! `write` and `truncate`, the `mappings` and `images` refusals, and that
+//! removing a file returns its frames.
+//!
+//! ## Overview
+//!
+//! | Case                                         | Expected                                  |
+//! |----------------------------------------------|-------------------------------------------|
+//! | fill page 0 of an archive-backed file        | the file bytes, zeros after, same frame twice |
+//! | `read` of a cached page                      | the frame's bytes                         |
+//! | `write` into a cached archive page           | the frame and `read` change, the archive does not |
+//! | `write` into an uncached page, then a fill   | the fill sees the write                   |
+//! | a page past the end of the file              | all zeros                                 |
+//! | extension over a tail dirtied in the frame   | `write` and `truncate` up read zeros there |
+//! | `truncate` down, then up                     | zeros past the cut                        |
+//! | `mappings` above 0                           | `remove` is `BUSY`                        |
+//! | `images` above 0                             | `write` and `truncate` are `BUSY`         |
+//! | free frames and heap after removal           | back to where they started               |
+
+import Boot from "@boot";
+import Drivers from "@drivers";
+import Fs from "@fs";
+import Lib from "@lib";
+import Mm from "@mm";
+
+namespace Tests::PageCache {
+  /// The bytes of one cache page.
+  const PAGE: u64 = 4096;
+
+  /// The size of the heap test file: page 0 full, page 1 partly.
+  const HEAP_SIZE: u64 = 5000;
+
+  /// ASCII `b`, the byte the heap test file is filled with.
+  const FILL: u8 = 0x62;
+
+  /// Runs every case and prints one line. Panics on the first mismatch.
+  function run(): void {
+    let freeBefore: u64 = Mm::Pmm::freeFrameCount();
+    let heapBefore: u64 = Mm::Heap::allocatedBytes();
+    let buffer: *mut u8 = Mm::Heap::allocate(2 * PAGE, 16);
+
+    if (buffer == null) {
+      @panic("page cache self-test: no heap for the buffer");
+    }
+
+    checkArchive(buffer);
+    checkHeap(buffer);
+    checkCounters();
+
+    Mm::Heap::free(buffer);
+
+    if (Mm::Pmm::freeFrameCount() != freeBefore) {
+      @panic("page cache self-test: removing the test files did not return their frames");
+    }
+
+    if (Mm::Heap::allocatedBytes() != heapBefore) {
+      @panic("page cache self-test: removing the test files did not free their memory");
+    }
+
+    Drivers::Console::writeLine("vfs: page cache self-test ok, fill, read, write, extension, truncate, mappings and images");
+  }
+
+  /// A file whose data is the archive copy of `/bin/hello`, as `seed`
+  /// leaves it: filling, reading and a write that updates the frame, not
+  /// the archive.
+  function checkArchive(buffer: *mut u8): void {
+    let hello: *mut Fs::Node = expectFound("/bin/hello");
+    let file: *mut Fs::Node = createFile("pca");
+    let archived: *u8 = (*hello).data as *u8;
+    let first: u8 = *archived;
+    let mut length: u64 = (*hello).size;
+
+    if ((*hello).capacity != 0 || length == 0 || first == ('J' as u8)) {
+      @panic("page cache self-test: /bin/hello is not in the archive");
+    }
+
+    if (length > PAGE) {
+      length = PAGE;
+    }
+
+    (*file).data = (*hello).data;
+    (*file).size = (*hello).size;
+
+    let frame: u64 = Fs::Vfs::pageFrame(file, 0);
+
+    if (frame == Mm::Pmm::NO_FRAME || Fs::Vfs::pageFrame(file, 0) != frame || Fs::Vfs::cachedFrame(file, 0) != frame) {
+      @panic("page cache self-test: filling a page did not give one frame");
+    }
+
+    let bytes: *mut u8 = Boot::Hhdm::toVirtual(frame);
+
+    if (Lib::Mem::compare(bytes as *u8, archived, length) != 0 || !isZero(bytes + length, PAGE - length)) {
+      @panic("page cache self-test: a filled page does not hold the file bytes and zeros");
+    }
+
+    expectRead(file, 0, buffer, length, length);
+
+    if (Lib::Mem::compare(buffer as *u8, archived, length) != 0) {
+      @panic("page cache self-test: read of a cached page differs from the file");
+    }
+
+    expectStatus(Fs::Vfs::write(file, 0, "J" as *u8, 1), Fs::Vfs::OK, "write to a cached archive page");
+
+    if (*bytes != ('J' as u8)) {
+      @panic("page cache self-test: a write did not reach the cached frame");
+    }
+
+    expectRead(file, 0, buffer, 1, 1);
+
+    if (*buffer != ('J' as u8) || *archived != first) {
+      @panic("page cache self-test: read missed the write or the archive changed");
+    }
+
+    expectStatus(Fs::Vfs::remove(file), Fs::Vfs::OK, "remove /pca");
+  }
+
+  /// A heap file of `HEAP_SIZE` bytes: a write into an uncached page, a
+  /// page past the end, extensions over a tail dirtied through the frame,
+  /// and `truncate` down then up.
+  function checkHeap(buffer: *mut u8): void {
+    let file: *mut Fs::Node = createFile("pch");
+
+    Lib::Mem::fill(buffer, FILL as i32, HEAP_SIZE);
+    expectStatus(Fs::Vfs::write(file, 0, buffer as *u8, HEAP_SIZE), Fs::Vfs::OK, "write /pch");
+
+    let first: u64 = Fs::Vfs::pageFrame(file, 0);
+
+    if (first == Mm::Pmm::NO_FRAME || !isAll(Boot::Hhdm::toVirtual(first), PAGE, FILL)) {
+      @panic("page cache self-test: a heap page was not filled from the file");
+    }
+
+    // Page 1 is not cached yet: the write goes to the data, the fill sees it.
+    if (Fs::Vfs::cachedFrame(file, 1) != 0) {
+      @panic("page cache self-test: a page was cached before its fill");
+    }
+
+    expectStatus(Fs::Vfs::write(file, PAGE, "X" as *u8, 1), Fs::Vfs::OK, "write to an uncached page");
+
+    let second: u64 = Fs::Vfs::pageFrame(file, 1);
+
+    if (second == Mm::Pmm::NO_FRAME) {
+      @panic("page cache self-test: no frame for page 1");
+    }
+
+    let tail: *mut u8 = Boot::Hhdm::toVirtual(second);
+    let used: u64 = HEAP_SIZE - PAGE;
+
+    if (*tail != ('X' as u8) || !isAll(tail + 1, used - 1, FILL) || !isZero(tail + used, PAGE - used)) {
+      @panic("page cache self-test: a fill missed a write to an uncached page");
+    }
+
+    let beyond: u64 = Fs::Vfs::pageFrame(file, 5);
+
+    if (beyond == Mm::Pmm::NO_FRAME || !isZero(Boot::Hhdm::toVirtual(beyond), PAGE)) {
+      @panic("page cache self-test: a page past the end is not zeros");
+    }
+
+    // A shared writer dirties the tail past the end; a write past the end
+    // must read zeros in the gap.
+    Lib::Mem::fill(tail + used, 0xAA, PAGE - used);
+    expectStatus(Fs::Vfs::write(file, 6000, "Y" as *u8, 1), Fs::Vfs::OK, "write past the end");
+    expectRead(file, HEAP_SIZE, buffer, 1001, 1001);
+
+    if (!isZero(buffer, 1000) || *(buffer + 1000) != ('Y' as u8)) {
+      @panic("page cache self-test: a write past the end did not zero the gap");
+    }
+
+    // The same for `truncate` up.
+    Lib::Mem::fill(tail + 6001 - PAGE, 0xAA, 2 * PAGE - 6001);
+    expectStatus(Fs::Vfs::truncate(file, 7000), Fs::Vfs::OK, "truncate up");
+    expectRead(file, 6001, buffer, 2 * PAGE, 999);
+
+    if (!isZero(buffer, 999)) {
+      @panic("page cache self-test: truncate up did not zero the tail");
+    }
+
+    // Down, then up: everything past the cut reads zeros, cached or not.
+    expectStatus(Fs::Vfs::truncate(file, 100), Fs::Vfs::OK, "truncate down");
+    expectStatus(Fs::Vfs::truncate(file, 7000), Fs::Vfs::OK, "truncate up again");
+    expectRead(file, 0, buffer, 2 * PAGE, 7000);
+
+    if (!isAll(buffer, 100, FILL) || !isZero(buffer + 100, 6900)) {
+      @panic("page cache self-test: truncate down then up left old bytes");
+    }
+
+    expectStatus(Fs::Vfs::remove(file), Fs::Vfs::OK, "remove /pch");
+  }
+
+  /// `mappings` refuses removal; `images` refuses writes and truncation.
+  function checkCounters(): void {
+    let root: *mut Fs::Node = Fs::Vfs::root();
+    let file: *mut Fs::Node = createFile("pcm");
+
+    expectStatus(Fs::Vfs::write(file, 0, "m" as *u8, 1), Fs::Vfs::OK, "write /pcm");
+
+    Fs::Vfs::addMapping(file);
+    expectStatus(Fs::Vfs::remove(file), Fs::Vfs::BUSY, "remove a mapped node");
+    expectStatus(Fs::Files::remove(root, "/pcm" as *u8, 4, false), Fs::Vfs::BUSY, "remove a mapped path");
+    expectStatus(Fs::Vfs::write(file, 0, "n" as *u8, 1), Fs::Vfs::OK, "write a mapped node");
+    Fs::Vfs::removeMapping(file);
+
+    Fs::Vfs::addImage(file);
+    expectStatus(Fs::Vfs::write(file, 0, "o" as *u8, 1), Fs::Vfs::BUSY, "write an image");
+    expectStatus(Fs::Vfs::truncate(file, 0), Fs::Vfs::BUSY, "truncate an image");
+    Fs::Vfs::removeImage(file);
+
+    if ((*file).size != 1 || *(*file).data != ('n' as u8)) {
+      @panic("page cache self-test: a refused write changed an image");
+    }
+
+    expectStatus(Fs::Vfs::truncate(file, 0), Fs::Vfs::OK, "truncate after the image");
+    expectStatus(Fs::Files::remove(root, "/pcm" as *u8, 4, false), Fs::Vfs::OK, "remove /pcm");
+  }
+
+  /// Creates the empty file `/name` and returns it.
+  function createFile(name: str): *mut Fs::Node {
+    let mut file: *mut Fs::Node = null;
+
+    expectStatus(Fs::Vfs::create(Fs::Vfs::root(), name as *u8, textLength(name), Fs::Vfs::FILE, Fs::Vfs::FILE_MODE, &mut file as *mut *mut Fs::Node), Fs::Vfs::OK, "create a test file");
+
+    return file;
+  }
+
+  /// Reads `count` bytes of `node` at `offset` and panics unless `wanted`
+  /// came back.
+  function expectRead(node: *mut Fs::Node, offset: u64, buffer: *mut u8, count: u64, wanted: u64): void {
+    let mut copied: u64 = 0;
+
+    expectStatus(Fs::Vfs::read(node, offset, buffer, count, &mut copied as *mut u64), Fs::Vfs::OK, "read");
+
+    if (copied != wanted) {
+      @panic("page cache self-test: read returned the wrong length");
+    }
+  }
+
+  /// Looks `path` up from the root and panics unless it is found.
+  function expectFound(path: str): *mut Fs::Node {
+    let mut node: *mut Fs::Node = null;
+
+    expectStatus(Fs::Vfs::lookup(Fs::Vfs::root(), path as *u8, textLength(path), &mut node as *mut *mut Fs::Node), Fs::Vfs::OK, path);
+
+    return node;
+  }
+
+  /// Panics, naming `what`, unless `got` is `wanted`.
+  function expectStatus(got: u64, wanted: u64, what: str): void {
+    if (got != wanted) {
+      Drivers::Console::write("page cache self-test: ");
+      Drivers::Console::write(what);
+      Drivers::Console::write(" returned ");
+      Drivers::Console::writeDecimal(got);
+      Drivers::Console::writeLine("");
+      @panic("page cache self-test: unexpected status");
+    }
+  }
+
+  /// True when the `length` bytes at `bytes` are all `value`.
+  function isAll(bytes: *mut u8, length: u64, value: u8): boolean {
+    let mut index: u64 = 0;
+
+    while (index < length) {
+      if (*(bytes + index) != value) {
+        return false;
+      }
+
+      index += 1;
+    }
+
+    return true;
+  }
+
+  /// True when the `length` bytes at `bytes` are all zero.
+  function isZero(bytes: *mut u8, length: u64): boolean {
+    return isAll(bytes, length, 0);
+  }
+
+  /// The length of `text` without its NUL.
+  function textLength(text: str): u64 {
+    let mut length: u64 = 0;
+
+    while (*(text as *u8 + length) != 0) {
+      length += 1;
+    }
+
+    return length;
+  }
+}

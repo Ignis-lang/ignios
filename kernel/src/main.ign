@@ -39,6 +39,7 @@
 //!   ├─ Fs::Initramfs::initialize + Tests::Initramfs
 //!   │  .................................... check the initramfs archive   fs/
 //!   ├─ Fs::Vfs::initialize + Tests::Vfs ... the file tree in memory      fs/
+//!   ├─ Tests::PageCache ................... page cache coherence         fs/
 //!   ├─ Tests::AddressSpace ................ private user halves           mm/        doc 14
 //!   ├─ Tests::Memory ...................... lazy regions, reservations    proc/      doc 26
 //!   ├─ Trap::Setup::initializeProtection +
@@ -148,6 +149,7 @@ function kmain(): void {
   Fs::Vfs::initialize();
   Fs::Vfs::report();
   Tests::Vfs::run();
+  Tests::PageCache::run();
 
   Tests::AddressSpace::run();
   Tests::Memory::run();

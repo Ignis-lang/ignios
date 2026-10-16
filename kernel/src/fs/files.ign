@@ -27,7 +27,8 @@
 //!
 //! Each table also has a current directory, where relative paths start
 //! (`currentDirectory`, `changeDirectory`). A node that is a current
-//! directory counts as open: `remove` refuses it with `BUSY`.
+//! directory counts as open: `remove` refuses it with `BUSY`, as it refuses
+//! a file that a memory region maps (`Fs::Node.mappings`).
 //!
 //! ## Flags
 //!
@@ -513,8 +514,8 @@ namespace Fs::Files {
   /// codes, `INVALID` for a path that ends in `.` or `..` or is `/`,
   /// `IS_DIRECTORY` when removing a directory as a file, `NOT_DIRECTORY`
   /// when removing a file as a directory or a file named with a trailing
-  /// `/`, `NOT_EMPTY`, and `BUSY` when a descriptor has the node open: an
-  /// open file points at its node, which must stay alive.
+  /// `/`, `NOT_EMPTY`, and `BUSY` when a descriptor has the node open or a
+  /// memory region maps it: both point at the node, which must stay alive.
   function remove(base: *mut Fs::Node, path: *u8, length: u64, directory: boolean): u64 {
     Fs::Vfs::lock();
 
@@ -564,9 +565,10 @@ namespace Fs::Files {
   }
 
   /// True when a descriptor of any process points at `node`, `node` is a
-  /// process's current directory, or it is pinned. The VFS lock is held.
+  /// process's current directory, or it is pinned or mapped. The VFS lock
+  /// is held.
   function isOpen(node: *mut Fs::Node): boolean {
-    if ((*node).pins > 0) {
+    if ((*node).pins > 0 || (*node).mappings > 0) {
       return true;
     }
 

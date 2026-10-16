@@ -26,6 +26,37 @@
 //! the archive is never modified. Nothing here is saved anywhere: files and
 //! directories created at run time are gone after a reboot.
 //!
+//! ## Page cache
+//!
+//! A file can have a page cache: `cache` is a heap table with one physical
+//! frame per page of the file, 0 for a page not cached. `pageFrame` fills a
+//! page on demand, copying the file bytes of that page from `data` and
+//! zeroing the rest of the frame; a page past the end of the file is all
+//! zeros (a shared mapping may reach it). The memory mappings take their
+//! pages from it, so every mapping of a file sees the same frame.
+//!
+//! ```text
+//!   node.cache ─► [ frame | 0 | frame | ... ]   one entry per page
+//!                    │      │     │
+//!                    ▼      ▼     ▼
+//!               the bytes  the bytes of this page stay in `data`
+//! ```
+//!
+//! A cached page is the only authority for its bytes; an uncached page's
+//! bytes stay in `data`. `read` takes each page from its frame or from
+//! `data` and never fills the cache. `write` and the zeros of an extension
+//! (`write` past the end, `truncate` up) go through the same page by page
+//! path, so a cached frame changes in place and a mapping sees the new
+//! bytes; an extension zeroes `[old size, new size)` explicitly, since a
+//! shared writer may have dirtied the tail of the last page. `truncate`
+//! down keeps the frames. The cache holds one reference to each frame
+//! (a mapping takes its own with `Mm::Pmm::reference`) and gives them back
+//! only when the node is freed; nothing is evicted. The VFS lock guards it.
+//!
+//! Two counters keep a mapped file whole: `mappings` (the memory regions
+//! that name the node) refuses removal, and `images` (the regions of a
+//! running program) refuses `write` and `truncate`, as Linux's `ETXTBSY`.
+//!
 //! ## Paths
 //!
 //! `lookup` walks a path one component at a time:
@@ -59,7 +90,7 @@
 //! | `NOT_EMPTY`     | removing a directory that has children     | `ENOTEMPTY` |
 //! | `INVALID`       | a malformed request (an empty name, `..`)  | `EINVAL`  |
 //! | `TOO_LARGE`     | a file would grow past `MAX_FILE_SIZE` (64 MiB) | `EFBIG` |
-//! | `BUSY`          | removing a node that is open or in use     | `EBUSY`   |
+//! | `BUSY`          | removing a node that is open, pinned or mapped; writing or truncating a pinned file or a program image | `EBUSY`   |
 //!
 //! One mutex, the VFS lock (`lock`, rank `Lib::MutexRank::VFS`), guards the
 //! whole tree, the node data, every descriptor table and every current
@@ -67,8 +98,10 @@
 //! `Fs::Vfs` directly holds it across its whole sequence. Every function
 //! that reads or changes the tree checks that the caller holds it
 //! (`requireLock`), once the scheduler runs. A program being loaded pins its
-//! file (`pin`), which then refuses removal, writes and truncation.
+//! file (`pin`), which then refuses removal, writes and truncation. The
+//! page cache and the `mappings` and `images` counters are guarded by it too.
 
+import Boot from "@boot";
 import Drivers from "@drivers";
 import Lib from "@lib";
 import Mm from "@mm";
@@ -108,7 +141,8 @@ namespace Fs {
     /// The number of children of a directory.
     public childCount: u64;
 
-    /// The contents of a file: in the archive or on the heap.
+    /// The contents of a file: in the archive or on the heap. The bytes of
+    /// a page in the page cache are in its frame, not here.
     public data: *mut u8;
 
     /// The file length in bytes.
@@ -122,6 +156,23 @@ namespace Fs {
     /// program being loaded. While above 0 the node cannot be removed
     /// (`Fs::Files::isOpen`).
     public pins: u64;
+
+    /// The page cache of a file: a heap array of `cachePages` physical frame
+    /// addresses, one per page of the file, 0 for a page not cached. Null
+    /// while nothing is cached. A cached page is the only authority for its
+    /// bytes; `data` keeps the bytes of the pages that are not cached.
+    public cache: *mut u64;
+
+    /// The entries of `cache`.
+    public cachePages: u64;
+
+    /// The memory regions that name the node. While above 0 the node cannot
+    /// be removed (`BUSY`).
+    public mappings: u64;
+
+    /// The program image regions that name the node. While above 0 the file
+    /// cannot be written or truncated (`BUSY`, Linux `ETXTBSY`).
+    public images: u64;
   }
 }
 
@@ -186,8 +237,10 @@ namespace Fs::Vfs {
   /// The file would grow past `MAX_FILE_SIZE`.
   const TOO_LARGE: u64 = 9;
 
-  /// The node is in use: open by a descriptor, the root, or pinned while a
-  /// program is loaded from it (then writes are refused too).
+  /// The node is in use: open by a descriptor, the root, mapped, or pinned
+  /// while a program is loaded from it (then writes are refused too). A
+  /// file that a running program's image maps refuses writes and
+  /// truncation.
   const BUSY: u64 = 10;
 
   /// The largest file: 64 MiB. Files live on the kernel heap, which holds at
@@ -210,6 +263,9 @@ namespace Fs::Vfs {
   /// The smallest heap block a file's data gets, so small appends do not
   /// copy the file each time.
   const MIN_CAPACITY: u64 = 64;
+
+  /// The bytes of one page of the page cache: one frame.
+  const PAGE_SIZE: u64 = 4096;
 
   /// ASCII `/`.
   const SLASH: u8 = 0x2F;
@@ -273,6 +329,186 @@ namespace Fs::Vfs {
     }
 
     (*node).pins -= 1;
+  }
+
+  /// Counts one more memory region that names `node`. The lock is held.
+  function addMapping(node: *mut Fs::Node): void {
+    requireLock();
+    (*node).mappings += 1;
+  }
+
+  /// Ends an `addMapping`. The lock is held.
+  function removeMapping(node: *mut Fs::Node): void {
+    requireLock();
+
+    if ((*node).mappings == 0) {
+      @panic("vfs: removeMapping of a node that is not mapped");
+    }
+
+    (*node).mappings -= 1;
+  }
+
+  /// Counts one more program image region that names `node`. The lock is
+  /// held.
+  function addImage(node: *mut Fs::Node): void {
+    requireLock();
+    (*node).images += 1;
+  }
+
+  /// Ends an `addImage`. The lock is held.
+  function removeImage(node: *mut Fs::Node): void {
+    requireLock();
+
+    if ((*node).images == 0) {
+      @panic("vfs: removeImage of a node that is not an image");
+    }
+
+    (*node).images -= 1;
+  }
+
+  /// The cache frame of page `page` of file `node`, or 0 when that page is
+  /// not cached. The lock is held.
+  function cachedFrame(node: *mut Fs::Node, page: u64): u64 {
+    requireLock();
+
+    if (page >= (*node).cachePages) {
+      return 0;
+    }
+
+    return *((*node).cache + page);
+  }
+
+  /// The cache frame of page `page` of file `node`, filled on demand: a new
+  /// frame gets the file bytes `[page * PAGE_SIZE, size)` of that page and
+  /// zeros after them, so a page past the end of the file is all zeros.
+  /// Returns `Mm::Pmm::NO_FRAME` when no frame or no heap is left; nothing
+  /// changes then. The cache keeps its own reference; a caller that maps
+  /// the frame takes another with `Mm::Pmm::reference`. The lock is held.
+  function pageFrame(node: *mut Fs::Node, page: u64): u64 {
+    requireLock();
+
+    let cached: u64 = cachedFrame(node, page);
+
+    if (cached != 0) {
+      return cached;
+    }
+
+    if ((*node).kind != FILE || page >= MAX_FILE_SIZE / PAGE_SIZE || !growCache(node, page + 1)) {
+      return Mm::Pmm::NO_FRAME;
+    }
+
+    let frame: u64 = Mm::Pmm::allocateFrame();
+
+    if (frame == Mm::Pmm::NO_FRAME) {
+      return Mm::Pmm::NO_FRAME;
+    }
+
+    let bytes: *mut u8 = Boot::Hhdm::toVirtual(frame);
+    let start: u64 = page * PAGE_SIZE;
+    let mut length: u64 = 0;
+
+    if (start < (*node).size) {
+      length = (*node).size - start;
+
+      if (length > PAGE_SIZE) {
+        length = PAGE_SIZE;
+      }
+
+      Lib::Mem::copy(bytes, ((*node).data + start) as *u8, length);
+    }
+
+    Lib::Mem::fill(bytes + length, 0, PAGE_SIZE - length);
+    *((*node).cache + page) = frame;
+
+    return frame;
+  }
+
+  /// Writes the `count` bytes at `source`, or zeros when `source` is null,
+  /// to file `node` at `offset`, page by page: into the cache frame of a
+  /// cached page, into `data` otherwise. The caller made `data` an owned
+  /// heap block that holds `offset + count` bytes (`reserve`).
+  function store(node: *mut Fs::Node, offset: u64, source: *u8, count: u64): void {
+    let mut done: u64 = 0;
+
+    while (done < count) {
+      let position: u64 = offset + done;
+      let chunk: u64 = pageChunk(position, count - done);
+      let frame: u64 = cachedFrame(node, position / PAGE_SIZE);
+      let mut target: *mut u8 = (*node).data + position;
+
+      if (frame != 0) {
+        target = Boot::Hhdm::toVirtual(frame) + position % PAGE_SIZE;
+      }
+
+      if (source == null) {
+        Lib::Mem::fill(target, 0, chunk);
+      } else {
+        Lib::Mem::copy(target, source + done, chunk);
+      }
+
+      done += chunk;
+    }
+  }
+
+  /// The bytes from `position` to the end of its page, at most `left`.
+  function pageChunk(position: u64, left: u64): u64 {
+    let chunk: u64 = PAGE_SIZE - position % PAGE_SIZE;
+
+    return chunk < left ? chunk : left;
+  }
+
+  /// Makes the cache table of `node` hold at least `pages` entries, the new
+  /// ones 0. Returns false when the heap is exhausted; the table is
+  /// unchanged then.
+  function growCache(node: *mut Fs::Node, pages: u64): boolean {
+    if ((*node).cachePages >= pages) {
+      return true;
+    }
+
+    let table: *mut u64 = Mm::Heap::allocate(pages * 8, 16) as *mut u64;
+
+    if (table == null) {
+      return false;
+    }
+
+    let mut index: u64 = 0;
+
+    while (index < pages) {
+      *(table + index) = index < (*node).cachePages ? *((*node).cache + index) : 0;
+      index += 1;
+    }
+
+    if ((*node).cache != null) {
+      Mm::Heap::free((*node).cache as *mut u8);
+    }
+
+    (*node).cache = table;
+    (*node).cachePages = pages;
+
+    return true;
+  }
+
+  /// Drops the cache's reference to every frame of `node` and frees the
+  /// table.
+  function dropCache(node: *mut Fs::Node): void {
+    let mut index: u64 = 0;
+
+    while (index < (*node).cachePages) {
+      let frame: u64 = *((*node).cache + index);
+
+      if (frame != 0) {
+        Mm::Pmm::freeFrame(frame);
+      }
+
+      index += 1;
+    }
+
+    if ((*node).cache != null) {
+      Mm::Heap::free((*node).cache as *mut u8);
+    }
+
+    (*node).cache = null;
+    (*node).cachePages = 0;
   }
 
   /// `VfsState::lock`.
@@ -529,8 +765,9 @@ namespace Fs::Vfs {
   }
 
   /// Removes `node`, a file or an empty directory, from its parent and frees
-  /// it with its name and owned data. Returns `NOT_EMPTY` for a directory
-  /// with children and `INVALID` for the root.
+  /// it with its name, page cache and owned data. Returns `NOT_EMPTY` for a
+  /// directory with children, `INVALID` for the root and `BUSY` while a
+  /// memory region maps it.
   function remove(node: *mut Fs::Node): u64 {
     requireLock();
 
@@ -540,6 +777,10 @@ namespace Fs::Vfs {
 
     if ((*node).kind == DIRECTORY && (*node).firstChild != null) {
       return NOT_EMPTY;
+    }
+
+    if ((*node).mappings > 0) {
+      return BUSY;
     }
 
     let parent: *mut Fs::Node = (*node).parent;
@@ -564,6 +805,7 @@ namespace Fs::Vfs {
 
   /// Copies up to `count` bytes of file `node` from `offset` to `buffer` and
   /// writes the number copied to `copied`: 0 at or past the end of the file.
+  /// A cached page is read from its frame; the cache is not filled.
   /// Returns `IS_DIRECTORY` for a directory and `INVALID` for a device.
   function read(
     node: *mut Fs::Node,
@@ -589,7 +831,22 @@ namespace Fs::Vfs {
       length = count;
     }
 
-    Lib::Mem::copy(buffer, ((*node).data + offset) as *u8, length);
+    let mut done: u64 = 0;
+
+    while (done < length) {
+      let position: u64 = offset + done;
+      let chunk: u64 = pageChunk(position, length - done);
+      let frame: u64 = cachedFrame(node, position / PAGE_SIZE);
+
+      if (frame != 0) {
+        Lib::Mem::copy(buffer + done, (Boot::Hhdm::toVirtual(frame) + position % PAGE_SIZE) as *u8, chunk);
+      } else {
+        Lib::Mem::copy(buffer + done, ((*node).data + position) as *u8, chunk);
+      }
+
+      done += chunk;
+    }
+
     *copied = length;
 
     return OK;
@@ -598,9 +855,10 @@ namespace Fs::Vfs {
   /// Writes the `count` bytes at `source` to file `node` at `offset`. The
   /// file grows as needed, and a gap between the old end and `offset` reads
   /// as zeros. The first write to a file whose data is in the archive copies
-  /// it to the heap. Returns `IS_DIRECTORY`, `INVALID` for a device,
-  /// `TOO_LARGE` past `MAX_FILE_SIZE`, `NO_MEMORY`, or `INVALID` when
-  /// `offset + count` does not fit a signed 64-bit offset.
+  /// it to the heap. A cached page is written in its frame. Returns
+  /// `IS_DIRECTORY`, `INVALID` for a device, `BUSY` while pinned or a
+  /// program image, `TOO_LARGE` past `MAX_FILE_SIZE`, `NO_MEMORY`, or
+  /// `INVALID` when `offset + count` does not fit a signed 64-bit offset.
   function write(node: *mut Fs::Node, offset: u64, source: *u8, count: u64): u64 {
     requireLock();
 
@@ -609,8 +867,8 @@ namespace Fs::Vfs {
     }
 
     // A pinned file is being read without the lock; a write could move its
-    // data.
-    if ((*node).pins > 0) {
+    // data. A running program's image must not change under it.
+    if ((*node).pins > 0 || (*node).images > 0) {
       return BUSY;
     }
 
@@ -637,18 +895,19 @@ namespace Fs::Vfs {
     }
 
     if (offset > (*node).size) {
-      Lib::Mem::fill((*node).data + (*node).size, 0, offset - (*node).size);
+      store(node, (*node).size, null, offset - (*node).size);
     }
 
-    Lib::Mem::copy((*node).data + offset, source, count);
+    store(node, offset, source, count);
     (*node).size = newSize;
 
     return OK;
   }
 
-  /// Cuts file `node` to `length` bytes, or extends it with zeros. Returns
-  /// `IS_DIRECTORY`, `INVALID` for a device, `TOO_LARGE` past
-  /// `MAX_FILE_SIZE`, or `NO_MEMORY`.
+  /// Cuts file `node` to `length` bytes, or extends it with zeros, written
+  /// into the cache frames of cached pages. Cutting keeps the frames.
+  /// Returns `IS_DIRECTORY`, `INVALID` for a device, `BUSY` while pinned or
+  /// a program image, `TOO_LARGE` past `MAX_FILE_SIZE`, or `NO_MEMORY`.
   function truncate(node: *mut Fs::Node, length: u64): u64 {
     requireLock();
 
@@ -656,7 +915,7 @@ namespace Fs::Vfs {
       return notFileStatus(node);
     }
 
-    if ((*node).pins > 0) {
+    if ((*node).pins > 0 || (*node).images > 0) {
       return BUSY;
     }
 
@@ -669,9 +928,11 @@ namespace Fs::Vfs {
         return NO_MEMORY;
       }
 
-      Lib::Mem::fill((*node).data + (*node).size, 0, length - (*node).size);
+      store(node, (*node).size, null, length - (*node).size);
     }
 
+    // Cutting keeps the cache frames: the bytes past the new end are zeroed
+    // by the next extension, not now.
     (*node).size = length;
 
     return OK;
@@ -868,14 +1129,20 @@ namespace Fs::Vfs {
     (*node).size = 0;
     (*node).capacity = 0;
     (*node).pins = 0;
+    (*node).cache = null;
+    (*node).cachePages = 0;
+    (*node).mappings = 0;
+    (*node).images = 0;
 
     VfsState::nextId += 1;
 
     return node;
   }
 
-  /// Frees a detached node, its name and the data it owns.
+  /// Frees a detached node, its name, its page cache and the data it owns.
   function freeNode(node: *mut Fs::Node): void {
+    dropCache(node);
+
     if ((*node).capacity > 0) {
       Mm::Heap::free((*node).data);
     }

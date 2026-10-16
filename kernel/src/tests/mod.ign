@@ -15,6 +15,7 @@
 //! | `Tests::Initramfs`    | `initramfs.ign`     | the ustar reader refuses each malformed header, etc/motd   |
 //! | `Tests::Locks`        | `locks.ign`         | spinlocks: interrupts, no preemption while held, mutual exclusion, ranks |
 //! | `Tests::Vfs`          | `vfs.ign`           | path rules, create, read, write, remove, copy on write     |
+//! | `Tests::PageCache`    | `page_cache.ign`    | page cache fill, coherent read/write/truncate, BUSY counters |
 //! | `Tests::AddressSpace` | `address_space.ign` | private user half, shared kernel half, no leaked frames    |
 //! | `Tests::Memory`       | `memory.ign`        | lazy regions: reservations, touches, refusals, release     |
 //! | `Tests::Protection`   | `protection.ign`    | SMAP and SMEP stop ring 0 at user pages                    |
@@ -43,6 +44,7 @@ import _ from "./heap";
 import _ from "./initramfs";
 import _ from "./locks";
 import _ from "./memory";
+import _ from "./page_cache";
 import _ from "./pmm";
 import _ from "./protection";
 import _ from "./scheduler";
