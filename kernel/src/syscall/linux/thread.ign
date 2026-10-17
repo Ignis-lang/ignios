@@ -25,9 +25,14 @@
 //! and SSE state and the FS base `tls` with `CLONE_SETTLS`, the parent's
 //! otherwise. Its tid comes from the process id counter
 //! (`Proc::Process::reserveThreadId`) and is written, as a 32-bit word, to
-//! `parent_tid` with `CLONE_PARENT_SETTID` and to `child_tid` with
-//! `CLONE_CHILD_SETTID` before the child exists. `CLONE_CHILD_CLEARTID`
-//! records `child_tid` as the child's clear-child-tid address.
+//! `parent_tid` with `CLONE_PARENT_SETTID` by the parent once the thread
+//! exists, and to `child_tid` with `CLONE_CHILD_SETTID` by the child. The
+//! child waits for the parent's write before it writes its own word and
+//! enters ring 3, so its tid is in place before it can run, and end, as on
+//! Linux: an end that cleared the word is never undone by a late write.
+//! Both words are checked first, so a `clone` that fails writes neither
+//! (C4 D18). `CLONE_CHILD_CLEARTID` records
+//! `child_tid` as the child's clear-child-tid address.
 //!
 //! ```text
 //!   parent: clone ─► Fpu::save, copy of the frame (rax 0, rsp stack) ─► block
@@ -98,11 +103,15 @@ namespace Syscall::Linux {
 
   /// What `clone` hands its child, on the heap: the parent's x87 and SSE
   /// state (`FPU`, 16-byte aligned), its system call frame as the child
-  /// resumes with it (`FRAME`), and the clear-child-tid address (`CLEAR`).
+  /// resumes with it (`FRAME`), the clear-child-tid address (`CLEAR`), the
+  /// address the child writes its tid to, 0 for none (`SET`), and 1 once
+  /// the parent wrote its tid word and the child may go on (`GO`).
   const BLOCK_FPU: u64 = 0;
   const BLOCK_FRAME: u64 = 512;
   const BLOCK_CLEAR: u64 = 688;
-  const BLOCK_BYTES: u64 = 704;
+  const BLOCK_SET: u64 = 696;
+  const BLOCK_GO: u64 = 704;
+  const BLOCK_BYTES: u64 = 720;
 
   /// Words of an `Arch::InterruptFrame`.
   const FRAME_WORDS: u64 = 22;
@@ -127,16 +136,19 @@ namespace Syscall::Linux {
     }
 
     let root: u64 = Proc::Process::currentRoot();
+
+    // Checked here and written only once the thread exists, so a failed
+    // clone leaves both words as they were.
+    if ((flags & CLONE_PARENT_SETTID) != 0 && !Proc::User::isAccessible(root, parentTid, 4, true)) {
+      return Linux::failure(Linux::EFAULT);
+    }
+
+    if ((flags & CLONE_CHILD_SETTID) != 0 && !Proc::User::isAccessible(root, childTid, 4, true)) {
+      return Linux::failure(Linux::EFAULT);
+    }
+
     let tid: u64 = Proc::Process::reserveThreadId();
     let word: u32 = tid as u32;
-
-    if ((flags & CLONE_PARENT_SETTID) != 0 && !Proc::User::copyToUser(root, parentTid, &word as *u8, 4)) {
-      return Linux::failure(Linux::EFAULT);
-    }
-
-    if ((flags & CLONE_CHILD_SETTID) != 0 && !Proc::User::copyToUser(root, childTid, &word as *u8, 4)) {
-      return Linux::failure(Linux::EFAULT);
-    }
 
     let block: *mut u8 = Mm::Heap::allocate(BLOCK_BYTES, 16);
 
@@ -158,6 +170,8 @@ namespace Syscall::Linux {
     }
 
     *((block + BLOCK_CLEAR) as *mut u64) = (flags & CLONE_CHILD_CLEARTID) != 0 ? childTid : 0;
+    *((block + BLOCK_SET) as *mut u64) = (flags & CLONE_CHILD_SETTID) != 0 ? childTid : 0;
+    *((block + BLOCK_GO) as *mut u64) = 0;
 
     let fsBase: u64 = (flags & CLONE_SETTLS) != 0 ? tls : Sched::Scheduler::currentFsBase();
     let entry: u64 = Arch::ContextAsm::ignis_function_address(cloneMain);
@@ -168,21 +182,45 @@ namespace Syscall::Linux {
       return Linux::failure(EAGAIN);
     }
 
+    // A sibling may unmap the word after the check; Linux ignores that too.
+    if ((flags & CLONE_PARENT_SETTID) != 0) {
+      Proc::User::copyToUser(root, parentTid, &word as *u8, 4);
+    }
+
+    // The child owns the block from here on and frees it.
+    @writeVolatile<u64>((block + BLOCK_GO) as *mut u64, 1);
+
     return tid;
   }
 
   /// The first function of a `clone` child, in its own kernel thread:
-  /// takes the parent's x87 and SSE state, the clear-child-tid address and
-  /// the frame from `block`, frees it, and resumes in ring 3 with that
-  /// frame. A process killed before the child ran ends it here.
+  /// waits until the parent wrote its tid word, takes the parent's x87 and
+  /// SSE state, the clear-child-tid address and the frame from `block`,
+  /// frees it, writes its tid for `CLONE_CHILD_SETTID`, and resumes in
+  /// ring 3 with that frame. A process killed before the child ran ends it
+  /// here.
   function cloneMain(block: u64): void {
     let mut words: u64[22];
     let source: *mut u8 = @pointerFromInteger<*mut u8>(block);
+
+    // The parent is past `addThreadWith` and only writes one word, so this
+    // is short.
+    while (@readVolatile<u64>((source + BLOCK_GO) as *mut u64) == 0) {
+      Sched::Scheduler::yield();
+    }
+
+    let setTid: u64 = *((source + BLOCK_SET) as *u64);
 
     Arch::Fpu::restore((source + BLOCK_FPU) as *u8);
     Sched::Scheduler::setCurrentClearChildTid(*((source + BLOCK_CLEAR) as *u64));
     Lib::Mem::copy(&mut words as *mut u8, (source + BLOCK_FRAME) as *u8, FRAME_WORDS * 8);
     Mm::Heap::free(source);
+
+    if (setTid != 0) {
+      let word: u32 = Sched::Scheduler::currentTid() as u32;
+
+      Proc::User::copyToUser(Proc::Process::currentRoot(), setTid, &word as *u8, 4);
+    }
 
     Proc::Process::checkKill();
 

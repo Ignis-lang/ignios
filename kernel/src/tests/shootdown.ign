@@ -1,18 +1,21 @@
 //!
 //! # TLB Shootdown Self-Test
 //!
-//! Runs after the application processors joined the scheduler. Two kernel
-//! threads stand in for two user threads of one process, on two processors,
-//! in the process's address space: member 0 changes the memory, member 1
-//! keeps reading a page of it through its own TLB, from ring 0 with a probe
-//! (`Arch::Probe::read`, user access allowed for the load).
+//! Runs after the application processors joined the scheduler. Kernel
+//! threads stand in for user threads of one process, each on its own
+//! processor, in the process's address space: member 0 changes the memory,
+//! the readers (member 1, and member 2 when at least three processors are
+//! online) keep reading a page of it through their own TLBs, from ring 0
+//! with a probe (`Arch::Probe::read`, user access allowed for the load).
+//! With two readers the shootdown must reach two processors: one sent to
+//! the first target only leaves the other reader stale.
 //!
 //! | Check | What it proves                                                    |
 //! |-------|-------------------------------------------------------------------|
-//! | unmap | after member 0's `Proc::Memory::unmap` of the page returns, member 1's next read faults: its processor dropped the translation before `unmap` returned. Without the shootdown it keeps reading the freed frame |
-//! | copy  | member 1 reads a private file page (the cache frame); member 0 writes it (copy on write) and stores a word in its copy; member 1's next read sees the copy, not the cache frame |
+//! | unmap | after member 0's `Proc::Memory::unmap` of the page returns, each reader's next read faults: its processor dropped the translation before `unmap` returned. Without the shootdown it keeps reading the freed frame |
+//! | copy  | each reader reads a private file page (the cache frame); member 0 writes it (copy on write) and stores a word in its copy; each reader's next read sees the copy, not the cache frame |
 //!
-//! After its first read member 1 turns interrupts off until a shootdown
+//! After its first read a reader turns interrupts off until a shootdown
 //! request reaches its processor, then keeps them off a while longer: the
 //! old frame (or the reference on the cache frame) must not go back while
 //! the request is not served. Each check also needs `Sched::Shootdown` to
@@ -44,27 +47,36 @@ record ShootdownTestState {
   static mut frame: u64;
   static mut references: u64;
 
-  /// Set by member 1 when a shootdown request reached its processor while
+  /// The readers of this run: 1, or 2 with three processors or more.
+  static mut readers: u64;
+
+  /// Per reader: set when a shootdown request reached its processor while
   /// it held interrupts off.
-  static mut requestSeen: u64;
+  static mut requestSeen: u64[2];
 
   /// Set by the driver: the members start.
   static mut go: u64;
 
-  /// Set by member 1 after its first good read.
-  static mut reading: u64;
+  /// Per reader: set after its first good read.
+  static mut reading: u64[2];
 
   /// Set by member 0 once its change returned.
   static mut changed: u64;
 
-  /// What member 1 saw last: one of the outcomes below, 0 while it reads.
-  static mut outcome: u64;
+  /// Per reader: what it saw last, one of the outcomes below, 0 while it
+  /// reads.
+  static mut outcome: u64[2];
 
   /// Set by the driver: the members end their threads.
   static mut finish: u64;
 
   /// The processor of each member, plus 1.
-  static mut cpus: u64[2];
+  static mut cpus: u64[3];
+
+  /// A ticket lock around the probe reads: `Arch::Probe` has one armed
+  /// flag for the whole machine, so two readers must not probe at once.
+  static mut probeNext: u64;
+  static mut probeServing: u64;
 }
 
 /// The checks.
@@ -75,24 +87,24 @@ namespace Tests::Shootdown {
   /// Scenario: member 0 writes a private file page.
   const COPY: u64 = 2;
 
-  /// Member 1 faulted after the change: the translation was gone.
+  /// A reader faulted after the change: the translation was gone.
   const FAULTED: u64 = 1;
 
-  /// Member 1 read the page after the change returned as it was before:
+  /// A reader read the page after the change returned as it was before:
   /// a stale TLB entry.
   const STALE: u64 = 2;
 
-  /// Member 1 read the new contents after the change.
+  /// A reader read the new contents after the change.
   const FRESH: u64 = 3;
 
-  /// Member 1 read something it should never see.
+  /// A reader read something it should never see.
   const WRONG: u64 = 4;
 
-  /// The old frame lost its reference while member 1's processor had not
+  /// The old frame lost its reference while a reader's processor had not
   /// served the shootdown request yet.
   const FREED_EARLY: u64 = 5;
 
-  /// Pause loops member 1 waits, interrupts off, for the request.
+  /// Pause loops a reader waits, interrupts off, for the request.
   const REQUEST_SPINS: u64 = 50000000;
 
   /// Pause loops it then holds the request unserved.
@@ -110,7 +122,7 @@ namespace Tests::Shootdown {
   /// 4 KiB.
   const PAGE: u64 = 4096;
 
-  /// Tries to get the two members on two processors.
+  /// Tries to get every member on a processor of its own.
   const ATTEMPTS: u64 = 3;
 
   /// Ticks the driver waits for the members: 5 s.
@@ -127,44 +139,59 @@ namespace Tests::Shootdown {
     let sent: u64 = Sched::Shootdown::sentCount();
     let acknowledged: u64 = Sched::Shootdown::acknowledgedCount();
 
+    ShootdownTestState::readers = Smp::processorCount() >= 3 ? 2 : 1;
     runScenario(UNMAP);
     runScenario(COPY);
 
-    Drivers::Console::write("shootdown: self-test ok, a sibling on another cpu faulted after munmap and saw the copy after a copy on write; ");
+    Drivers::Console::write("shootdown: self-test ok, ");
+    Drivers::Console::writeDecimal(ShootdownTestState::readers);
+    Drivers::Console::write(ShootdownTestState::readers == 1 ? " sibling" : " siblings");
+    Drivers::Console::write(" on other cpus faulted after munmap and saw the copy after a copy on write; ");
     Drivers::Console::writeDecimal(Sched::Shootdown::sentCount() - sent);
     Drivers::Console::write(" sent, ");
     Drivers::Console::writeDecimal(Sched::Shootdown::acknowledgedCount() - acknowledged);
     Drivers::Console::writeLine(" acknowledged");
   }
 
-  /// Runs `scenario` until its members ran on two processors, then checks
-  /// what member 1 saw and that the shootdown was sent and acknowledged.
+  /// Runs `scenario` until each member ran on a processor of its own, then
+  /// checks what each reader saw and that the shootdown was sent and
+  /// acknowledged.
   function runScenario(scenario: u64): void {
     let mut attempt: u64 = 0;
 
     while (attempt < ATTEMPTS) {
       let sent: u64 = Sched::Shootdown::sentCount();
       let acknowledged: u64 = Sched::Shootdown::acknowledgedCount();
-      let outcome: u64 = runOnce(scenario);
 
-      if (*cpuOf(0) != *cpuOf(1)) {
+      runOnce(scenario);
+
+      if (onOwnProcessors()) {
         let expected: u64 = scenario == UNMAP ? FAULTED : FRESH;
+        let mut reader: u64 = 0;
 
-        if (outcome != expected) {
-          Drivers::Console::write("shootdown: member 1 saw outcome ");
-          Drivers::Console::writeDecimal(outcome);
-          Drivers::Console::write(", expected ");
-          Drivers::Console::writeDecimal(expected);
-          Drivers::Console::writeLine(scenario == UNMAP ? " after munmap" : " after copy on write");
-          @panic("shootdown: a sibling on another processor used a stale translation, or the old frame went back before it dropped it");
+        while (reader < ShootdownTestState::readers) {
+          let outcome: u64 = *outcomeOf(reader);
+
+          if (outcome != expected) {
+            Drivers::Console::write("shootdown: member ");
+            Drivers::Console::writeDecimal(reader + 1);
+            Drivers::Console::write(" saw outcome ");
+            Drivers::Console::writeDecimal(outcome);
+            Drivers::Console::write(", expected ");
+            Drivers::Console::writeDecimal(expected);
+            Drivers::Console::writeLine(scenario == UNMAP ? " after munmap" : " after copy on write");
+            @panic("shootdown: a sibling on another processor used a stale translation, or the old frame went back before it dropped it");
+          }
+
+          if (*requestSeenOf(reader) == 0) {
+            @panic("shootdown: no request reached a reader's processor while it held interrupts off");
+          }
+
+          reader += 1;
         }
 
-        if (ShootdownTestState::requestSeen == 0) {
-          @panic("shootdown: no request reached member 1's processor while it held interrupts off");
-        }
-
-        if (Sched::Shootdown::sentCount() == sent || Sched::Shootdown::acknowledgedCount() - acknowledged != Sched::Shootdown::sentCount() - sent) {
-          @panic("shootdown: the change sent no shootdown, or not every one was acknowledged");
+        if (Sched::Shootdown::sentCount() - sent < ShootdownTestState::readers || Sched::Shootdown::acknowledgedCount() - acknowledged != Sched::Shootdown::sentCount() - sent) {
+          @panic("shootdown: the change did not send a shootdown to every reader, or not every one was acknowledged");
         }
 
         return;
@@ -173,21 +200,51 @@ namespace Tests::Shootdown {
       attempt += 1;
     }
 
-    @panic("shootdown: the two members never ran on two processors");
+    @panic("shootdown: the members never ran on processors of their own");
   }
 
-  /// One run of `scenario`: a process with the two members and its page,
-  /// to the end of the process. Returns member 1's outcome.
-  function runOnce(scenario: u64): u64 {
+  /// True when no two members of the last run shared a processor.
+  function onOwnProcessors(): boolean {
+    let members: u64 = ShootdownTestState::readers + 1;
+    let mut first: u64 = 0;
+
+    while (first < members) {
+      let mut second: u64 = first + 1;
+
+      while (second < members) {
+        if (*cpuOf(first) == *cpuOf(second)) {
+          return false;
+        }
+
+        second += 1;
+      }
+
+      first += 1;
+    }
+
+    return true;
+  }
+
+  /// One run of `scenario`: a process with the members and its page, to
+  /// the end of the process. Each reader's outcome is left in `outcome`.
+  function runOnce(scenario: u64): void {
     ShootdownTestState::scenario = scenario;
     ShootdownTestState::go = 0;
-    ShootdownTestState::reading = 0;
     ShootdownTestState::changed = 0;
-    ShootdownTestState::outcome = 0;
     ShootdownTestState::finish = 0;
-    ShootdownTestState::requestSeen = 0;
+
+    let mut index: u64 = 0;
+
+    while (index < 2) {
+      *readingOf(index) = 0;
+      *outcomeOf(index) = 0;
+      *requestSeenOf(index) = 0;
+      index += 1;
+    }
+
     *cpuOf(0) = 0;
     *cpuOf(1) = 0;
+    *cpuOf(2) = 0;
     ShootdownTestState::root = Mm::AddressSpace::create();
 
     if (ShootdownTestState::root == Mm::Pmm::NO_FRAME) {
@@ -202,8 +259,14 @@ namespace Tests::Shootdown {
 
     ShootdownTestState::slot = Proc::Process::slotOf(id);
 
-    if (Proc::Process::addThread(ShootdownTestState::slot, Arch::ContextAsm::ignis_function_address(reader), 1) == Sched::Thread::NO_THREAD) {
-      @panic("shootdown: addThread refused a running process");
+    index = 1;
+
+    while (index <= ShootdownTestState::readers) {
+      if (Proc::Process::addThread(ShootdownTestState::slot, Arch::ContextAsm::ignis_function_address(reader), index) == Sched::Thread::NO_THREAD) {
+        @panic("shootdown: addThread refused a running process");
+      }
+
+      index += 1;
     }
 
     let node: *mut Fs::Node = scenario == COPY ? mapFilePage() : mapAnonymousPage();
@@ -212,11 +275,14 @@ namespace Tests::Shootdown {
     ShootdownTestState::references = Mm::Pmm::referenceCount(ShootdownTestState::frame);
 
     @writeVolatile<u64>(&mut ShootdownTestState::go as *mut u64, 1);
-    awaitFlag(&mut ShootdownTestState::outcome as *mut u64, "member 1 never finished reading");
+    index = 0;
+
+    while (index < ShootdownTestState::readers) {
+      awaitFlag(outcomeOf(index), "a reader never finished reading");
+      index += 1;
+    }
+
     awaitFlag(&mut ShootdownTestState::changed as *mut u64, "member 0 never finished its change");
-
-    let outcome: u64 = @readVolatile<u64>(&mut ShootdownTestState::outcome as *mut u64);
-
     @writeVolatile<u64>(&mut ShootdownTestState::finish as *mut u64, 1);
 
     if (Proc::Process::wait(id) != 0) {
@@ -232,8 +298,6 @@ namespace Tests::Shootdown {
 
       Fs::Vfs::unlock();
     }
-
-    return outcome;
   }
 
   /// Maps one anonymous page, gives it its frame and `ANONYMOUS_WORD`.
@@ -287,13 +351,19 @@ namespace Tests::Shootdown {
     ShootdownTestState::page = address;
   }
 
-  /// Member 0, the first thread: once member 1 reads, unmaps the page or
-  /// writes it (copy on write, then `COPY_WORD` in the copy).
+  /// Member 0, the first thread: once every reader reads, unmaps the page
+  /// or writes it (copy on write, then `COPY_WORD` in the copy).
   function changer(slot: u64): void {
     awaitGo(0);
 
-    while (@readVolatile<u64>(&mut ShootdownTestState::reading as *mut u64) == 0) {
-      Arch::Cpu::pause();
+    let mut reader: u64 = 0;
+
+    while (reader < ShootdownTestState::readers) {
+      while (@readVolatile<u64>(readingOf(reader)) == 0) {
+        Arch::Cpu::pause();
+      }
+
+      reader += 1;
     }
 
     if (ShootdownTestState::scenario == UNMAP) {
@@ -312,10 +382,12 @@ namespace Tests::Shootdown {
     endMember();
   }
 
-  /// Member 1, the added thread: reads the page until a read after
-  /// member 0's change tells what its processor translated it to.
+  /// Member `index` (1 or 2), an added thread: reads the page until a read
+  /// after member 0's change tells what its processor translated it to.
   function reader(index: u64): void {
-    awaitGo(1);
+    awaitGo(index);
+
+    let mine: u64 = index - 1;
 
     let before: u64 = ShootdownTestState::scenario == UNMAP ? ANONYMOUS_WORD : FILE_WORD;
     let mut outcome: u64 = 0;
@@ -327,11 +399,18 @@ namespace Tests::Shootdown {
       let mut value: u64 = 0;
       let saved: u64 = Arch::Cpu::saveAndDisableInterrupts();
 
+      let ticket: u64 = Arch::Cpu::atomicAdd(@integerFromPointer(&mut ShootdownTestState::probeNext as *mut u64), 1);
+
+      while (@readVolatile<u64>(&mut ShootdownTestState::probeServing as *mut u64) != ticket) {
+        Arch::Cpu::pause();
+      }
+
       Arch::Protection::allowUserAccess();
 
       let read: boolean = Arch::Probe::read(ShootdownTestState::page, &mut value as *mut u64);
 
       Arch::Protection::forbidUserAccess();
+      @writeVolatile<u64>(&mut ShootdownTestState::probeServing as *mut u64, ticket + 1);
       Arch::Cpu::restoreInterrupts(saved);
 
       if (!read) {
@@ -340,10 +419,10 @@ namespace Tests::Shootdown {
           outcome = FAULTED;
         }
       } else if (value == before) {
-        if (@readVolatile<u64>(&mut ShootdownTestState::reading as *mut u64) == 0) {
-          @writeVolatile<u64>(&mut ShootdownTestState::reading as *mut u64, 1);
+        if (@readVolatile<u64>(readingOf(mine)) == 0) {
+          @writeVolatile<u64>(readingOf(mine), 1);
 
-          if (!holdRequest()) {
+          if (!holdRequest(mine)) {
             outcome = FREED_EARLY;
           }
         } else if (after) {
@@ -356,15 +435,15 @@ namespace Tests::Shootdown {
       }
     }
 
-    @writeVolatile<u64>(&mut ShootdownTestState::outcome as *mut u64, outcome);
+    @writeVolatile<u64>(outcomeOf(mine), outcome);
     endMember();
   }
 
-  /// Member 1, after its first read: with interrupts off, waits for a
-  /// shootdown request to its processor, then holds it unserved for
+  /// Reader `reader`, after its first read: with interrupts off, waits for
+  /// a shootdown request to its processor, then holds it unserved for
   /// `HOLD_SPINS` loops. Returns false when the old frame lost its
   /// reference meanwhile, or had before the request came.
-  function holdRequest(): boolean {
+  function holdRequest(reader: u64): boolean {
     let saved: u64 = Arch::Cpu::saveAndDisableInterrupts();
     let here: u64 = Arch::CpuLocal::index();
     let mut kept: boolean = true;
@@ -376,7 +455,7 @@ namespace Tests::Shootdown {
     }
 
     if (Sched::Shootdown::isPending(here)) {
-      ShootdownTestState::requestSeen = 1;
+      *requestSeenOf(reader) = 1;
       spins = 0;
 
       while (kept && spins < HOLD_SPINS) {
@@ -428,5 +507,20 @@ namespace Tests::Shootdown {
   /// Entry `index` of `cpus`.
   function cpuOf(index: u64): *mut u64 {
     return &mut ShootdownTestState::cpus as *mut u64 + index;
+  }
+
+  /// Entry `reader` of `reading`.
+  function readingOf(reader: u64): *mut u64 {
+    return &mut ShootdownTestState::reading as *mut u64 + reader;
+  }
+
+  /// Entry `reader` of `outcome`.
+  function outcomeOf(reader: u64): *mut u64 {
+    return &mut ShootdownTestState::outcome as *mut u64 + reader;
+  }
+
+  /// Entry `reader` of `requestSeen`.
+  function requestSeenOf(reader: u64): *mut u64 {
+    return &mut ShootdownTestState::requestSeen as *mut u64 + reader;
   }
 }

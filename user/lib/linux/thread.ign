@@ -10,7 +10,7 @@
 //! the thread's `Thread::Block`. The block is the thread's TLS: `clone` sets the FS
 //! base to it (`CLONE_SETTLS`) and its first word points at itself, so
 //! `%fs:0` is the block's address, as the x86_64 TLS ABI wants. The block
-//! also holds the tid word: the kernel writes the child's tid there before
+//! also holds the tid word: the kernel writes the child's tid there once
 //! the child exists (`CLONE_PARENT_SETTID`) and writes 0 there and wakes one
 //! futex waiter when the thread ends (`CLONE_CHILD_CLEARTID`). `join` sleeps
 //! on that word until it is 0, then unmaps the region.
@@ -89,6 +89,11 @@ export namespace Thread {
     /// with its result; the parent gets the child's tid or -errno.
     function ignis_thread_clone(flags: u64, stack: u64, parentTid: u64, childTid: u64, tls: u64): i64;
 
+    /// `ignis_thread_clone` with `mark` in the low half of xmm15 at the
+    /// `clone`; the child's function gets the low half of the child's
+    /// xmm15 as its argument instead of the word at `stack + 8`.
+    function ignis_thread_clone_marked(flags: u64, stack: u64, parentTid: u64, childTid: u64, tls: u64, mark: u64): i64;
+
     /// The address of a thread function, which must be named at the call
     /// site.
     function ignis_thread_function_address(entry: (u64) -> u64): u64;
@@ -116,10 +121,27 @@ export namespace Thread {
   /// waiter on it when the child ends.
   const CLONE_CHILD_CLEARTID: u64 = 0x200000;
 
+  /// `CLONE_CHILD_SETTID`: the kernel writes the child's tid to
+  /// `child_tid` before the child runs.
+  const CLONE_CHILD_SETTID: u64 = 0x1000000;
+
   /// Starts a thread that runs the function at `entry` with `argument`.
   /// Returns the address of its `Thread::Block`, the handle `join` takes, or
   /// -errno when the region or the thread could not be made.
   function spawn(entry: u64, argument: u64): i64 {
+    return spawnWith(entry, argument, false, 0);
+  }
+
+  /// `spawn` for a check of the SSE copy of `clone`: the caller's xmm15
+  /// holds `mark` at the `clone`, and the function gets the child's xmm15
+  /// (low half) as its argument. The kernel writes the tid word from the
+  /// child (`CLONE_CHILD_SETTID`) instead of the parent.
+  function spawnMarked(entry: u64, mark: u64): i64 {
+    return spawnWith(entry, 0, true, mark);
+  }
+
+  /// `spawn`, or `spawnMarked` when `marked`.
+  function spawnWith(entry: u64, argument: u64, marked: boolean, mark: u64): i64 {
     let base: i64 = Sys::mapAnonymous(STACK_BYTES);
 
     if (base < 0) {
@@ -139,8 +161,17 @@ export namespace Thread {
     *@pointerFromInteger<*mut u64>(stack + 8) = argument;
 
     let tidAddress: u64 = @integerFromPointer(&mut (*block).tid as *mut u32);
-    let flags: u64 = CLONE_THREAD_SET | CLONE_SETTLS | CLONE_PARENT_SETTID | CLONE_CHILD_CLEARTID;
-    let tid: i64 = Asm::ignis_thread_clone(flags, stack, tidAddress, tidAddress, blockAddress);
+    let mut tid: i64 = 0;
+
+    if (marked) {
+      let flags: u64 = CLONE_THREAD_SET | CLONE_SETTLS | CLONE_CHILD_SETTID | CLONE_CHILD_CLEARTID;
+
+      tid = Asm::ignis_thread_clone_marked(flags, stack, 0, tidAddress, blockAddress, mark);
+    } else {
+      let flags: u64 = CLONE_THREAD_SET | CLONE_SETTLS | CLONE_PARENT_SETTID | CLONE_CHILD_CLEARTID;
+
+      tid = Asm::ignis_thread_clone(flags, stack, tidAddress, tidAddress, blockAddress);
+    }
 
     if (tid < 0) {
       Sys::munmap(base as u64, STACK_BYTES);

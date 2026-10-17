@@ -11,6 +11,7 @@
 //! | lifetime | one of two threads ends: the process runs on, its address space and frames stay, `wait` does not return; the last one ends: `wait` returns its status, the space is destroyed once and the PMM free and reserved counts and the slots in use are back where they started |
 //! | end      | `kill` of a process with two parked threads wakes both, each ends at `checkKill`, and the first status (137) wins over a later `exitCurrent(3)` |
 //! | copy     | while one thread holds the address space lock, the other's `Proc::User::copyToUser` into a lazy page does not finish; once it is released the copy lands. Without the lock (D15) the copy runs between a sibling's `unmap` and its frame's reuse |
+//! | reap     | both threads end while a third thread, outside the process, still holds its address space (a sibling not reaped yet): `wait` does not return while it does; once it ends, `wait` returns and the space's frames are already free when it does |
 //! | race     | two threads resolve the same `RACE_PAGES` lazy pages at once: every resolve succeeds and exactly one frame per page is taken (without the address space lock, the second `mapPrepared` of a page panics) |
 //!
 //! The lifetime check runs twice and checks the second round, so the heap
@@ -63,6 +64,12 @@ record ThreadTestState {
 
   /// The process the waiter waits for.
   static mut waitedId: u64;
+
+  /// The free frames when the waiter's `wait` returned.
+  static mut waiterFree: u64;
+
+  /// Set by the driver: the holder of the reap check ends.
+  static mut holderEnd: u64;
 }
 
 /// The checks.
@@ -79,6 +86,10 @@ namespace Tests::Threads {
   /// Scenario: member 0 holds the address space lock while member 1 copies
   /// to user memory.
   const COPY: u64 = 4;
+
+  /// Scenario: both threads end while a thread outside the process holds
+  /// the address space.
+  const REAP: u64 = 5;
 
   /// The word member 1 copies.
   const COPY_MARKER: u64 = 0x5EED0C0FFEE;
@@ -109,6 +120,9 @@ namespace Tests::Threads {
 
     checkEnd();
     Drivers::Console::writeLine("proc: process end self-test ok");
+
+    checkReap();
+    Drivers::Console::writeLine("proc: reap self-test ok, wait returned only after the last holder of the space was gone");
 
     checkRace();
 
@@ -201,6 +215,72 @@ namespace Tests::Threads {
 
     if (check && (Mm::Pmm::freeFrameCount() != free || Mm::Pmm::reservedFrameCount() != reserved || Proc::Process::usedSlots() != used)) {
       @panic("threads: the last thread's end did not give everything back");
+    }
+  }
+
+  /// Both members end while a holder thread, not a member, still runs in
+  /// the process's address space, as a sibling that left but is not reaped
+  /// yet. The last member must wait for it (`awaitSharers`): `wait` must
+  /// not return before the holder ends, and when it returns the space is
+  /// destroyed, its frames free.
+  function checkReap(): void {
+    let free: u64 = Mm::Pmm::freeFrameCount();
+    let id: u64 = startPair(REAP, 2);
+
+    ThreadTestState::holderEnd = 0;
+
+    let holder: u64 = Sched::Scheduler::spawnMember(Arch::ContextAsm::ignis_function_address(holderMain), 0, ThreadTestState::root, 0);
+
+    if (holder == Sched::Thread::NO_THREAD) {
+      @panic("threads: the holder thread did not start");
+    }
+
+    release();
+
+    let waiter: u64 = Sched::Scheduler::spawn(Arch::ContextAsm::ignis_function_address(waiterMain), 0);
+
+    awaitFlags(&mut ThreadTestState::ready as *mut u64, "a member never resolved its page");
+    *commandOf(0) = 1;
+    *commandOf(1) = 1;
+
+    let deadline: u64 = Time::Timer::ticks() + TIMEOUT_TICKS;
+
+    while (Proc::Process::threadCountOf(id) != 0) {
+      if (Time::Timer::ticks() > deadline) {
+        @panic("threads: the members of the reap check never ended");
+      }
+
+      Sched::Scheduler::sleep(1);
+    }
+
+    Sched::Scheduler::sleep(HOLD_TICKS);
+
+    if (@readVolatile<u64>(&mut ThreadTestState::waiterDone as *mut u64) != 0) {
+      @panic("threads: wait returned while another thread still held the process's address space");
+    }
+
+    @writeVolatile<u64>(&mut ThreadTestState::holderEnd as *mut u64, 1);
+    Sched::Scheduler::join(waiter);
+
+    let freeAfterWait: u64 = ThreadTestState::waiterFree;
+
+    Sched::Scheduler::join(holder);
+
+    if (ThreadTestState::waiterStatus != LAST_STATUS || freeAfterWait != free) {
+      Drivers::Console::write("threads: free frames ");
+      Drivers::Console::writeDecimal(free);
+      Drivers::Console::write(" before, ");
+      Drivers::Console::writeDecimal(freeAfterWait);
+      Drivers::Console::writeLine(" when wait returned");
+      @panic("threads: wait returned before the address space was destroyed");
+    }
+  }
+
+  /// The holder of the reap check: runs in the process's address space,
+  /// outside the process, until the driver lets it end.
+  function holderMain(argument: u64): void {
+    while (@readVolatile<u64>(&mut ThreadTestState::holderEnd as *mut u64) == 0) {
+      Sched::Scheduler::sleep(1);
     }
   }
 
@@ -365,7 +445,7 @@ namespace Tests::Threads {
 
     *cpuOf(index) = Arch::CpuLocal::index() + 1;
 
-    if (scenario == LIFETIME) {
+    if (scenario == LIFETIME || scenario == REAP) {
       // Each member touches its own page.
       if (!Proc::Memory::resolve(ThreadTestState::slot, ThreadTestState::root, ThreadTestState::region + index * PAGE, Proc::Memory::WRITE)) {
         @panic("threads: a member could not resolve its page");
@@ -388,7 +468,14 @@ namespace Tests::Threads {
       Sched::Scheduler::sleep(1);
     }
 
-    Proc::Process::exitThread(scenario == LIFETIME ? FIRST_STATUS + index * (LAST_STATUS - FIRST_STATUS) : 0);
+    // In the reap check member 1 ends last: it waits for member 0's end.
+    if (scenario == REAP && index == 1) {
+      while (Proc::Process::threadCountOf(ThreadTestState::waitedId) > 1) {
+        Sched::Scheduler::sleep(1);
+      }
+    }
+
+    Proc::Process::exitThread(scenario == LIFETIME || scenario == REAP ? FIRST_STATUS + index * (LAST_STATUS - FIRST_STATUS) : 0);
   }
 
   /// Member `index` of the copy check: member 0 holds the address space
@@ -429,9 +516,11 @@ namespace Tests::Threads {
     Proc::Process::exitThread(0);
   }
 
-  /// Waits for the lifetime process and records what `wait` returned.
+  /// Waits for the lifetime process and records what `wait` returned and
+  /// the free frames right after.
   function waiterMain(argument: u64): void {
     ThreadTestState::waiterStatus = Proc::Process::wait(ThreadTestState::waitedId);
+    ThreadTestState::waiterFree = Mm::Pmm::freeFrameCount();
     @writeVolatile<u64>(&mut ThreadTestState::waiterDone as *mut u64, 1);
   }
 

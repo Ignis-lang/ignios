@@ -203,6 +203,7 @@ namespace Tests::User {
     runMemory();
     runThreads();
     runNative();
+    runThreadLimit();
     runStress();
   }
 
@@ -337,7 +338,11 @@ namespace Tests::User {
   /// (SIGSEGV, through the TLB shootdown on several processors), a thread
   /// calling `exit_group(42)` while its siblings sleep in futex WAIT (42),
   /// and a thread writing to a read-only page while its siblings spin
-  /// (SIGSEGV). No frame, reservation or process slot may stay taken.
+  /// (SIGSEGV). Then the exit status of the last thread when the first
+  /// thread ends first (9) or last (6), and two threads waiting for the
+  /// console when the process ends through `exit_group(7)` or a kill (137):
+  /// both must wake (C4 D17), within 3 s. No frame, reservation or process
+  /// slot may stay taken.
   function runThreads(): void {
     let freeBefore: u64 = Mm::Pmm::freeFrameCount();
     let reservedBefore: u64 = Mm::Pmm::reservedFrameCount();
@@ -355,6 +360,10 @@ namespace Tests::User {
     expectThreadsEnded("threadtest unmap-read", KILLED_BY_SEGV);
     expectThreadsEnded("threadtest exit-group", 42);
     expectThreadsEnded("threadtest fault", KILLED_BY_SEGV);
+    expectThreadsEnded("threadtest exit-first", 9);
+    expectThreadsEnded("threadtest exit-last", 6);
+    expectEndedWithin("threadtest console-exit-group", 7);
+    expectEndedWithin("threadtest console-kill", Proc::Process::KILLED);
 
     if (Mm::Pmm::freeFrameCount() != freeBefore || Mm::Pmm::reservedFrameCount() != reservedBefore) {
       @panic("user test: threadtest leaked frames or reservations");
@@ -365,9 +374,85 @@ namespace Tests::User {
     }
 
     if (oneCpu) {
-      Drivers::Console::writeLine("user: threadtest passed with the overlap check skipped, one processor; a sibling reading an unmapped page, exit_group(42) and a fault in one thread ended the whole process, nothing leaked");
+      Drivers::Console::writeLine("user: threadtest passed with the overlap check skipped, one processor; a sibling reading an unmapped page, exit_group(42), a fault in one thread and the end of a process with two console readers ended the whole process, nothing leaked");
     } else {
-      Drivers::Console::writeLine("user: threadtest passed, threads counted exactly under a futex mutex and ran on two processors at once; a sibling reading an unmapped page, exit_group(42) and a fault in one thread ended the whole process, nothing leaked");
+      Drivers::Console::writeLine("user: threadtest passed, threads counted exactly under a futex mutex and ran on two processors at once; a sibling reading an unmapped page, exit_group(42), a fault in one thread and the end of a process with two console readers ended the whole process, nothing leaked");
+    }
+  }
+
+  /// Runs `threadtest eagain`, which starts threads until `clone` fails
+  /// with `-EAGAIN` and then joins them, and checks that nothing leaked.
+  /// It runs after `runNative`: its threads take about a hundred ids from
+  /// the process id counter, and nativetest reports a process id through an
+  /// 8-bit exit status.
+  function runThreadLimit(): void {
+    let freeBefore: u64 = Mm::Pmm::freeFrameCount();
+    let slotsBefore: u64 = Proc::Process::usedSlots();
+    let status: u64 = Proc::Programs::runNamed("threadtest eagain");
+
+    if (status != 0) {
+      Drivers::Console::write("user test: threadtest eagain failed check ");
+      Drivers::Console::writeDecimal(status);
+      Drivers::Console::writeLine("");
+      @panic("user test: clone did not run out of thread slots cleanly");
+    }
+
+    if (Mm::Pmm::freeFrameCount() != freeBefore || Proc::Process::usedSlots() != slotsBefore) {
+      @panic("user test: threadtest eagain leaked frames or a process slot");
+    }
+
+    Drivers::Console::writeLine("user: threadtest eagain passed, clone ran out of thread slots with -EAGAIN and worked again, nothing leaked");
+  }
+
+  /// `expectThreadsEnded` for a program whose threads may hang in the
+  /// kernel when the end does not reach them (the console readers of C4
+  /// D17): panics when the process has not ended `END_TICKS` after it
+  /// started, instead of waiting for ever.
+  function expectEndedWithin(line: str, status: u64): void {
+    const END_TICKS: u64 = 300;
+
+    let mut length: u64 = 0;
+
+    while (*(line as *u8 + length) != 0) {
+      length += 1;
+    }
+
+    let strings: *mut u8 = Mm::Heap::allocate(length + 1, 16);
+
+    if (strings == null) {
+      @panic("user test: no memory for a command line");
+    }
+
+    let mut stringBytes: u64 = 0;
+    let count: u64 = Proc::Programs::split(line as *u8, length, strings, &mut stringBytes as *mut u64);
+    let id: u64 = Proc::Programs::start(strings as *u8, stringBytes, count);
+
+    Mm::Heap::free(strings);
+
+    if (id == Proc::Process::NO_PROCESS) {
+      @panic("user test: a threadtest mode did not start");
+    }
+
+    let deadline: u64 = Time::Timer::ticks() + END_TICKS;
+
+    while (Proc::Process::stateOf(id) == Proc::Process::RUNNING) {
+      if (Time::Timer::ticks() > deadline) {
+        Drivers::Console::write(line);
+        Drivers::Console::writeLine(" still runs 3 s after it started");
+        @panic("user test: a thread of an ending process never woke");
+      }
+
+      Sched::Scheduler::sleep(1);
+    }
+
+    let got: u64 = Proc::Process::wait(id);
+
+    if (got != status) {
+      Drivers::Console::write(line);
+      Drivers::Console::write(" ended with ");
+      Drivers::Console::writeDecimal(got);
+      Drivers::Console::writeLine("");
+      @panic("user test: a threadtest mode did not end the whole process");
     }
   }
 

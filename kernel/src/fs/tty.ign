@@ -37,7 +37,11 @@
 //!
 //! A reader may give a token (`readAs`, `readLineAs`); `cancel` with that
 //! token makes its read end at once with 0 bytes. The kernel uses it to stop
-//! a process it kills while the process waits for the keyboard.
+//! a process it ends while the process waits for the keyboard. The token is
+//! the process slot, shared by every thread of the process, so the cancel
+//! stays in force until `forget` withdraws it: every thread reading, now or
+//! later, ends its read (C4 D17). The process's descriptors are closed with
+//! its last thread, which calls `forget`.
 //!
 //! Only one reader edits a line at a time; another one waits until it is
 //! done. Each reader edits into a buffer of its own, so it cannot change a
@@ -65,9 +69,10 @@ record TtyState {
   /// True while a reader is editing a line.
   static mut busy: boolean = false;
 
-  /// One flag per token, 1 when the read of that reader must end at once
-  /// (`Fs::Tty::cancel`). Token 0 is the kernel terminal, which is never
-  /// cancelled. The size must be `MAX_TOKENS`.
+  /// One flag per token, 1 when every read of that reader must end at once
+  /// (`Fs::Tty::cancel`) until `Fs::Tty::forget` clears it. Token 0 is the
+  /// kernel terminal, which is never cancelled. The size must be
+  /// `MAX_TOKENS`.
   static mut cancelled: u8[65];
 
   /// Guards every field above.
@@ -117,7 +122,7 @@ namespace Fs::Tty {
     Arch::Spin::lockIrq(ttyLock());
 
     while (TtyState::busy) {
-      if (takeCancel(token)) {
+      if (isCancelled(token)) {
         Arch::Spin::unlockIrq(ttyLock());
         return 0;
       }
@@ -131,7 +136,7 @@ namespace Fs::Tty {
     let mut finished: boolean = false;
 
     while (!finished) {
-      if (takeCancel(token)) {
+      if (isCancelled(token)) {
         length = 0;
         break;
       }
@@ -229,9 +234,9 @@ namespace Fs::Tty {
     Arch::Spin::unlockIrq(ttyLock());
   }
 
-  /// Ends the read of `token` at once: the reader's `readAs` returns 0 bytes
-  /// as soon as it runs again. Only that reader is affected, and only while
-  /// it waits; `forget` withdraws a cancel nobody collected.
+  /// Ends every read of `token` at once: each `readAs` with it, waiting now
+  /// or started later, returns 0 bytes, until `forget` withdraws the cancel.
+  /// Readers with other tokens are not affected.
   function cancel(token: u64): void {
     if (token != NO_TOKEN && token < MAX_TOKENS) {
       Arch::Spin::lockIrq(ttyLock());
@@ -241,8 +246,8 @@ namespace Fs::Tty {
     }
   }
 
-  /// Withdraws a cancel for `token` that its reader never collected, so a
-  /// later reader with the same token is not stopped by it.
+  /// Withdraws the cancel for `token`, so a later reader with the same token
+  /// (a new process in the slot) is not stopped by it.
   function forget(token: u64): void {
     if (token < MAX_TOKENS) {
       Arch::Spin::lockIrq(ttyLock());
@@ -251,7 +256,7 @@ namespace Fs::Tty {
     }
   }
 
-  /// True while a cancel for `token` waits for its reader.
+  /// True while a cancel for `token` is in force.
   function cancelPending(token: u64): boolean {
     if (token >= MAX_TOKENS) {
       return false;
@@ -280,17 +285,11 @@ namespace Fs::Tty {
     Arch::Spin::initialize(ttyLock(), Lib::Rank::WAIT_QUEUE);
   }
 
-  /// True, and the flag cleared, when the read of `token` was cancelled.
-  /// Each token has its own flag, so cancelling one reader never undoes the
-  /// cancel of another. The lock is held.
-  function takeCancel(token: u64): boolean {
-    if (token == NO_TOKEN || token >= MAX_TOKENS || *flagOf(token) == 0) {
-      return false;
-    }
-
-    *flagOf(token) = 0;
-
-    return true;
+  /// True when the reads of `token` are cancelled. The flag stays set, so
+  /// every thread of the process reading with the token sees it, not only
+  /// the first one. The lock is held.
+  function isCancelled(token: u64): boolean {
+    return token != NO_TOKEN && token < MAX_TOKENS && *flagOf(token) != 0;
   }
 
   /// `TtyState::lock`.

@@ -15,7 +15,7 @@
 //! | Command          | Result                                               |
 //! |------------------|------------------------------------------------------|
 //! | `FUTEX_WAIT` (0) | 0 once woken; `-EAGAIN` when `*uaddr != val`; `-ETIMEDOUT` after `timeout`; `-EINTR` when the process is killed |
-//! | `FUTEX_WAKE` (1) | the number of waiters woken, at most `val`, oldest first |
+//! | `FUTEX_WAKE` (1) | the number of waiters woken, at most `val` (one when `val` is 0 or less), oldest first |
 //!
 //! Errors of both: `uaddr` not 4-byte aligned `-EINVAL`; a word or a
 //! timeout that is not readable user memory `-EFAULT`; a timeout with
@@ -24,7 +24,7 @@
 //! The timeout of WAIT is a `struct timespec` relative to now, null for no
 //! limit, rounded up to whole ticks (10 ms) as in `nanosleep`; a zero
 //! timeout still compares and then times out at once. `val` of WAKE is a
-//! signed 32-bit count: 0 or less wakes nobody.
+//! signed 32-bit count: 0 or less wakes one waiter, as Linux does.
 //!
 //! A futex shared between processes through `MAP_SHARED` does not work:
 //! waits are keyed by (address space, user address), so the two processes
@@ -67,11 +67,8 @@ namespace Syscall::Linux {
 
       let count: i32 = (value as u32) as i32;
 
-      if (count <= 0) {
-        return 0;
-      }
-
-      return Proc::Futex::wake(root, address, count as u64);
+      // Linux treats a count of 0 or less as 1.
+      return Proc::Futex::wake(root, address, count <= 0 ? 1 : count as u64);
     }
 
     let timed: boolean = timeout != 0;

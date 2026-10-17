@@ -10,7 +10,9 @@
 //! Without arguments the program runs every check and exits with the number
 //! of the first one that failed, 0 when all passed. `one-cpu` runs every
 //! check but the overlap ones (30-31), which need two processors; the kernel
-//! test passes it when only one is online. Any other argument does one thing
+//! test passes it when only one is online. `eagain` runs checks 90-91 only
+//! and exits with 0 when they pass: each thread it starts takes a thread id
+//! from the process id counter. Any other argument does one thing
 //! the kernel must stop; exiting normally (status 1) means the kernel let it
 //! through, and the siblings of the thread that did it would otherwise run
 //! on.
@@ -20,6 +22,13 @@
 //! | `unmap-read` | a thread reads a page in a loop while the first thread, on another processor when there is one, unmaps it; a read that works after `munmap` returned exits with 3 | 139 |
 //! | `exit-group` | a thread calls `exit_group(42)` while three siblings sleep in futex WAIT for ever | 42 |
 //! | `fault`      | a thread writes to a read-only page while three siblings spin | 139 |
+//! | `console-exit-group` | two threads read descriptor 0 in a loop; the first thread sleeps 100 ms and calls `exit_group(7)` | 7 |
+//! | `console-kill` | the same, ending with `kill(getpid(), SIGKILL)`      | 137 |
+//! | `exit-first` | the first thread ends with `exit(3)` while a sibling runs; the sibling ends later with `exit(9)`, the last thread | 9 |
+//! | `exit-last`  | a sibling ends with `exit(5)`; the first thread ends later with `exit(6)`, the last thread | 6 |
+//!
+//! The console modes need nobody typing: both readers wait for a line until
+//! the process ends, and each must wake (C4 D17).
 //!
 //! ## Checks
 //!
@@ -38,6 +47,23 @@
 //! | 60     | the first thread reads what a sibling stored in a mapping the sibling made |
 //! | 61     | `munmap` of that page by the first thread while the sibling still runs, without touching it, is 0 |
 //! | 62     | a new mapping after it reads zeros, and the sibling joins            |
+//! | 70     | `clone` without `CLONE_VM` is `-ENOSYS`                              |
+//! | 71     | `clone` with an exit signal in the flags is `-EINVAL`                |
+//! | 72     | `CLONE_SETTLS` with a kernel address is `-EPERM` and leaves the `CLONE_PARENT_SETTID` word as it was (C4 D18) |
+//! | 73     | `CLONE_PARENT_SETTID` with a word that is not mapped is `-EFAULT`    |
+//! | 74     | `CLONE_CHILD_SETTID` with a word that is not mapped is `-EFAULT` and leaves the parent's word as it was (C4 D18) |
+//! | 75     | a thread made with `CLONE_CHILD_SETTID` only finds its tid in its tid word, written by the kernel before it ran |
+//! | 76     | that thread's xmm15 holds what the first thread's held at the `clone` |
+//! | 80     | `FUTEX_WAIT` on a word that differs is `-EAGAIN`                     |
+//! | 81     | `FUTEX_WAIT` with a 20 ms timeout is `-ETIMEDOUT`                    |
+//! | 82     | a futex word that is not 4-byte aligned is `-EINVAL`                 |
+//! | 83     | an unknown futex operation is `-ENOSYS`                              |
+//! | 84     | a futex word that is not mapped is `-EFAULT`                         |
+//! | 85     | `FUTEX_WAKE` with nobody waiting is 0                                |
+//! | 86     | `FUTEX_WAKE` with `val` 0 wakes one of two waiters (C4 D19)          |
+//! | 87     | `FUTEX_WAKE` with `val` -1 wakes the other one (C4 D19)              |
+//! | 90     | threads started until `clone` fails: the failure is `-EAGAIN`, after at least one thread and before `EAGAIN_LIMIT` |
+//! | 91     | once they are joined, a thread starts again                          |
 
 import Args from "std::args";
 import Io from "std::io";
@@ -74,6 +100,51 @@ const STALE_READ: u64 = 3;
 
 /// The base of the values the TLS check stores.
 const TLS_VALUE: u64 = 1000;
+
+/// The value the first thread has in xmm15 at the `clone` of check 76.
+const XMM_MARK: u64 = 0x5EEDF00DCAFE1234;
+
+/// `clone` flags: the thread set (`CLONE_VM | CLONE_FS | CLONE_FILES |
+/// CLONE_SIGHAND | CLONE_THREAD | CLONE_SYSVSEM`), `CLONE_VM`, `SIGCHLD`
+/// as an exit signal, `CLONE_SETTLS`, `CLONE_PARENT_SETTID` and
+/// `CLONE_CHILD_SETTID`.
+const CLONE_THREAD_SET: u64 = 0x50F00;
+const CLONE_VM: u64 = 0x100;
+const SIGCHLD: u64 = 17;
+const CLONE_SETTLS: u64 = 0x80000;
+const CLONE_PARENT_SETTID: u64 = 0x100000;
+const CLONE_CHILD_SETTID: u64 = 0x1000000;
+
+/// The first address of the kernel half, never a valid FS base.
+const KERNEL_ADDRESS: u64 = 0xFFFF800000000000;
+
+/// A user address no region covers: the first page.
+const UNMAPPED: u64 = 0x1000;
+
+/// What the tid words of the failing `clone` calls hold before them.
+const UNTOUCHED: u32 = 0xABCD;
+
+/// `futex` operations and the private flag.
+const FUTEX_WAIT: u64 = 0;
+const FUTEX_PRIVATE_FLAG: u64 = 128;
+const FUTEX_UNKNOWN: u64 = 9;
+
+/// `-errno` values the checks expect.
+const ENOSYS: i64 = -38;
+const EINVAL: i64 = -22;
+const EPERM: i64 = -1;
+const EFAULT: i64 = -14;
+const EAGAIN: i64 = -11;
+const ETIMEDOUT: i64 = -110;
+
+/// `SIGKILL`.
+const SIGKILL: u64 = 9;
+
+/// More threads than the kernel has slots for, so `clone` must fail first.
+const EAGAIN_LIMIT: u64 = 160;
+
+/// Tries of a `FUTEX_WAKE` that must find a waiter: 2 s of ticks.
+const WAKE_TRIES: u64 = 200;
 
 /// What the threads share.
 record State {
@@ -132,6 +203,24 @@ record State {
 
   /// The word the sleepers of `exit-group` wait on, always 0.
   static mut forever: u32;
+
+  /// The word the waiters of the futex check wait on, always 0.
+  static mut wakeWord: u32;
+
+  /// The word the threads of the `EAGAIN` check wait on: 0 until released.
+  static mut gate: u32;
+
+  /// Handles of the `EAGAIN` check.
+  static mut many: u64[160];
+
+  /// What the marked thread of check 76 saw: its xmm15, its tid word and
+  /// its `gettid`.
+  static mut markSeen: u64;
+  static mut markTidWord: u64;
+  static mut markTid: u64;
+
+  /// Set by the marked thread once it stored the three.
+  static mut markRan: u64;
 }
 
 /// Exits with `status` unless `got` equals `wanted`, after printing both.
@@ -530,6 +619,188 @@ function faultWorker(argument: u64): u64 {
   return 1;
 }
 
+/// `clone` called directly, for the calls that must fail: no thread may
+/// come of it.
+function rawClone(flags: u64, parentTid: u64, childTid: u64, tls: u64): i64 {
+  return Sys::call6(56, flags, 0, parentTid, childTid, tls, 0);
+}
+
+/// The marked thread of check 76: `xmm` is its xmm15 at the start. Stores
+/// it, its tid word and its `gettid`.
+function markWorker(xmm: u64): u64 {
+  let block: *mut Thread::Block = @pointerFromInteger<*mut Thread::Block>(Thread::selfAddress());
+
+  store(&mut State::markTidWord as *mut u64, @atomicLoad<u32>(&mut (*block).tid as *mut u32, :acquire) as u64);
+  store(&mut State::markTid as *mut u64, Thread::currentTid());
+  store(&mut State::markSeen as *mut u64, xmm);
+  @atomicStore<u64>(&mut State::markRan as *mut u64, 1, :release);
+
+  return 0;
+}
+
+/// The `clone` errors, the tid words of a failed `clone`, `CLONE_CHILD_SETTID`
+/// and the copy of the SSE state.
+function checkCloneFlags(): void {
+  let mut parentWord: u32 = UNTOUCHED;
+  let mut childWord: u32 = UNTOUCHED;
+  let parent: u64 = @integerFromPointer(&mut parentWord as *mut u32);
+  let child: u64 = @integerFromPointer(&mut childWord as *mut u32);
+
+  expect(rawClone(CLONE_THREAD_SET & ~CLONE_VM, 0, 0, 0), ENOSYS, 70);
+  expect(rawClone(CLONE_THREAD_SET | SIGCHLD, 0, 0, 0), EINVAL, 71);
+  expect(rawClone(CLONE_THREAD_SET | CLONE_SETTLS | CLONE_PARENT_SETTID, parent, 0, KERNEL_ADDRESS), EPERM, 72);
+  expect(@readVolatile<u32>(&mut parentWord as *mut u32) as i64, UNTOUCHED as i64, 72);
+  expect(rawClone(CLONE_THREAD_SET | CLONE_PARENT_SETTID, UNMAPPED, 0, 0), EFAULT, 73);
+  expect(rawClone(CLONE_THREAD_SET | CLONE_PARENT_SETTID | CLONE_CHILD_SETTID, parent, UNMAPPED, 0), EFAULT, 74);
+  expect(@readVolatile<u32>(&mut parentWord as *mut u32) as i64, UNTOUCHED as i64, 74);
+  expect(@readVolatile<u32>(&mut childWord as *mut u32) as i64, UNTOUCHED as i64, 74);
+
+  let handle: i64 = Thread::spawnMarked(Thread::Asm::ignis_thread_function_address(markWorker), XMM_MARK);
+
+  require(handle > 0, 10);
+
+  // The child writes its own tid word, so it may still be 0 here: `join`
+  // must not run before the child is known to have started.
+  while (@atomicLoad<u64>(&mut State::markRan as *mut u64, :acquire) == 0) {
+    Sys::yield();
+  }
+
+  expect(Thread::join(handle as u64), 0, 75);
+  require(load(&mut State::markTid as *mut u64) != 0, 75);
+  expect(load(&mut State::markTidWord as *mut u64) as i64, load(&mut State::markTid as *mut u64) as i64, 75);
+  expect(load(&mut State::markSeen as *mut u64) as i64, XMM_MARK as i64, 76);
+}
+
+/// A waiter of the futex check: one wait on a word that stays 0.
+function wakeWorker(argument: u64): u64 {
+  Sys::futexWait(&mut State::wakeWord as *u32, 0, null);
+
+  return 0;
+}
+
+/// Calls `FUTEX_WAKE` with `count` until it wakes somebody, a tick apart,
+/// and returns what the last call returned.
+function wakeSomebody(count: u32): i64 {
+  let mut tries: u64 = 0;
+  let mut woken: i64 = 0;
+
+  while (woken == 0 && tries < WAKE_TRIES) {
+    woken = Sys::futexWake(&mut State::wakeWord as *u32, count);
+
+    if (woken == 0) {
+      tick();
+    }
+
+    tries += 1;
+  }
+
+  return woken;
+}
+
+/// The futex errors, and `FUTEX_WAKE` with a count of 0 or less.
+function checkFutex(): void {
+  let word: *u32 = &mut State::wakeWord as *u32;
+  let address: u64 = @integerFromPointer(word);
+  // A `struct timespec` of 20 ms: seconds, then nanoseconds.
+  let mut timeout: u64[2];
+
+  timeout[0] = 0;
+  timeout[1] = 20000000;
+
+  expect(Sys::futexWait(word, 1, null), EAGAIN, 80);
+  expect(Sys::call4(202, address, FUTEX_WAIT | FUTEX_PRIVATE_FLAG, 0, @integerFromPointer(&timeout as *u64)), ETIMEDOUT, 81);
+  expect(Sys::call4(202, address + 1, FUTEX_WAIT | FUTEX_PRIVATE_FLAG, 0, 0), EINVAL, 82);
+  expect(Sys::call4(202, address, FUTEX_UNKNOWN, 0, 0), ENOSYS, 83);
+  expect(Sys::call4(202, UNMAPPED, FUTEX_WAIT | FUTEX_PRIVATE_FLAG, 0, 0), EFAULT, 84);
+  expect(Sys::futexWake(word, 1), 0, 85);
+
+  let first: u64 = start(Thread::Asm::ignis_thread_function_address(wakeWorker), 0);
+  let second: u64 = start(Thread::Asm::ignis_thread_function_address(wakeWorker), 1);
+
+  // Both wait before the first wake comes: it must wake exactly one.
+  while (Thread::tidOf(first) == 0 || Thread::tidOf(second) == 0) {
+    Sys::yield();
+  }
+
+  Sys::sleep(0, 50000000);
+  expect(wakeSomebody(0), 1, 86);
+  expect(wakeSomebody(0xFFFFFFFF), 1, 87);
+  expect(Thread::join(first), 0, 87);
+  expect(Thread::join(second), 0, 87);
+}
+
+/// A thread of the `EAGAIN` check: waits until the gate opens.
+function gateWorker(argument: u64): u64 {
+  while (@atomicLoad<u32>(&mut State::gate as *mut u32, :acquire) == 0) {
+    Sys::futexWait(&mut State::gate as *u32, 0, null);
+  }
+
+  return 0;
+}
+
+/// Starts threads until `clone` runs out of slots, then lets them all go.
+function checkEagain(): void {
+  let many: *mut u64 = &mut State::many as *mut u64;
+  let entry: u64 = Thread::Asm::ignis_thread_function_address(gateWorker);
+  let mut started: u64 = 0;
+  let mut result: i64 = 0;
+
+  @atomicStore<u32>(&mut State::gate as *mut u32, 0, :release);
+
+  while (started < EAGAIN_LIMIT) {
+    result = Thread::spawn(entry, started);
+
+    if (result < 0) {
+      break;
+    }
+
+    store(slot(many, started), result as u64);
+    started += 1;
+  }
+
+  @atomicStore<u32>(&mut State::gate as *mut u32, 1, :release);
+  Sys::futexWake(&mut State::gate as *u32, 0x7FFFFFFF);
+
+  let mut index: u64 = 0;
+
+  while (index < started) {
+    expect(Thread::join(load(slot(many, index))), 0, 91);
+    index += 1;
+  }
+
+  require(started > 0 && started < EAGAIN_LIMIT, 90);
+  expect(result, EAGAIN, 90);
+
+  let again: u64 = start(Thread::Asm::ignis_thread_function_address(gateWorker), 0);
+
+  expect(Thread::join(again), 0, 91);
+}
+
+/// A reader of the console modes: reads descriptor 0 until the process
+/// ends.
+function consoleWorker(argument: u64): u64 {
+  let mut buffer: u8[16];
+
+  while (true) {
+    Sys::read(0, &mut buffer as *mut u8, 16);
+  }
+
+  return 1;
+}
+
+/// The sibling of `exit-first` and `exit-last`: sleeps `argument` times
+/// 10 ms and ends with `exit(status)`, the status in the high half.
+function exitLaterWorker(argument: u64): u64 {
+  let mut waits: u64 = 0;
+
+  while (waits < (argument & 0xFFFF)) {
+    tick();
+    waits += 1;
+  }
+
+  Sys::exitThread(argument >> 16);
+}
+
 /// True when the NUL-terminated `text` is `word`.
 function modeIs(text: *u8, word: str): boolean {
   let length: u64 = Args::length(text);
@@ -598,6 +869,23 @@ function misbehave(mode: *u8): u64 {
     start(Thread::Asm::ignis_thread_function_address(spinWorker), 1);
     start(Thread::Asm::ignis_thread_function_address(spinWorker), 2);
     start(Thread::Asm::ignis_thread_function_address(faultWorker), 3);
+  } else if (modeIs(mode, "console-exit-group") || modeIs(mode, "console-kill")) {
+    start(Thread::Asm::ignis_thread_function_address(consoleWorker), 0);
+    start(Thread::Asm::ignis_thread_function_address(consoleWorker), 1);
+    Sys::sleep(0, 100000000);
+
+    if (modeIs(mode, "console-kill")) {
+      Sys::kill(Sys::getPid() as u64, SIGKILL);
+    } else {
+      Sys::exit(7);
+    }
+  } else if (modeIs(mode, "exit-first")) {
+    start(Thread::Asm::ignis_thread_function_address(exitLaterWorker), 0x9000A);
+    Sys::exitThread(3);
+  } else if (modeIs(mode, "exit-last")) {
+    start(Thread::Asm::ignis_thread_function_address(exitLaterWorker), 0x50000);
+    Sys::sleep(0, 100000000);
+    Sys::exitThread(6);
   } else {
     Io::print("threadtest: unknown mode\n");
     return 2;
@@ -612,6 +900,12 @@ function main(count: u64, values: *u64): u64 {
   let mut oneCpu: boolean = false;
 
   if (count > 1) {
+    if (modeIs(Args::get(values, 1), "eagain")) {
+      checkEagain();
+      Io::print("threadtest: clone ran out of thread slots with -EAGAIN and worked again after the joins\n");
+      return 0;
+    }
+
     if (!modeIs(Args::get(values, 1), "one-cpu")) {
       return misbehave(Args::get(values, 1));
     }
@@ -630,6 +924,8 @@ function main(count: u64, values: *u64): u64 {
   }
 
   checkUnmap();
+  checkCloneFlags();
+  checkFutex();
 
   Io::print("threadtest: futex mutex, join, TLS, processors at once and munmap between threads behave as expected\n");
 

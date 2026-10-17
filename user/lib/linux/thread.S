@@ -18,6 +18,14 @@
  * clears RBP (the end of the frame-pointer chain), calls the function and
  * passes its result to `exit` (Linux number 60), which ends this thread only.
  *
+ *   i64 ignis_thread_clone_marked(u64 flags, u64 stack, u64 parent_tid,
+ *                                 u64 child_tid, u64 tls, u64 mark)
+ *
+ * `ignis_thread_clone` that loads `mark` into the low half of xmm15 right
+ * before the `syscall`; the child replaces its argument word with the low
+ * half of its own xmm15 before anything else runs. The function so gets
+ * what the child inherited, which checks that `clone` copies the SSE state.
+ *
  *   u64 ignis_thread_function_address(u64 (*function)(u64))
  *
  * Ignis cannot turn a function into an integer, and an extern function only
@@ -35,6 +43,26 @@ ignis_thread_clone:
     syscall
     test rax, rax
     jnz 1f                  /* the parent: a tid or -errno */
+    xor ebp, ebp
+    pop rax                 /* the function */
+    pop rdi                 /* its argument */
+    call rax
+    mov rdi, rax            /* exit(result) */
+    mov eax, 60
+    syscall
+    ud2                     /* exit does not return */
+1:
+    ret
+
+.global ignis_thread_clone_marked
+ignis_thread_clone_marked:
+    mov r10, rcx            /* child_tid: syscall overwrites rcx */
+    movq xmm15, r9          /* the mark */
+    mov eax, 56             /* clone */
+    syscall
+    test rax, rax
+    jnz 1f                  /* the parent: a tid or -errno */
+    movq qword ptr [rsp + 8], xmm15 /* the argument: what the child got */
     xor ebp, ebp
     pop rax                 /* the function */
     pop rdi                 /* its argument */

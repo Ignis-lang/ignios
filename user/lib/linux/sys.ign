@@ -127,6 +127,9 @@ export namespace Sys {
   /// Linux system call number 231: ends every thread of the process.
   const EXIT_GROUP: u64 = 231;
 
+  /// Linux system call number 62.
+  const KILL: u64 = 62;
+
   /// Linux system call number 56.
   const CLONE: u64 = 56;
 
@@ -345,6 +348,20 @@ export namespace Sys {
 
     while (true) {
     }
+  }
+
+  /// Ends the calling thread only, with `status` (`exit`); the process
+  /// ends with its last thread.
+  function exitThread(status: u64): never {
+    call1(EXIT, status);
+
+    while (true) {
+    }
+  }
+
+  /// Sends `signal` to process `pid` (`kill`). Returns 0 or -errno.
+  function kill(pid: u64, signal: u64): i64 {
+    return call2(KILL, pid, signal);
   }
 
   /// The process id of the caller (`getpid`).
