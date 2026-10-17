@@ -7,6 +7,7 @@
 #   kernel/src/**/*.S   --clang -c-----> build/asm/**/*.o
 #   kernel.o + asm .o   --ld.lld -T kernel/linker.ld--> build/kernel.elf
 #   user/lib/FLAVOUR/start.S --clang -c--> build/user/start-FLAVOUR.o   (FLAVOUR: linux or native)
+#   user/lib/linux/thread.S --clang -c--> build/user/thread-linux.o   (clone trampoline, Linux flavour)
 #   user/NAME           --ignis build--> NAME.o --ld.lld -T user/user.ld (with its start)--> build/user/NAME.elf
 #   initramfs/ + build/user/*.elf --tar--> build/initramfs.tar   (programs in /bin)
 #   kernel.elf + initramfs.tar + Limine + boot/limine.conf --mtools--> build/ignios.img (FAT32 ESP)
@@ -40,14 +41,19 @@ IGNIS_OBJECT := $(BUILD)/ignis/user/obj/kernel.o
 # writes its object to build/user/NAME and picks a library flavour with
 # `std_path` (../lib/linux or ../lib/native). It is linked with that flavour's
 # entry stub user/lib/FLAVOUR/start.S and shipped in the initramfs as
-# /bin/NAME.
-USER_PROGRAMS := hello fstest mmtest nativetest stress sh cat ls touch mkdir rm rmdir pwd reboot shutdown
+# /bin/NAME. A Linux program is also linked with user/lib/linux/thread.S,
+# the `clone` trampoline of `std::thread`: every Linux program gets it, a
+# few dozen bytes, so that importing the module is all a program does.
+USER_PROGRAMS := hello fstest mmtest nativetest stress threadtest sh cat ls touch mkdir rm rmdir pwd reboot shutdown
 USER_ELFS := $(patsubst %,$(BUILD)/user/%.elf,$(USER_PROGRAMS))
 USER_LIB_SOURCES := $(shell find user/lib -name '*.ign' -o -name '*.toml' -o -name '*.S')
-USER_STARTS := $(BUILD)/user/start-linux.o $(BUILD)/user/start-native.o
+USER_STARTS := $(BUILD)/user/start-linux.o $(BUILD)/user/start-native.o $(BUILD)/user/thread-linux.o
 
 # The library flavour of program $(1): native when its std_path names it.
 flavour = $(if $(shell grep -s 'lib/native' user/$(1)/ignis.toml),native,linux)
+
+# The objects linked after the entry stub of flavour $(1).
+flavour_objects = $(if $(filter linux,$(1)),$(BUILD)/user/thread-linux.o)
 
 # The initramfs: the files under initramfs/ plus the user programs in /bin,
 # packed as a ustar archive that Limine loads as the module `initramfs`.
@@ -111,13 +117,18 @@ $(BUILD)/user/start-%.o: user/lib/%/start.S
 	@mkdir -p $(dir $@)
 	$(CLANG) --target=x86_64-unknown-none -fno-pic -fno-pie -c -o $@ $<
 
+# The thread trampoline of a library flavour (`ignis_thread_clone`).
+$(BUILD)/user/thread-%.o: user/lib/%/thread.S
+	@mkdir -p $(dir $@)
+	$(CLANG) --target=x86_64-unknown-none -fno-pic -fno-pie -c -o $@ $<
+
 # One user program: compile its Ignis project, then link its object after the
 # entry stub of its flavour. The second expansion lists the program's own
 # sources.
 .SECONDEXPANSION:
 $(BUILD)/user/%.elf: $$(shell find user/$$* -name '*.ign' -o -name '*.toml') $(USER_LIB_SOURCES) $(USER_STARTS) user/user.ld
 	cd user/$* && $(IGNIS) build
-	$(LD) $(USER_LDFLAGS) -o $@ $(BUILD)/user/start-$(call flavour,$*).o $(BUILD)/user/$*/user/obj/$*.o
+	$(LD) $(USER_LDFLAGS) -o $@ $(BUILD)/user/start-$(call flavour,$*).o $(call flavour_objects,$(call flavour,$*)) $(BUILD)/user/$*/user/obj/$*.o
 
 # Packs initramfs/ and the user programs (as /bin/NAME) into the archive.
 $(INITRAMFS): $(INITRAMFS_FILES) $(USER_ELFS)
@@ -205,6 +216,7 @@ run-headless: $(IMAGE) $(OVMF_VARS_COPY)
 	grep -q '^user: mmtest passed.*no TLB shootdown was sent' $(SERIAL_LOG)
 	grep -q '^user: clone made a thread with the parent.s registers' $(SERIAL_LOG)
 	grep -q '^user: futex WAIT and WAKE between threads' $(SERIAL_LOG)
+	grep -q '^user: threadtest passed' $(SERIAL_LOG)
 	grep -q '^locks: spinlock self-test ok' $(SERIAL_LOG)
 	grep -q '^locks: mutex and wait queue self-test ok' $(SERIAL_LOG)
 	grep -q '^locks: scratch self-test ok' $(SERIAL_LOG)

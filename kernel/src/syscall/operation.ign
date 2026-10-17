@@ -109,4 +109,7 @@ namespace Syscall::Operation {
 
   /// Wait on or wake a user word.
   const FUTEX: u8 = 30;
+
+  /// Report the processor the caller runs on.
+  const GET_CPU: u8 = 31;
 }

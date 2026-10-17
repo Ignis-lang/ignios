@@ -1,7 +1,8 @@
 //!
 //! # Linux Threads
 //!
-//! `clone` for threads, `gettid`, `set_tid_address` and `arch_prctl`.
+//! `clone` for threads, `gettid`, `set_tid_address`, `arch_prctl` and
+//! `getcpu`.
 //!
 //! ## clone
 //!
@@ -42,6 +43,7 @@
 //! | 186 | `gettid`          | the Linux thread id; the process id in the first thread |
 //! | 218 | `set_tid_address` | records the clear-child-tid address, returns the tid |
 //! | 158 | `arch_prctl`      | `ARCH_SET_FS` (0x1002), `ARCH_GET_FS` (0x1003); an FS base outside the user half `-EPERM`, a bad output pointer `-EFAULT`, another code `-EINVAL` |
+//! | 309 | `getcpu`          | `getcpu(cpu, node, cache)`: writes the processor index (`Arch::CpuLocal::index`) to `cpu` and 0 to `node` as 32-bit words when they are not null, ignores `cache`, returns 0; a bad pointer `-EFAULT`. The thread may move to another processor right after |
 //!
 //! At the thread's exit the kernel writes a 32-bit 0 to the clear-child-tid
 //! address and wakes one futex waiter on it (`Proc::Process::finishThread`).
@@ -221,5 +223,23 @@ namespace Syscall::Linux {
     }
 
     return Linux::failure(Linux::EINVAL);
+  }
+
+  /// `getcpu(cpu, node, cache)`: the processor index and node 0, each
+  /// written as a 32-bit word when its pointer is not null.
+  function getCpu(cpu: u64, node: u64): u64 {
+    let root: u64 = Proc::Process::currentRoot();
+    let index: u32 = Arch::CpuLocal::index() as u32;
+    let zero: u32 = 0;
+
+    if (cpu != 0 && !Proc::User::copyToUser(root, cpu, &index as *u8, 4)) {
+      return Linux::failure(Linux::EFAULT);
+    }
+
+    if (node != 0 && !Proc::User::copyToUser(root, node, &zero as *u8, 4)) {
+      return Linux::failure(Linux::EFAULT);
+    }
+
+    return 0;
   }
 }

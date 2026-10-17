@@ -55,6 +55,7 @@ commands=(
   "rmdir /tmp"
   "ls /"
   "pwd"
+  "threadtest"
   "cat|hello from the keyboard|^D"
   "cat|^D"
   "cd /etc"
@@ -105,6 +106,7 @@ rmdir
 sh
 shutdown
 stress
+threadtest
 touch
 S0
 > mkdir /tmp
@@ -167,6 +169,9 @@ dev
 S0
 > pwd
 /
+S0
+> threadtest
+threadtest: futex mutex, join, TLS, processors at once and munmap between threads behave as expected
 S0
 > cat
 hello from the keyboard

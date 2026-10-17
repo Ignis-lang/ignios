@@ -153,6 +153,8 @@ namespace Syscall {
       (*frame).rax = Linux::futex(first, second, third, fourth, fifth, sixth);
     } else if (operation == Operation::ARCH_CONTROL) {
       (*frame).rax = Linux::archPrctl(first, second);
+    } else if (operation == Operation::GET_CPU) {
+      (*frame).rax = Linux::getCpu(first, second);
     } else if (operation == Operation::GET_PID) {
       (*frame).rax = Proc::Process::currentId();
     } else if (operation == Operation::YIELD) {

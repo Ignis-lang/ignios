@@ -1,14 +1,15 @@
 # The Linux flavour of the IgniOS user standard library. A program that
 # names it with `std_path = "../lib/linux"` speaks the Linux x86_64 system
-# call ABI and is linked after this directory's `start.S`.
+# call ABI and is linked after this directory's `start.S` and `thread.S`.
 #
-# `sys` is this flavour's own; `io`, `args`, `alloc` and `panic` are shared with the
+# `sys` and `thread` are this flavour's own; `io`, `args`, `alloc` and `panic` are shared with the
 # native flavour (../native) and reach the kernel only through `std::sys`,
 # which each flavour resolves to its own `sys.ign`.
 
 # Import name to source file: `import Sys from "std::sys"` reads sys.ign.
 [modules]
 sys = "sys.ign"
+thread = "thread.ign"
 io = "../common/io.ign"
 args = "../common/args.ign"
 alloc = "../common/alloc.ign"

@@ -1,0 +1,637 @@
+//!
+//! # threadtest
+//!
+//! Ring 3 checks of threads in one process: `clone`, the futex mutex of
+//! `std::thread`, join through the cleared tid, per-thread FS base, `getcpu`
+//! and `munmap` between siblings.
+//!
+//! ## Modes
+//!
+//! Without arguments the program runs every check and exits with the number
+//! of the first one that failed, 0 when all passed. `one-cpu` runs every
+//! check but the overlap ones (30-31), which need two processors; the kernel
+//! test passes it when only one is online. Any other argument does one thing
+//! the kernel must stop; exiting normally (status 1) means the kernel let it
+//! through, and the siblings of the thread that did it would otherwise run
+//! on.
+//!
+//! | Argument     | Does                                                    | Expected |
+//! |--------------|---------------------------------------------------------|----------|
+//! | `unmap-read` | a thread reads a page in a loop while the first thread, on another processor when there is one, unmaps it; a read that works after `munmap` returned exits with 3 | 139 |
+//! | `exit-group` | a thread calls `exit_group(42)` while three siblings sleep in futex WAIT for ever | 42 |
+//! | `fault`      | a thread writes to a read-only page while three siblings spin | 139 |
+//!
+//! ## Checks
+//!
+//! | Status | Check                                                                |
+//! |--------|----------------------------------------------------------------------|
+//! | 10     | `spawn` of a thread failed                                           |
+//! | 20     | 4 threads add 1 to a shared counter 20000 times each under the futex mutex: the total is exactly 80000 |
+//! | 30     | the threads saw at least two processors through `getcpu`             |
+//! | 31     | two threads ran at once on two processors: one saw a sibling's progress counter move while it stayed on one processor and the sibling was on another, within 3 s |
+//! | 40     | a running thread's tid word holds a tid other than the process id   |
+//! | 41     | join through the cleared tid returns, and the region is unmapped (0) |
+//! | 42     | after join, the thread's work is done: it stored its own `gettid`, which equals the tid the kernel wrote |
+//! | 50     | each thread's `%fs:0` is the address of its own block               |
+//! | 51     | each thread's `%fs:8` keeps the value it stored across a sleep, distinct across threads |
+//! | 52     | the blocks of the threads are distinct                               |
+//! | 60     | the first thread reads what a sibling stored in a mapping the sibling made |
+//! | 61     | `munmap` of that page by the first thread while the sibling still runs, without touching it, is 0 |
+//! | 62     | a new mapping after it reads zeros, and the sibling joins            |
+
+import Args from "std::args";
+import Io from "std::io";
+import Sys from "std::sys";
+import Thread from "std::thread";
+import _ from "std::panic";
+
+/// 4 KiB.
+const PAGE: u64 = 4096;
+
+/// Threads of each check.
+const THREADS: u64 = 4;
+
+/// Additions of each thread to the shared counter.
+const ADDITIONS: u64 = 20000;
+
+/// Additions between two `getcpu` calls of a counting thread.
+const CPU_SAMPLE: u64 = 64;
+
+/// Stores of its own progress counter a thread makes between its two reads
+/// of a sibling's.
+const PEER_WINDOW: u64 = 2000;
+
+/// 10 ms sleeps the first thread waits for the overlap: 3 s.
+const OVERLAP_WAITS: u64 = 300;
+
+/// 10 ms sleeps the first thread waits in a mode before it reports that the
+/// kernel let the thread through: 2 s.
+const MODE_WAITS: u64 = 200;
+
+/// The status of `unmap-read` when the reader read the page after
+/// `munmap` returned: a processor kept a stale translation.
+const STALE_READ: u64 = 3;
+
+/// The base of the values the TLS check stores.
+const TLS_VALUE: u64 = 1000;
+
+/// What the threads share.
+record State {
+  /// The futex mutex word of the counter.
+  static mut lockWord: u32;
+
+  /// The counter the threads add to.
+  static mut counter: u64;
+
+  /// Counting threads that reached the start line.
+  static mut ready: u64;
+
+  /// One bit per processor each thread saw, by thread.
+  static mut cpuMasks: u64[4];
+
+  /// The progress counter of each thread in the overlap check.
+  static mut progress: u64[4];
+
+  /// The processor each thread last saw in the overlap check, plus 1; 0
+  /// before it ran.
+  static mut cpuOf: u64[4];
+
+  /// 1 once a thread saw a sibling run on another processor at once.
+  static mut overlapped: u64;
+
+  /// The two processors of the overlap, plus 1.
+  static mut overlapFirst: u64;
+  static mut overlapSecond: u64;
+
+  /// Set by the first thread to end the overlap workers.
+  static mut stop: u64;
+
+  /// The handles of the threads of the current check.
+  static mut handles: u64[4];
+
+  /// The `gettid` each joined thread stored.
+  static mut tids: u64[4];
+
+  /// The `%fs:0` each thread read.
+  static mut selves: u64[4];
+
+  /// The `%fs:8` each thread read back.
+  static mut values: u64[4];
+
+  /// The page of the `munmap` checks.
+  static mut page: u64;
+
+  /// Steps of the `munmap` and mode checks.
+  static mut stage: u64;
+
+  /// The processor the reader of `unmap-read` last saw, plus 1.
+  static mut readerCpu: u64;
+
+  /// Set by the first thread of `unmap-read` once `munmap` returned.
+  static mut unmapped: u64;
+
+  /// The word the sleepers of `exit-group` wait on, always 0.
+  static mut forever: u32;
+}
+
+/// Exits with `status` unless `got` equals `wanted`, after printing both.
+function expect(got: i64, wanted: i64, status: u64): void {
+  if (got != wanted) {
+    Io::print("threadtest: check ");
+    Io::printNumber(status as i64);
+    Io::print(" got ");
+    Io::printNumber(got);
+    Io::print(", expected ");
+    Io::printNumber(wanted);
+    Io::print("\n");
+    Sys::exit(status);
+  }
+}
+
+/// Exits with `status` unless `condition` holds.
+function require(condition: boolean, status: u64): void {
+  if (!condition) {
+    Io::print("threadtest: check ");
+    Io::printNumber(status as i64);
+    Io::print(" failed\n");
+    Sys::exit(status);
+  }
+}
+
+/// The address of word `index` of the static array at `array`.
+function slot(array: *mut u64, index: u64): *mut u64 {
+  return @pointerFromInteger<*mut u64>(@integerFromPointer(array) + index * 8);
+}
+
+/// Reads a shared word.
+function load(address: *mut u64): u64 {
+  return @readVolatile<u64>(address);
+}
+
+/// Writes a shared word.
+function store(address: *mut u64, value: u64): void {
+  @writeVolatile<u64>(address, value);
+}
+
+/// The byte at the user address `address`.
+function peek(address: u64): u8 {
+  return @readVolatile<u8>(@pointerFromInteger<*mut u8>(address));
+}
+
+/// Stores `value` at the user address `address`.
+function poke(address: u64, value: u8): void {
+  @writeVolatile<u8>(@pointerFromInteger<*mut u8>(address), value);
+}
+
+/// The counter's mutex.
+function counterLock(): *mut Thread::Mutex {
+  return @pointerFromInteger<*mut Thread::Mutex>(@integerFromPointer(&mut State::lockWord as *mut u32));
+}
+
+/// Sleeps one 10 ms tick.
+function tick(): void {
+  Sys::sleep(0, 10000000);
+}
+
+/// Starts a thread or exits with 10.
+function start(entry: u64, argument: u64): u64 {
+  let handle: i64 = Thread::spawn(entry, argument);
+
+  require(handle > 0, 10);
+
+  return handle as u64;
+}
+
+/// Records the processor the caller runs on in the mask of thread `index`.
+function markCpu(index: u64): u64 {
+  let cpu: u64 = Thread::currentCpu();
+  let mask: *mut u64 = slot(&mut State::cpuMasks as *mut u64, index);
+
+  store(mask, load(mask) | (1 << cpu));
+
+  return cpu;
+}
+
+/// Thread `index` of the counter check: waits until every counting thread
+/// runs, so they add at the same time instead of one after the other, then
+/// adds 1 to the shared counter `ADDITIONS` times, each under the mutex, a
+/// plain read and write that loses additions without it.
+function countWorker(index: u64): u64 {
+  let counter: *mut u64 = &mut State::counter as *mut u64;
+  let ready: *mut u64 = &mut State::ready as *mut u64;
+  let mut done: u64 = 0;
+
+  @atomicRmw<u64>(ready, :add, 1, :seqCst);
+
+  while (@atomicLoad<u64>(ready, :acquire) < THREADS) {
+  }
+
+  while (done < ADDITIONS) {
+    if (done % CPU_SAMPLE == 0) {
+      markCpu(index);
+    }
+
+    Thread::lock(counterLock());
+    store(counter, load(counter) + 1);
+    Thread::unlock(counterLock());
+    done += 1;
+  }
+
+  return 0;
+}
+
+/// Thread `index` of the overlap check. Until told to stop, it reads the
+/// progress counter of the next thread, makes `PEER_WINDOW` stores to its
+/// own and reads the next thread's again. When that one moved while this
+/// thread stayed on one processor and the next thread was on another one
+/// the whole time, both ran at once.
+function overlapWorker(index: u64): u64 {
+  let progress: *mut u64 = &mut State::progress as *mut u64;
+  let cpuOf: *mut u64 = &mut State::cpuOf as *mut u64;
+  let peer: u64 = (index + 1) % THREADS;
+  let mine: *mut u64 = slot(progress, index);
+
+  while (load(&mut State::stop as *mut u64) == 0) {
+    let before: u64 = markCpu(index) + 1;
+
+    store(slot(cpuOf, index), before);
+
+    let peerCpuBefore: u64 = load(slot(cpuOf, peer));
+    let peerBefore: u64 = load(slot(progress, peer));
+    let mut round: u64 = 0;
+
+    while (round < PEER_WINDOW) {
+      store(mine, load(mine) + 1);
+      round += 1;
+    }
+
+    let peerAfter: u64 = load(slot(progress, peer));
+    let peerCpuAfter: u64 = load(slot(cpuOf, peer));
+    let after: u64 = Thread::currentCpu() + 1;
+
+    if (before == after && peerAfter != peerBefore && peerCpuBefore == peerCpuAfter && peerCpuBefore != 0 && peerCpuBefore != before) {
+      store(&mut State::overlapFirst as *mut u64, before);
+      store(&mut State::overlapSecond as *mut u64, peerCpuBefore);
+      store(&mut State::overlapped as *mut u64, 1);
+    }
+  }
+
+  return 0;
+}
+
+/// Thread `index` of the join check: sleeps 30 ms, so the join has to wait,
+/// then stores its `gettid` and exits with 5 through `exit` (60).
+function joinWorker(index: u64): u64 {
+  Sys::sleep(0, 30000000);
+  store(slot(&mut State::tids as *mut u64, index), Thread::currentTid());
+
+  return 5;
+}
+
+/// Thread `index` of the TLS check: reads `%fs:0`, stores its own value in
+/// `%fs:8`, sleeps so the others run and the processor switches threads,
+/// and reads it back.
+function tlsWorker(index: u64): u64 {
+  store(slot(&mut State::selves as *mut u64, index), Thread::selfAddress());
+  Thread::setLocalValue(TLS_VALUE + index);
+  Sys::sleep(0, 20000000);
+  Sys::yield();
+  store(slot(&mut State::values as *mut u64, index), Thread::localValue());
+
+  return 0;
+}
+
+/// The sibling of the `munmap` check: maps a page, stores 7 in it, hands
+/// it to the first thread and spins, without touching the page again, until
+/// the first thread has unmapped it.
+function mapWorker(argument: u64): u64 {
+  let page: i64 = Sys::mapAnonymous(PAGE);
+
+  if (page < 0) {
+    return 1;
+  }
+
+  poke(page as u64, 7);
+  store(&mut State::page as *mut u64, page as u64);
+  store(&mut State::stage as *mut u64, 1);
+
+  while (load(&mut State::stage as *mut u64) != 2) {
+  }
+
+  return 0;
+}
+
+/// Starts `THREADS` threads at `entry`, with their index as the argument,
+/// and records their handles.
+function startAll(entry: u64): void {
+  let mut index: u64 = 0;
+
+  while (index < THREADS) {
+    store(slot(&mut State::handles as *mut u64, index), start(entry, index));
+    index += 1;
+  }
+}
+
+/// Joins the threads `startAll` started; each join must give 0 or exits
+/// with `status`.
+function joinAll(status: u64): void {
+  let mut index: u64 = 0;
+
+  while (index < THREADS) {
+    expect(Thread::join(load(slot(&mut State::handles as *mut u64, index))), 0, status);
+    index += 1;
+  }
+}
+
+/// Join through the cleared tid, after each thread's `exit`.
+function checkJoin(): void {
+  startAll(Thread::Asm::ignis_thread_function_address(joinWorker));
+
+  let mut index: u64 = 0;
+  let mut tids: u64[4];
+
+  while (index < THREADS) {
+    let tid: u32 = Thread::tidOf(load(slot(&mut State::handles as *mut u64, index)));
+
+    require(tid != 0 && (tid as i64) != Sys::getPid(), 40);
+    tids[index] = tid as u64;
+    index += 1;
+  }
+
+  joinAll(41);
+  index = 0;
+
+  while (index < THREADS) {
+    expect(load(slot(&mut State::tids as *mut u64, index)) as i64, tids[index] as i64, 42);
+    index += 1;
+  }
+}
+
+/// Each thread has its own FS base and block.
+function checkTls(): void {
+  startAll(Thread::Asm::ignis_thread_function_address(tlsWorker));
+  joinAll(50);
+
+  let mut index: u64 = 0;
+
+  while (index < THREADS) {
+    let handle: u64 = load(slot(&mut State::handles as *mut u64, index));
+
+    expect(load(slot(&mut State::selves as *mut u64, index)) as i64, handle as i64, 50);
+    expect(load(slot(&mut State::values as *mut u64, index)) as i64, (TLS_VALUE + index) as i64, 51);
+
+    let mut other: u64 = 0;
+
+    while (other < index) {
+      require(load(slot(&mut State::handles as *mut u64, other)) != handle, 52);
+      other += 1;
+    }
+
+    index += 1;
+  }
+}
+
+/// An exact counter under the futex mutex.
+function checkCounter(): void {
+  store(&mut State::counter as *mut u64, 0);
+  store(&mut State::ready as *mut u64, 0);
+  startAll(Thread::Asm::ignis_thread_function_address(countWorker));
+  joinAll(20);
+  expect(load(&mut State::counter as *mut u64) as i64, (THREADS * ADDITIONS) as i64, 20);
+}
+
+/// The number of processors any thread saw.
+function cpusSeen(): u64 {
+  let mut union: u64 = 0;
+  let mut index: u64 = 0;
+  let mut count: u64 = 0;
+
+  while (index < THREADS) {
+    union = union | load(slot(&mut State::cpuMasks as *mut u64, index));
+    index += 1;
+  }
+
+  while (union != 0) {
+    count += union & 1;
+    union = union >> 1;
+  }
+
+  return count;
+}
+
+/// Threads of one process run on two processors at once.
+function checkOverlap(): void {
+  startAll(Thread::Asm::ignis_thread_function_address(overlapWorker));
+
+  let mut waits: u64 = 0;
+
+  while (load(&mut State::overlapped as *mut u64) == 0 && waits < OVERLAP_WAITS) {
+    tick();
+    waits += 1;
+  }
+
+  store(&mut State::stop as *mut u64, 1);
+  joinAll(31);
+  require(cpusSeen() >= 2, 30);
+  require(load(&mut State::overlapped as *mut u64) == 1, 31);
+}
+
+/// `munmap` of a page a running sibling mapped and touched.
+function checkUnmap(): void {
+  store(&mut State::stage as *mut u64, 0);
+
+  let handle: u64 = start(Thread::Asm::ignis_thread_function_address(mapWorker), 0);
+
+  while (load(&mut State::stage as *mut u64) != 1) {
+    Sys::yield();
+  }
+
+  let page: u64 = load(&mut State::page as *mut u64);
+
+  require(peek(page) == 7, 60);
+  expect(Sys::munmap(page, PAGE), 0, 61);
+  store(&mut State::stage as *mut u64, 2);
+  expect(Thread::join(handle), 0, 62);
+
+  let fresh: i64 = Sys::mapAnonymous(PAGE);
+
+  require(fresh > 0 && peek(fresh as u64) == 0, 62);
+  expect(Sys::munmap(fresh as u64, PAGE), 0, 62);
+}
+
+/// The reader of `unmap-read`: reads the page until the kernel stops it,
+/// and publishes the processor it runs on. It reads the `unmapped` flag
+/// before each read of the page: a read that works after the flag was set
+/// used a translation the `munmap` should have removed, and the process
+/// exits with `STALE_READ`.
+function readWorker(argument: u64): u64 {
+  let page: u64 = load(&mut State::page as *mut u64);
+  let readerCpu: *mut u64 = &mut State::readerCpu as *mut u64;
+  let mut rounds: u64 = 0;
+
+  store(readerCpu, Thread::currentCpu() + 1);
+  store(&mut State::stage as *mut u64, 1);
+
+  while (true) {
+    let unmapped: u64 = load(&mut State::unmapped as *mut u64);
+
+    if (peek(page) != 7) {
+      return 1;
+    }
+
+    if (unmapped == 1) {
+      Io::print("threadtest: a sibling read a page after munmap returned\n");
+      Sys::exit(STALE_READ);
+    }
+
+    rounds += 1;
+
+    if (rounds % 4096 == 0) {
+      store(readerCpu, Thread::currentCpu() + 1);
+    }
+  }
+
+  return 1;
+}
+
+/// A sleeper of `exit-group`: waits on a word that never changes.
+function sleepWorker(argument: u64): u64 {
+  while (true) {
+    Sys::futexWait(&mut State::forever as *u32, 0, null);
+  }
+
+  return 1;
+}
+
+/// The thread of `exit-group` that ends the process.
+function exitWorker(argument: u64): u64 {
+  Sys::exit(42);
+}
+
+/// A sibling of `fault`: spins.
+function spinWorker(argument: u64): u64 {
+  let progress: *mut u64 = slot(&mut State::progress as *mut u64, argument);
+
+  while (true) {
+    store(progress, load(progress) + 1);
+  }
+
+  return 1;
+}
+
+/// The thread of `fault` that writes to a read-only page.
+function faultWorker(argument: u64): u64 {
+  Sys::sleep(0, 20000000);
+
+  let page: i64 = Sys::mmap(PAGE, Sys::PROT_READ, Sys::MAP_PRIVATE | Sys::MAP_ANONYMOUS, 0xFFFFFFFFFFFFFFFF, 0);
+
+  poke(page as u64, 1);
+
+  return 1;
+}
+
+/// True when the NUL-terminated `text` is `word`.
+function modeIs(text: *u8, word: str): boolean {
+  let length: u64 = Args::length(text);
+  let mut index: u64 = 0;
+
+  while (index < length) {
+    if (*(text + index) != *(word as *u8 + index)) {
+      return false;
+    }
+
+    index += 1;
+  }
+
+  return *(word as *u8 + length) == 0;
+}
+
+/// Waits `MODE_WAITS` ticks for the kernel to end the process, and reports
+/// that it did not.
+function allowed(): u64 {
+  let mut waits: u64 = 0;
+
+  while (waits < MODE_WAITS) {
+    tick();
+    waits += 1;
+  }
+
+  Io::print("threadtest: the kernel allowed it\n");
+
+  return 1;
+}
+
+/// Does the forbidden thing `mode` names. Returns only when the kernel let
+/// it happen.
+function misbehave(mode: *u8): u64 {
+  if (modeIs(mode, "unmap-read")) {
+    let page: i64 = Sys::mapAnonymous(PAGE);
+
+    require(page > 0, 10);
+    poke(page as u64, 7);
+    store(&mut State::page as *mut u64, page as u64);
+    start(Thread::Asm::ignis_thread_function_address(readWorker), 0);
+
+    while (load(&mut State::stage as *mut u64) != 1) {
+      Sys::yield();
+    }
+
+    // Unmap from another processor than the reader's when there is one,
+    // so only the shootdown can drop the reader's translation.
+    let mut waits: u64 = 0;
+
+    while (Thread::currentCpu() + 1 == load(&mut State::readerCpu as *mut u64) && waits < MODE_WAITS) {
+      tick();
+      waits += 1;
+    }
+
+    Sys::munmap(page as u64, PAGE);
+    store(&mut State::unmapped as *mut u64, 1);
+  } else if (modeIs(mode, "exit-group")) {
+    start(Thread::Asm::ignis_thread_function_address(sleepWorker), 0);
+    start(Thread::Asm::ignis_thread_function_address(sleepWorker), 1);
+    start(Thread::Asm::ignis_thread_function_address(sleepWorker), 2);
+    Sys::sleep(0, 50000000);
+    start(Thread::Asm::ignis_thread_function_address(exitWorker), 3);
+  } else if (modeIs(mode, "fault")) {
+    start(Thread::Asm::ignis_thread_function_address(spinWorker), 0);
+    start(Thread::Asm::ignis_thread_function_address(spinWorker), 1);
+    start(Thread::Asm::ignis_thread_function_address(spinWorker), 2);
+    start(Thread::Asm::ignis_thread_function_address(faultWorker), 3);
+  } else {
+    Io::print("threadtest: unknown mode\n");
+    return 2;
+  }
+
+  return allowed();
+}
+
+/// Called by `_start` with argc and argv.
+@externName("ignis_main")
+function main(count: u64, values: *u64): u64 {
+  let mut oneCpu: boolean = false;
+
+  if (count > 1) {
+    if (!modeIs(Args::get(values, 1), "one-cpu")) {
+      return misbehave(Args::get(values, 1));
+    }
+
+    oneCpu = true;
+  }
+
+  checkJoin();
+  checkTls();
+  checkCounter();
+
+  if (oneCpu) {
+    Io::print("threadtest: overlap check skipped, one processor\n");
+  } else {
+    checkOverlap();
+  }
+
+  checkUnmap();
+
+  Io::print("threadtest: futex mutex, join, TLS, processors at once and munmap between threads behave as expected\n");
+
+  return 0;
+}

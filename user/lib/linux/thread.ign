@@ -1,0 +1,234 @@
+//!
+//! # Threads (user side, Linux flavour)
+//!
+//! Threads of the calling process over `clone`, `futex` and `exit`, a futex
+//! mutex and the per-thread block that `%fs` names.
+//!
+//! ## Overview
+//!
+//! `spawn` maps one anonymous region per thread: the stack, and at its top
+//! the thread's `Thread::Block`. The block is the thread's TLS: `clone` sets the FS
+//! base to it (`CLONE_SETTLS`) and its first word points at itself, so
+//! `%fs:0` is the block's address, as the x86_64 TLS ABI wants. The block
+//! also holds the tid word: the kernel writes the child's tid there before
+//! the child exists (`CLONE_PARENT_SETTID`) and writes 0 there and wakes one
+//! futex waiter when the thread ends (`CLONE_CHILD_CLEARTID`). `join` sleeps
+//! on that word until it is 0, then unmaps the region.
+//!
+//! ```text
+//!   base                                   base + STACK_BYTES - BLOCK_BYTES
+//!   │ stack, grows down ◄──────────────────│ function, argument │ Block      │
+//!   └──────────────────────────────────────┴────────────────────┴────────────┘
+//!                                           ▲ RSP of the child   ▲ FS base
+//! ```
+//!
+//! The child starts in `ignis_thread_clone` (thread.S), which calls the
+//! function with its argument and passes the result to `exit` (60), which
+//! ends that thread only. The region has no guard page: IgniOS has neither
+//! `mprotect` nor `MAP_FIXED`, so a stack overflow runs into whatever lies
+//! below the region.
+//!
+//! A thread function is a capture-free `(u64) -> u64` named at the call
+//! site:
+//!
+//! ```ignis
+//! let thread: i64 = Thread::spawn(Thread::Asm::ignis_thread_function_address(work), 7);
+//! ...
+//! Thread::join(thread as u64);
+//! ```
+//!
+//! ## Mutex
+//!
+//! `Thread::Mutex` is the three-state futex lock: 0 free, 1 locked, 2 locked with
+//! possible waiters. `lock` takes a free word with one compare-exchange;
+//! otherwise it swaps in 2 and sleeps in `FUTEX_WAIT` while the word stays 2.
+//! `unlock` subtracts 1 and calls `FUTEX_WAKE` only when the word was 2, so
+//! an uncontended lock and unlock make no system call.
+//!
+//! `std::alloc` is not thread safe: threads must not allocate at the same
+//! time.
+
+import Sys from "std::sys";
+
+/// The thread functions.
+export namespace Thread {
+  /// The per-thread block at the top of a thread's region, which its FS base
+  /// names.
+  @cLayout
+  record Block {
+    /// The block's own address, read as `%fs:0`.
+    public selfPointer: u64;
+
+    /// A word for the thread's own use, read as `%fs:8`; 0 at the start.
+    public value: u64;
+
+    /// The thread id until the thread ends, then 0 (written by the kernel).
+    public tid: u32;
+
+    /// Padding.
+    public reserved: u32;
+
+    /// The start of the thread's region.
+    public base: u64;
+
+    /// The length of the thread's region.
+    public length: u64;
+  }
+
+  /// A futex lock word: 0 free, 1 locked, 2 locked with possible waiters.
+  @cLayout
+  record Mutex {
+    /// The lock word.
+    public state: u32;
+  }
+
+  /// Functions implemented in thread.S.
+  extern Asm {
+    /// `clone(flags, stack, parent_tid, child_tid, tls)`. The child calls
+    /// the function at `stack` with the argument at `stack + 8` and exits
+    /// with its result; the parent gets the child's tid or -errno.
+    function ignis_thread_clone(flags: u64, stack: u64, parentTid: u64, childTid: u64, tls: u64): i64;
+
+    /// The address of a thread function, which must be named at the call
+    /// site.
+    function ignis_thread_function_address(entry: (u64) -> u64): u64;
+  }
+
+  /// Bytes of a thread's region, the block included.
+  const STACK_BYTES: u64 = 65536;
+
+  /// Bytes reserved for the block at the top of the region, a multiple of
+  /// 16 so the stack below it stays aligned.
+  const BLOCK_BYTES: u64 = 64;
+
+  /// `CLONE_VM | CLONE_FS | CLONE_FILES | CLONE_SIGHAND | CLONE_THREAD |
+  /// CLONE_SYSVSEM`, the flags every thread needs.
+  const CLONE_THREAD_SET: u64 = 0x50F00;
+
+  /// `CLONE_SETTLS`: the child's FS base is the `tls` argument.
+  const CLONE_SETTLS: u64 = 0x80000;
+
+  /// `CLONE_PARENT_SETTID`: the kernel writes the child's tid to
+  /// `parent_tid`.
+  const CLONE_PARENT_SETTID: u64 = 0x100000;
+
+  /// `CLONE_CHILD_CLEARTID`: the kernel clears `child_tid` and wakes a
+  /// waiter on it when the child ends.
+  const CLONE_CHILD_CLEARTID: u64 = 0x200000;
+
+  /// Starts a thread that runs the function at `entry` with `argument`.
+  /// Returns the address of its `Thread::Block`, the handle `join` takes, or
+  /// -errno when the region or the thread could not be made.
+  function spawn(entry: u64, argument: u64): i64 {
+    let base: i64 = Sys::mapAnonymous(STACK_BYTES);
+
+    if (base < 0) {
+      return base;
+    }
+
+    let blockAddress: u64 = base as u64 + STACK_BYTES - BLOCK_BYTES;
+    let block: *mut Thread::Block = @pointerFromInteger<*mut Thread::Block>(blockAddress);
+    let stack: u64 = blockAddress - 16;
+
+    (*block).selfPointer = blockAddress;
+    (*block).value = 0;
+    (*block).tid = 0;
+    (*block).base = base as u64;
+    (*block).length = STACK_BYTES;
+    *@pointerFromInteger<*mut u64>(stack) = entry;
+    *@pointerFromInteger<*mut u64>(stack + 8) = argument;
+
+    let tidAddress: u64 = @integerFromPointer(&mut (*block).tid as *mut u32);
+    let flags: u64 = CLONE_THREAD_SET | CLONE_SETTLS | CLONE_PARENT_SETTID | CLONE_CHILD_CLEARTID;
+    let tid: i64 = Asm::ignis_thread_clone(flags, stack, tidAddress, tidAddress, blockAddress);
+
+    if (tid < 0) {
+      Sys::munmap(base as u64, STACK_BYTES);
+      return tid;
+    }
+
+    return blockAddress as i64;
+  }
+
+  /// The tid of the thread `handle` while it runs, 0 once it has ended.
+  function tidOf(handle: u64): u32 {
+    let block: *mut Thread::Block = @pointerFromInteger<*mut Thread::Block>(handle);
+
+    return @atomicLoad<u32>(&mut (*block).tid as *mut u32, :acquire);
+  }
+
+  /// Waits for the thread `handle` to end, through the tid word the kernel
+  /// clears, then unmaps its region. Returns the `munmap` result.
+  function join(handle: u64): i64 {
+    let block: *mut Thread::Block = @pointerFromInteger<*mut Thread::Block>(handle);
+    let word: *mut u32 = &mut (*block).tid as *mut u32;
+    let mut tid: u32 = @atomicLoad<u32>(word, :acquire);
+
+    while (tid != 0) {
+      Sys::futexWait(word as *u32, tid, null);
+      tid = @atomicLoad<u32>(word, :acquire);
+    }
+
+    return Sys::munmap((*block).base, (*block).length);
+  }
+
+  /// The calling thread's block address, `%fs:0`. Only for a thread made by
+  /// `spawn`: the first thread has no block and FS base 0.
+  function selfAddress(): u64 {
+    return asm () -> (value: u64 in rax) { mov {value}, qword ptr fs:[0] };
+  }
+
+  /// The calling thread's own word, `%fs:8`. Only for a thread made by
+  /// `spawn`.
+  function localValue(): u64 {
+    return asm () -> (value: u64 in rax) { mov {value}, qword ptr fs:[8] };
+  }
+
+  /// Sets the calling thread's own word. Only for a thread made by `spawn`.
+  function setLocalValue(value: u64): void {
+    asm (value in rax) clobber(memory) { mov qword ptr fs:[8], {value} }
+  }
+
+  /// The calling thread's id (`gettid`).
+  function currentTid(): u64 {
+    return Sys::getTid() as u64;
+  }
+
+  /// The index of the processor the caller runs on (`getcpu`).
+  function currentCpu(): u64 {
+    let mut cpu: u32 = 0;
+
+    Sys::getCpu(&mut cpu as *mut u32, null);
+
+    return cpu as u64;
+  }
+
+  /// Takes `mutex`, sleeping while another thread holds it.
+  function lock(mutex: *mut Thread::Mutex): void {
+    let word: *mut u32 = &mut (*mutex).state as *mut u32;
+    let mut state: u32 = @atomicCompareExchange<u32>(word, 0, 1, :acquire, :relaxed);
+
+    if (state == 0) {
+      return;
+    }
+
+    if (state != 2) {
+      state = @atomicRmw<u32>(word, :swap, 2, :acquire);
+    }
+
+    while (state != 0) {
+      Sys::futexWait(word as *u32, 2, null);
+      state = @atomicRmw<u32>(word, :swap, 2, :acquire);
+    }
+  }
+
+  /// Releases `mutex`, waking one sleeper when there may be one.
+  function unlock(mutex: *mut Thread::Mutex): void {
+    let word: *mut u32 = &mut (*mutex).state as *mut u32;
+
+    if (@atomicRmw<u32>(word, :sub, 1, :release) != 1) {
+      @atomicStore<u32>(word, 0, :release);
+      Sys::futexWake(word as *u32, 1);
+    }
+  }
+}

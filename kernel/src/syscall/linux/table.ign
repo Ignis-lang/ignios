@@ -19,6 +19,7 @@
 //! | 202      | `futex`       | `Operation::FUTEX`   | WAIT and WAKE (`linux/futex.ign`) |
 //! | 218      | `set_tid_address` | `Operation::SET_TID_ADDRESS` | records the address, returns the tid |
 //! | 231      | `exit_group`  | `Operation::EXIT`    | ends every thread, status & 0xFF |
+//! | 309      | `getcpu`      | `Operation::GET_CPU` | the processor index and node 0; the cache argument is ignored |
 //!
 //! Every other number maps to `Operation::NONE` and fails with `-ENOSYS` (-38).
 //! The numbers come from the Linux x86_64 syscall table,
@@ -114,6 +115,9 @@ namespace Syscall::Linux {
   /// `unlinkat`, number 263.
   const NUMBER_UNLINKAT: u64 = 263;
 
+  /// `getcpu`, number 309.
+  const NUMBER_GETCPU: u64 = 309;
+
   /// Fills the table of the Linux ABI.
   function initialize(): void {
     let table: *mut u8 = tableBase();
@@ -144,6 +148,7 @@ namespace Syscall::Linux {
     *(table + NUMBER_SET_TID_ADDRESS) = Operation::SET_TID_ADDRESS;
     *(table + NUMBER_FUTEX) = Operation::FUTEX;
     *(table + NUMBER_EXIT_GROUP) = Operation::EXIT;
+    *(table + NUMBER_GETCPU) = Operation::GET_CPU;
   }
 
   /// The first byte of the table.

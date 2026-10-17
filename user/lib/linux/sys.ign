@@ -142,6 +142,9 @@ export namespace Sys {
   /// Linux system call number 202.
   const FUTEX: u64 = 202;
 
+  /// Linux system call number 309.
+  const GETCPU: u64 = 309;
+
   /// `futex` operation: sleep while the word holds a value.
   const FUTEX_WAIT: u64 = 0;
 
@@ -353,6 +356,13 @@ export namespace Sys {
   /// thread.
   function getTid(): i64 {
     return call0(GETTID);
+  }
+
+  /// Writes the index of the processor the caller runs on to `*cpu` and
+  /// its node, 0, to `*node` (`getcpu`); either may be null. Returns 0 or
+  /// -EFAULT. The thread may move to another processor right after.
+  function getCpu(cpu: *mut u32, node: *mut u32): i64 {
+    return call3(GETCPU, @integerFromPointer(cpu), @integerFromPointer(node), 0);
   }
 
   /// Records `address` as the word the kernel clears when the calling

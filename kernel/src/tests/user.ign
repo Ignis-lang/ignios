@@ -22,6 +22,7 @@
 //! | memory            | `/bin/mmtest` checks `mmap`, `munmap` and `std::alloc`; four forbidden accesses to mappings are killed; a double free panics; nothing leaks; no TLB shootdown is sent (one thread) |
 //! | native            | `/bin/nativetest` checks every native call and status code; the loader refuses an IgniOS note of another version and one that runs past the file |
 //! | stress            | `/bin/stress` runs four processes on the file tree and memory at once; a timer tick lands inside a system call; nothing leaks |
+//! | threads           | `/bin/threadtest`: an exact counter under a futex mutex, threads on two processors at once (skipped with one), join through the cleared tid, per-thread FS base, `munmap` between siblings; a sibling reading an unmapped page, `exit_group(42)` and a fault in one thread end the whole process; nothing leaks |
 //! | clone             | a thread through `clone`: registers, stack, FS base on several processors, tid words, refused flags; `exit` ends the thread, `exit_group` the process |
 //! | refused           | a missing program, a directory, a file that is not ELF, an empty line and 33 arguments start nothing and leak nothing |
 //!
@@ -200,6 +201,7 @@ namespace Tests::User {
     runRefused();
     runFiles();
     runMemory();
+    runThreads();
     runNative();
     runStress();
   }
@@ -325,6 +327,61 @@ namespace Tests::User {
     }
 
     Drivers::Console::writeLine("user: mmtest passed, writing read-only, using unmapped, executing non-exec, touching PROT_NONE memory and overflowing the 8 MiB stack were killed, a double free was caught, no frame leaked, no TLB shootdown was sent");
+  }
+
+  /// Runs `/bin/threadtest`, whose threads count under a futex mutex, run
+  /// on two processors at once (`threadtest one-cpu` skips that with one
+  /// processor online), join through the cleared tid, keep their own FS
+  /// base and unmap a page a sibling mapped. Then three modes that must end
+  /// the whole process: a thread reading a page another thread unmaps
+  /// (SIGSEGV, through the TLB shootdown on several processors), a thread
+  /// calling `exit_group(42)` while its siblings sleep in futex WAIT (42),
+  /// and a thread writing to a read-only page while its siblings spin
+  /// (SIGSEGV). No frame, reservation or process slot may stay taken.
+  function runThreads(): void {
+    let freeBefore: u64 = Mm::Pmm::freeFrameCount();
+    let reservedBefore: u64 = Mm::Pmm::reservedFrameCount();
+    let slotsBefore: u64 = Proc::Process::usedSlots();
+    let oneCpu: boolean = Smp::processorCount() < 2;
+    let status: u64 = Proc::Programs::runNamed(oneCpu ? "threadtest one-cpu" : "threadtest");
+
+    if (status != 0) {
+      Drivers::Console::write("user test: threadtest failed check ");
+      Drivers::Console::writeDecimal(status);
+      Drivers::Console::writeLine("");
+      @panic("user test: threads of one process misbehaved");
+    }
+
+    expectThreadsEnded("threadtest unmap-read", KILLED_BY_SEGV);
+    expectThreadsEnded("threadtest exit-group", 42);
+    expectThreadsEnded("threadtest fault", KILLED_BY_SEGV);
+
+    if (Mm::Pmm::freeFrameCount() != freeBefore || Mm::Pmm::reservedFrameCount() != reservedBefore) {
+      @panic("user test: threadtest leaked frames or reservations");
+    }
+
+    if (Proc::Process::usedSlots() != slotsBefore) {
+      @panic("user test: threadtest left a process slot taken");
+    }
+
+    if (oneCpu) {
+      Drivers::Console::writeLine("user: threadtest passed with the overlap check skipped, one processor; a sibling reading an unmapped page, exit_group(42) and a fault in one thread ended the whole process, nothing leaked");
+    } else {
+      Drivers::Console::writeLine("user: threadtest passed, threads counted exactly under a futex mutex and ran on two processors at once; a sibling reading an unmapped page, exit_group(42) and a fault in one thread ended the whole process, nothing leaked");
+    }
+  }
+
+  /// Panics unless running `line` ends with `status`.
+  function expectThreadsEnded(line: str, status: u64): void {
+    let got: u64 = Proc::Programs::runNamed(line);
+
+    if (got != status) {
+      Drivers::Console::write(line);
+      Drivers::Console::write(" ended with ");
+      Drivers::Console::writeDecimal(got);
+      Drivers::Console::writeLine("");
+      @panic("user test: a threadtest mode did not end the whole process");
+    }
   }
 
   /// Runs `/bin/stress`: four processes work on the file tree and on memory
